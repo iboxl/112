@@ -1,19 +1,14 @@
 # this file is prepared for project 511
 # Created by iboxl
 
-import sys
-import itertools
-# from Architecture.Accelerator import CIM_acc
-from utils.Workload import WorkLoad, LoopNest
+from utils.Workload import WorkLoad
 from utils.Tools import *
 import gurobipy as gp
 from gurobipy import GRB, quicksum
 from utils.SolverCLL import Solver
-from Simulator.Calculator import calc_ds
 from Simulator.Simulax import tranSimulator
 from utils.GlobalUT import *
 from Architecture.ArchSpec import CIM_Acc
-from Architecture.Acc_1 import accelerator as acc_zz
 import pickle
 
 def SolveMapping(acc:CIM_Acc, ops:WorkLoad, outputdir:str):
@@ -27,7 +22,6 @@ def SolveMapping(acc:CIM_Acc, ops:WorkLoad, outputdir:str):
     solver = Solver(acc=acc, ops=ops, outputdir=outputdir)
 
     solver.run()
-    # exit('Debug Exit')
 
     if (solver.model.status == GRB.OPTIMAL or solver.model.status == GRB.SUBOPTIMAL or (solver.model.status == GRB.Status.TIME_LIMIT and solver.model.SolCount)) and FLAG.SIMU:
 
@@ -54,17 +48,12 @@ if __name__ == "__main__":
     Logger.setcfg(setcritical=False, setDebug=True, STD=False, file='419.log', nofile=False)
     cfg = get_ConfigFile('cim_template.cfg')
 
+    from Architecture.ZigzagAcc import accelerator as acc_zz
     accelerator = CIM_Acc(acc_zz.cores[0])
 
     # CONST.FLAG_OPT="Latency"
     # CONST.FLAG_OPT="EDP"
     ops = WorkLoad(cfg, loopDim={'R': 3, 'S': 3, 'C': 64, 'K':64, 'P': 56, 'Q': 56, 'G': 1, 'B': 1, 'H': 56, 'W': 56, 'Stride': 1, 'Padding': 1},
-    # ops = WorkLoad(cfg, loopDim={'R': 3, 'S': 3, 'C': 64, 'K':128, 'P': 28, 'Q': 28, 'G': 1, 'B': 1, 'H': 56, 'W': 56, 'Stride': 2, 'Padding': 1},
-    # ops = WorkLoad(cfg, loopDim={'R': 3, 'S': 3, 'C': 512, 'K':512, 'P': 7, 'Q': 7, 'G': 1, 'B': 1, 'H': 7, 'W': 7, 'Stride': 1, 'Padding': 1},
-    # ops = WorkLoad(cfg, loopDim={'R': 7, 'S': 7, 'C': 3, 'K':64, 'P': 112, 'Q': 112, 'G': 1, 'B': 1, 'H': 224, 'W': 224, 'Stride': 2, 'Padding': 3},
-    # ops = WorkLoad(cfg, loopDim={'R': 3, 'S': 3, 'C': 256, 'K': 512, 'P': 7, 'Q': 7, 'G': 1, 'B': None, 'H': 14, 'W': 14, 'Stride': 2, 'Padding': 1},
-    # ops = WorkLoad(cfg, loopDim={'R': 3, 'S': 3, 'C': 128, 'K': 128, 'P': 28, 'Q': 28, 'G': 1, 'B': None, 'H': 28, 'W': 28, 'Stride': 1, 'Padding': 1},
-    # ops = WorkLoad(cfg, loopDim={'R': 1, 'S': 1, 'C': 128, 'K': 256, 'P': 14, 'Q': 14, 'G': 1, 'B': None, 'H': 28, 'W': 28, 'Stride': 2, 'Padding': 0},
                             )
     lat, eng, edp, c_lat, c_eng, ds = SolveMapping(acc=accelerator, ops=ops, outputdir="./")
     Logger.critical(f"* * MIREDO-Running  * *   Latency:{lat}")

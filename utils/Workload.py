@@ -50,7 +50,7 @@ class Operands():
         return self
 
 class WorkLoad(): 
-    def __init__(self, config, loopDim):
+    def __init__(self, loopDim):
         self.weight = Operand()
         self.input = Operand()
         self.output = Operand()

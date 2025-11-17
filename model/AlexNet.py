@@ -6,9 +6,9 @@ import torch.nn.functional as F
 import onnx
 from torchvision.models import alexnet as alex_ori
 
-from torchvision.models import vgg19_bn as vgg
-from torchvision.models import resnet50 as res50
-from torchvision.models import googlenet as googlenet
+# from torchvision.models import vgg19_bn as vgg
+# from torchvision.models import resnet50 as res50
+# from torchvision.models import googlenet as googlenet
 
 class AlexNet(nn.Module):
     def __init__(self, num_classes=10, dropout = 0.5, **kwargs):
@@ -48,22 +48,22 @@ class AlexNet(nn.Module):
 
 
 if __name__ == "__main__":
-    # m = alex_ori().eval()
-    # dummy = torch.randn(1, 3, 227, 227)
-    # torch.onnx.export(m, dummy, "alexnet_1.onnx",
-    #               input_names=["input"], output_names=["output"],
-    #               dynamic_axes={"input":{0:"N"}, "output":{0:"N"}})
-    # onnx.save(onnx.shape_inference.infer_shapes(onnx.load("alexnet_1.onnx")),"alexnet.onnx")
-    # os.remove("alexnet_1.onnx")
+    m = alex_ori().eval()
+    dummy = torch.randn(1, 3, 227, 227)
+    torch.onnx.export(m, dummy, "alexnet_1.onnx",
+                  input_names=["input"], output_names=["output"],
+                  dynamic_axes={"input":{0:"N"}, "output":{0:"N"}})
+    onnx.save(onnx.shape_inference.infer_shapes(onnx.load("alexnet_1.onnx")),"alexnet.onnx")
+    os.remove("alexnet_1.onnx")
 
     # m = vgg().eval()
     # m = res50().eval()
-    m = googlenet().eval()
+    # m = googlenet().eval()
     
-    dummy = torch.randn(1, 3, 224, 224)
-    torch.onnx.export(m, dummy, "vgg_1.onnx",
-                  input_names=["input"], output_names=["output"],
-                  dynamic_axes={"input":{0:"N"}, "output":{0:"N"}})
-    onnx.save(onnx.shape_inference.infer_shapes(onnx.load("vgg_1.onnx")),"googlenet.onnx")
-    os.remove("vgg_1.onnx")
+    # dummy = torch.randn(1, 3, 224, 224)
+    # torch.onnx.export(m, dummy, "vgg_1.onnx",
+    #               input_names=["input"], output_names=["output"],
+    #               dynamic_axes={"input":{0:"N"}, "output":{0:"N"}})
+    # onnx.save(onnx.shape_inference.infer_shapes(onnx.load("vgg_1.onnx")),"googlenet.onnx")
+    # os.remove("vgg_1.onnx")
 

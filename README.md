@@ -1,4 +1,3 @@
-
 command "python run.py"
 
-command "python srun.py"
+"srun.py" is not yet ready to perform batch configuration and experimentation via config.

@@ -137,6 +137,8 @@ def manual_factorization(DimSize: int) -> List[int]:
     else:
         return best_factorization(DimSize, 5)[0]
 
+
+# FlexibleFactorization is used by MIREDO in ASPDAC2026
 def flexible_factorization(N: int) -> list[int]:
     """
     Adaptive factorisation for data-flow optimisation.
@@ -240,4 +242,6 @@ if __name__ == "__main__":
         print(f"{N}的最优分解因子为：")
         print(f"-----adaptive_factorization: {adaptive_factorization(N)[1]}")
         print(f"-----manual_factorization:   {manual_factorization(N)}")
+        
+        # FlexibleFactorization is used by MIREDO in ASPDAC2026
         print(f"-----best_factorization:     {flexible_factorization(N)}") 

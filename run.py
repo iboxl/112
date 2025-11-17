@@ -1,18 +1,23 @@
-# this file is prepared for project 511
+# this file is prepared for project 419
 # Created by iboxl
 
 import torch
 import torch.nn as nn
 from utils.Tools import *
-from Architecture.Accelerator import CIM_acc
 from Architecture.ArchSpec import CIM_Acc
-from Architecture.ZigzagAcc import accelerator as acc_zz
-from utils.Workload import Operands, WorkLoad
+from utils.Workload import Operands, WorkLoad, LoopNest
 from SolveMapping import SolveMapping
 import argparse
 from utils.GlobalUT import *
 import pickle
 import uuid
+from utils.UtilsFunction.OnnxParser import extract_loopdims
+from utils.UtilsFunction.ToolFunction import prepare_save_dir
+from utils.CompatibleZigzag import convert_zz_to_miredo, compare_ops_cme
+from Simulator.Simulax import tranSimulator
+import time, copy
+from importlib import import_module
+
 
 def get_Args():
     
@@ -22,12 +27,13 @@ def get_Args():
     parser.add_argument("--logger", nargs="?", const=True, default=False, help="Just print Logger")        # W.T.D. exchange ture and false
     parser.add_argument("--srun", nargs="?", const=True, default=False, help="batch srun with critical message")
     parser.add_argument("--noLogFile", nargs="?", const=True, default=False, help="No log file")
-    parser.add_argument("--EX", nargs="?", const=True, default=False, help="exchange input & weight")
-    parser.add_argument("--BM", nargs="?", const=True, default=False, help="using blocking Dim_M")
-    parser.add_argument("--RS", nargs="?", const=True, default=False, help="FLAG: Row traverse")
+    # parser.add_argument("--EX", nargs="?", const=True, default=False, help="exchange input & weight")
+    # parser.add_argument("--BM", nargs="?", const=True, default=False, help="using blocking Dim_M")
+    # parser.add_argument("--RS", nargs="?", const=True, default=False, help="FLAG: Row traverse")
+    parser.add_argument("--WS", nargs="?", const=True, default=False, help="FLAG: Weight stationary")
     parser.add_argument("--IS", nargs="?", const=True, default=False, help="FLAG: Buffer/Input stationary")
-    parser.add_argument("--OS", nargs="?", const=True, default=False, help="FLAG: Rejust dim/block to avoid overSize")
-    parser.add_argument("--GM", nargs="?", const=True, default=False, help="using blocking Dim_K with GAMMA")
+    # parser.add_argument("--OS", nargs="?", const=True, default=False, help="FLAG: Rejust dim/block to avoid overSize")
+    # parser.add_argument("--GM", nargs="?", const=True, default=False, help="using blocking Dim_K with GAMMA")
     parser.add_argument("--NoPreSolve", nargs="?", const=True, default=False, help="dont search presolve by alpha&beta")
     parser.add_argument("--SIMU", nargs="?", const=True, default=False, help="using simulator calc")
 
@@ -40,11 +46,15 @@ def get_Args():
     parser.add_argument('-opt', '--flag_opt', dest='opt', choices=["Latency", "Energy", "EDP"], required=False, 
                         type=str, default="Feasible", help = 'kind of model optimization: 0=Feasible solution, 1=MIN_latency  2=MIN_energy  3=MIN_EDP')
     parser.add_argument('-class', '--num_classes', dest='classes', choices=[10, 1000], required=False, 
-                        type=int, default=1000, help = '10=CIFAR 100=ImageNet')
+                        type=int, default=1000, help = '10=CIFAR 1000=ImageNet')
     parser.add_argument('-t', '--time', dest='time_limit', required=False, 
                         type=int, default=CONST.TIMELIMIT, help = 'time limitation for solving gurobi model')
-    parser.add_argument('-n', '--name', dest='dataflow_name', required=False, 
-                        type=str, default='ds', help = 'save dataflow in FigName')
+    # parser.add_argument('-n', '--name', dest='dataflow_name', required=False, 
+    #                     type=str, default='ds', help = 'save dataflow in FigName')
+    parser.add_argument('-o', '--outputdir', dest='output_dir', required=False, 
+                        type=str, default=f'test_{uuid.uuid1()}', help = 'save output files in folder')
+    parser.add_argument('-arch', '--architecture', dest='architecture', required=False, 
+                        type=str, default=f'ZigzagAcc', help = 'save output files in folder')
     args = parser.parse_args()
 
     return args
@@ -52,101 +62,166 @@ def get_Args():
 def __main__(**kwargs):
 
     args = get_Args()
+    start_time = time.time()
+    outFolder = os.path.join("output",args.output_dir)
+    prepare_save_dir(outFolder)
 
-    Logger.setcfg(setcritical=args.srun, setDebug=args.debug, STD=args.logger, file=args.log, nofile=args.noLogFile)
-    model = get_Model(args.model, num_classes=args.classes)
-    cfg = get_ConfigFile(args.cfg)
-    # accelerator = CIM_acc(cfg)
-    accelerator = CIM_Acc(acc_zz.cores[0])
-    ds_name = args.dataflow_name
+    Logger.setcfg(setcritical=args.srun, setDebug=args.debug, STD=args.logger, file=os.path.join(outFolder,args.log), nofile=args.noLogFile)
+
     CONST.FLAG_OPT              = args.opt
     CONST.TIMELIMIT             = args.time_limit
-    FLAG.ROW_STATIONARY         = args.RS
-    FLAG.OPS_EXCHANGE           = args.EX and (not args.RS)
-    FLAG.BLOCK_M                = args.BM and (not args.RS)
+    FLAG.WEIGHT_STATIONARY      = args.WS
     FLAG.INPUT_STATIONARY       = args.IS and (not args.RS)
-    FLAG.OUTPUT_STATIONARY      = args.OS and (not args.RS)
-    FLAG.GAMMA                  = args.GM and (not args.RS)
     FLAG.DEBUG_SIMU             = args.SIMU
     FLAG.PRESOLVE_SEARCH        = not args.NoPreSolve
     FLAG.DEBUG_PER_LAYER_DETAIL = False               # illegal Tmp setting
 
     Logger.info("* " * 50)
-    Logger.info(f"config={args.cfg}, model={args.model}")
-    Logger.info(f"flag_opt={args.opt}, Block_m={FLAG.BLOCK_M}, gamma={FLAG.GAMMA}, row_stationary={FLAG.ROW_STATIONARY}, "
-                #   + f"output_stationary={FLAG.OUTPUT_STATIONARY}, "
-                #   + f"ops_exchange={FLAG.OPS_EXCHANGE}, , output_stationary={FLAG.OUTPUT_STATIONARY}"
-                  )
+    Logger.info(f"model={args.model}, Architecture={args.architecture}, Weight_stationary={FLAG.WEIGHT_STATIONARY}" )
     Logger.info("* " * 50)
 
-    if args.classes == 10:
-        input_tensor = torch.randn(1, 3, 28, 28)
-    else:
-        input_tensor = torch.randn(1, 3, 224, 224)
+    model = f"model/{args.model}.onnx"
 
-    set_hook(model)
-    with torch.no_grad():
-        output = model(input_tensor)
+    convs, loopdims = extract_loopdims(model)
 
-    # debug_get_im2col_info(FLAG_DEBUG=True)
+    opt_flag = "latency" 
+    # opt_flag = "EDP" 
+    
+    compare_filePrefix = f"zzz_outputs/{opt_flag}_{args.model}_{args.architecture}"
+    if os.path.isfile(f"{compare_filePrefix}.pickle") == False:     # Zigzag-CME is not exist, running ZZ-opt
+        Logger.info("Running Zigzag to generate CME-compared")
+        start_time_zz = time.time()
+        from zigzag.api import get_hardware_performance_zigzag
+        energy, latency, cmeAll = get_hardware_performance_zigzag(
+            workload = model,
+            accelerator = f"Architecture.{args.architecture}",
+            mapping = "Config.zigzag_mapping",
+            opt=opt_flag,
+            dump_filename_pattern=f"{compare_filePrefix}.json",
+            pickle_filename=f"{compare_filePrefix}.pickle"
+        )
+        end_time_zz = time.time()
+        Logger.critical(f"Zigzag solve cost time: {end_time_zz - start_time_zz}")     
+    with open(f"{compare_filePrefix}.pickle", 'rb') as fp:
+        cmes= pickle.load(fp)
+
+    assert len(convs) == len(loopdims)
+
+    cache = {}
+
+    CONST.FLAG_OPT="Latency"
+    latency_zz, energy_zz, latency_mi, energy_mi = 0, 0, 0, 0
+    
+    acc_template = import_module(f"Architecture.{args.architecture}").accelerator
+    accelerator_eval  = CIM_Acc(acc_template.cores[0])
+
+    for i, (Conv, loopdim) in enumerate(zip(convs, loopdims)):
+        # if i==5 :
+        #     pass
+        # else:
+        #     continue
+
+        Logger.info('\n\n'+'* '*20+f"Layer {i}"+' *'*20)
+        ops = WorkLoad(loopDim=loopdim)
+        Logger.info(ops)
+
+        key = tuple(sorted(loopdim.items()))
+        pstr, cache_flag = "", False
+
+        try:                                   
+            (l_solver, e_solver, l_simu, e_simu, l_zz, e_zz) = cache[key]                  
+            Logger.info("Get Result From Cache")
+            cache_flag = True
+        except KeyError:              
+            outputdir_layer = os.path.join(outFolder,Conv)
+            prepare_save_dir(outputdir_layer)
+            Logger.changeFile(new_file = os.path.join(outputdir_layer,"Evaluation-Layer.log"))
+            Logger.info(ops)
+            Logger.info('\n' + '* '*30 + '\n')
+
+            cme_compare = None
+            cme_compare = next(c for c in cmes if compare_ops_cme(loopDim=loopdim, cme=c))
+            assert cme_compare is not None     
+            cache_flag = False
+
+            accelerator = copy.deepcopy(accelerator_eval)
+
+            loops = LoopNest(acc=accelerator,ops=ops)
+            loops = convert_zz_to_miredo(loops=loops, cme=cme_compare)
+            loops.usr_defined_double_flag[accelerator.Macro2mem][1] = accelerator.double_Macro
+
+            try:
+                simu = tranSimulator(acc=accelerator, ops=ops, dataflow=loops)
+                l_zz, e_zz = simu.run()
+            except ValueError:  
+                Logger.error('Wrong Match') 
+                Logger.changeFile(new_file = os.path.join(outFolder,args.log))
+                Logger.error('Wrong Match') 
+                continue
+            PD_Z = simu.PD
+
+            l_zz_modeling = simu.LModeling()
+            # simu.idealExec()
+            
+        # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -#   
+            accelerator = copy.deepcopy(accelerator_eval)
+            newdim = copy.deepcopy(loopdim)
+            for dChar in ['P','Q','H','W']: #newdim[dChar] += (loopdim[dChar] % 2)
+                if loopdim[dChar] % 2==1 and loopdim[dChar]>15:
+                    newdim[dChar] += 1
+            l_solver, e_solver, edp_solver, l_simu, e_simu, PD_M = SolveMapping(acc=accelerator, ops=WorkLoad(loopDim=newdim), outputdir=outputdir_layer)
+            cache[key] = (l_solver, e_solver, l_simu, e_simu, l_zz, e_zz)
+            
+            pstr += "\n-------- MemHierarchy ----- DB_M -- DB_Z --- PowerRate --- Power_M - Power_E -----\n"
+            for m in range(1,accelerator.Num_mem):
+                dm, dz = PD_M.doubleFlag, PD_Z.doubleFlag
+                pstr += '-'*8 + f" {accelerator.mem2dict(m):<15}: [ {dm[m][0]} {dm[m][1]} {dm[m][2]} | {dz[m][0]} {dz[m][1]} {dz[m][2]} ]  "
+                memCost_rate = '-'*8 if PD_Z.memCost[m]==0 else round(PD_M.memCost[m]/PD_Z.memCost[m]*100,2)
+                pstr += f"{memCost_rate:>8}%   ({PD_M.memCost[m]:.2e} / {PD_Z.memCost[m]:.2e}) pJ" + '\n'
+            pstr += '\n-------- Multiply & ADD : -----------------  '
+            pstr += f"{round(PD_M.macEnergy/PD_Z.macEnergy*100,2):>8}%   ({PD_M.macEnergy:.2e} / {PD_Z.macEnergy:.2e}) pJ" + '\n\n'
+
+            pstr += f"Dynamic Power: {round(PD_M.dynamic_power/PD_Z.dynamic_power*100,2):>8}%   ({PD_M.dynamic_power:.2e} / {PD_Z.dynamic_power:.2e}) pJ" + '\n'
+            pstr += f"Leakage Power: {round(PD_M.leakage_power/PD_Z.leakage_power*100,2):>8}%   ({PD_M.leakage_power:.2e} / {PD_Z.leakage_power:.2e}) pJ" + '\n'
+            pstr += f"On-chip Power: {round(PD_M.dynamic_power_onChip/PD_Z.dynamic_power_onChip*100,2):>8}%   ({PD_M.dynamic_power_onChip:.2e} / {PD_Z.dynamic_power_onChip:.2e}) pJ" + '\n'
+
+        pstr += '\n'
+        pstr += f"* * * Zigzag-Running  * * *  Latency:{round(l_zz,3):<15}, Energy:{round(e_zz,3):<20}, EDP:{round(l_zz *e_zz,3):.5e}, LModeling:{round(l_zz_modeling,3):<15}" + '\n'
+        pstr += f"* * * MIREDO-Running  * * *  Latency:{round(l_simu,3):<15}, Energy:{round(e_simu,3):<20}, EDP:{round(l_simu*e_simu,3):.5e}" + '\n'
+        pstr += f"MIP Solver Accuracy of Layer: {round(l_simu/l_solver*100,2)}%    (S){round(l_simu,3):<15} (M){round(l_solver,3):<15} " + '\n'
+
+        rstr = f"Optimization Of Layer-{i}: Latency-({round(l_simu/l_zz*100,2)}%), Energy-({round(e_simu/e_zz*100,2)}%), EDP-({round((l_simu*e_simu)/(l_zz * e_zz)*100,2)}%)"
+        
+        if cache_flag == False:
+            Logger.info(pstr)
+            Logger.critical(rstr)
+            Logger.changeFile(new_file = os.path.join(outFolder,args.log))
+        
+        latency_mi += l_simu
+        energy_mi  += e_simu
+        latency_zz += l_zz
+        energy_zz  += e_zz
+
+        Logger.info(pstr)
+        Logger.critical(rstr)
+
+    Logger.info("* " * 50)
+    Logger.info('\n\n'+'* '*20+f"The WHOLE Model"+' *'*20)
+    Logger.info(f"* * * Zigzag-Running  * * *  Latency:{round(latency_zz,3):<15}, Energy:{round(energy_zz,3):<15}, EDP:{round(latency_zz * energy_zz,3):.5e}")
+    Logger.info(f"* * * MIREDO-Running  * * *  Latency:{round(latency_mi,3):<15}, Energy:{round(energy_mi,3):<15}, EDP:{round(latency_mi * energy_mi,3):.5e}")
+    Logger.info(f"* * *  Optimization  * * *   Latency:{round(latency_mi/latency_zz*100,2)}%, Energy:{round(energy_mi/energy_zz*100,2)}%, EDP:{round((latency_mi * energy_mi)/(latency_zz * energy_zz)*100,2)}%")
     # exit()
 
-    res_l_eachLayer, res_e_eachLayer, res_p_eachLayer = [[0 for _ in range(len(conv_im2col_info))]for __ in range(3)]
-    cal_l, cal_e = 0, 0
-    cache = {}
-    dataflow = []
-
-    for idx, (layer_name, info) in enumerate(conv_im2col_info.items()):
-        ops = WorkLoad(cfg, loopDim={'R': info['R'], 'S': info['S'], 'C': info['C'], 'K': info['K'], 
-                                      'P': info['P'], 'Q': info['Q'], 'G': info['G'], 'B': info['B'],
-                                      'H': info['H'], 'W': info['W'], 'Stride': info['Stride'], 'Padding': info['Padding']}, 
-                        min_factor=2, max_factor=7)
-        # Logger.critical(ops)
-        # continue
-
-        r,s,c,k,p,q,g = [info['R'], info['S'], info['C'], info['K'], info['P'], info['Q'], info['G']]
-        Logger.info('\n'+'* '*20+f"Layer {idx}"+' *'*20)
-        if (r,s,c,k,p,q,g) in cache:
-            Logger.debug(f"Get Cost Result From Cache")
-            [res_latency, res_energy, res_edp, res_cal_l, res_cal_e, res_ds] = cache[(r,s,c,k,p,q,g)]
-        else:
-            lat,eng,edp,c_lat,c_eng,ds = SolveMapping(acc=accelerator, ops=ops)
-            res_latency, res_energy, res_edp, res_cal_l, res_cal_e, res_ds = [lat, eng, edp, c_lat, c_eng, ds]
-            cache[(r,s,c,k,p,q,g)] = [res_latency, res_energy, res_edp, res_cal_l, res_cal_e, res_ds]
-        dataflow.append(res_ds)
-            
-        Logger.info(f"Layer {idx}: latency = {int(res_latency)}, energy = {round(res_energy, 1)}, EDP = {round(res_edp, 1)}")
-        if FLAG.DEBUG_SIMU:
-            Logger.info(f"Layer {idx}: cal_lat = {int(res_cal_l)}, cal_en = {round(res_cal_e, 1)}," + 
-                        f" c_P = {round(res_cal_l*res_cal_e/CONST.SCALINGFACTOR, 1)}")
-        res_l_eachLayer[idx] = res_latency
-        res_e_eachLayer[idx] = res_energy
-        res_p_eachLayer[idx] = res_edp
-        cal_l += res_cal_l
-        cal_e += res_cal_e
-    res_l = sum(res_l_eachLayer)
-    res_e = sum(res_e_eachLayer)
-    res_p = res_l * res_e
-                                                # res_energy Unit=nj    = 1e-9j  
-                                                # res_latency Unit      = cycle
-                                                # Power Unit            = mw
-    power = (res_e * CONST.SCALINGFACTOR * 1e-12 * 500 * 1e6 / res_l) * 1e3
-    Logger.debug(f"scaling factor: {CONST.SCALINGFACTOR}")
-    Logger.critical(f"# # # # # MIP latency={round(res_l,1)}, energy={round(res_e,3)}, EDP={round(res_p,3)}")
-    if FLAG.DEBUG_SIMU:
-        Logger.critical(f"# # # # # SIM latency={round(cal_l,1)}, energy={round(cal_e,3)}, EDP={round(cal_l*cal_e,3)}")
-    Logger.critical(f"# # # # # power={round(power, 3)}mw"+'\n')
-    
-    # 将列表保存到文件
-    if ds_name != 'ds':
-        # file_name = 'log/dataflow/' + ds_name + f"_{uuid.uuid4()}.pkl"
-        file_name = 'log/dataflow/' + ds_name + ".pkl"
-        with open(file_name, 'wb') as file:
-            pickle.dump(dataflow, file)
-    
+        # res_energy Unit=nj    = 1e-9j  
+        # res_latency Unit      = cycle
+        # Power Unit            = mw
+    # power = (res_e * CONST.SCALINGFACTOR * 1e-12 * 500 * 1e6 / res_l) * 1e3
+    # Logger.debug(f"scaling factor: {CONST.SCALINGFACTOR}")
+    end_time = time.time()
+    Logger.critical(f"Solving The Whole Model Cost: {round(end_time - start_time,1)}s")
 
     Logger.recover_stdout()
-
-
+    if os.path.isfile("pcacti_report.txt"):
+        os.remove("pcacti_report.txt")                                  # remove cacti output file
 
 __main__()
