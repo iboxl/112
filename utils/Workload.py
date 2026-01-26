@@ -1,6 +1,6 @@
 # this file is prepared for project 026
 # Created by iboxl
-# Modified in project 419
+# Modified in project 112
 
 import torch 
 import torch.nn as nn
@@ -9,6 +9,8 @@ from utils.UtilsFunction.ToolFunction import getDivisors, getPrimeFactors
 from Architecture.ArchSpec import CIM_Acc
 from dataclasses import dataclass
 from utils.factorization import flexible_factorization
+from utils.GlobalUT import *
+
 
 
 class Operand():
@@ -59,16 +61,16 @@ class WorkLoad():
         for key in loop_dim_keys:
             setattr(self, key, loopDim[key])
 
-        self.dim2Dict = ['-','R', 'S', 'P', 'Q', 'C', 'K']
+        self.dim2Dict = ['-','R', 'S', 'P', 'Q', 'C', 'K', 'G']
         loopDim['-'] = 1
         self.dim2bound = [loopDim[xx] for xx in self.dim2Dict]
 
         self.Num_dim = len(self.dim2Dict)
 
         self.relevance = [      # relevance[t][dim]
-            [0,1,1,1,1,1,0],      # Input
-            [0,1,1,0,0,1,1],      # weight
-            [0,0,0,1,1,0,1]       # Output
+            [0,1,1,1,1,1,0,1],      # Input
+            [0,1,1,0,0,1,1,1],      # weight
+            [0,0,0,1,1,0,1,1]       # Output
         ]
 
         self.Factors = [flexible_factorization(_) for _ in self.dim2bound]
@@ -98,7 +100,6 @@ class WorkLoad():
         except ValueError:
             # 如果字符不在列表中，返回一个错误提示或特殊值
             raise ValueError("Error dim char")
-            return -1
 
     def __repr__(self):
         attrs = ['R', 'S', 'C', 'K', 'P', 'Q', 'G', 'B', 'H', 'W', 'Stride', 'Padding']
@@ -135,9 +136,6 @@ class LoopNest():
                 raise ValueError(f"Illegal dimension {self.ops.dim2Dict[mapping.dim]} bound in LoopNest")
             unrollingSize[mapping.dim] *= mapping.dimSize
 
-        for i,_ in enumerate(self.ops.dim2Dict):
-            if abs(unrollingSize[i]-self.ops.dim2bound[i]) > 1:
-                raise ValueError(f"Dimension {self.ops.dim2Dict[i]}({self.ops.dim2bound[i]}) unrolling not fully({unrollingSize[i]}) in LoopNest")
             
         if len(self.usr_defined_double_flag) != self.acc.Num_mem+1:
             raise ValueError("Mismatch with usr_difined_double_flag")
@@ -192,6 +190,13 @@ class LoopNest():
             if tm[i].mem[1] == self.acc.Macro2mem:
                 xMem[i,1] = 0
         self.xMem = xMem
+
+        for i,_ in enumerate(self.ops.dim2Dict):
+            if abs(unrollingSize[i]-self.ops.dim2bound[i]) > 1:
+                Logger.warning(f"Dataflow LoopNest used greedy mapping ({unrollingSize[i]}) for dimension {self.ops.dim2Dict[i]}({self.ops.dim2bound[i]})")  
+            if unrollingSize[i] < self.ops.dim2bound[i]:
+                Logger.error(self.__repr__())
+                raise ValueError(f"Dimension {self.ops.dim2Dict[i]}({self.ops.dim2bound[i]}) unrolling not fully({unrollingSize[i]}) in LoopNest")
 
     def __repr__(self) -> str:
         pstr = ""

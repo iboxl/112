@@ -114,7 +114,7 @@ class CIM_Acc():                         # WTD. init CIM_Acc from zigzag | Yaml 
             if opShared > 1:
                 self.shareMemory[m] = True
             elif opShared == 1:
-                self.shareMemory[m] = True
+                self.shareMemory[m] = False
             else:
                 raise ValueError(f"Memory {self._mem2dict[m]} have no operands.")
 
@@ -145,21 +145,39 @@ class CIM_Acc():                         # WTD. init CIM_Acc from zigzag | Yaml 
         
         self.dimX = MacroSpec.bl_dim_size                               # IN-parallel
         self.dimY = MacroSpec.wl_dim_size                               # OUT-parallel
+
+        '''
+        Not use self.fanout
+        '''
         # self.fanout = ['PLACEHOLD', 1, self.Num_core, 1, 1, self.dimX*self.dimY, self.dimX*self.dimY, self.dimX*self.dimY]    
-        self.fanout = [[1 for op in range(3)] for i in range(self.Num_mem)]
-        #  ['Dram'1, 'Global_buffer'2, 'Output_buffer'3, 'Input_buffer'4, 'OReg'5, 'IReg'6, 'Macro'7]
-        self.fanout[self.Global2mem][0] = self.Num_core
-        self.fanout[self.Global2mem][1] = self.Num_core*self.dimX * self.dimY
-        self.fanout[self.Global2mem][2] = self.Num_core
-        self.fanout[3][2] = self.dimY
-        self.fanout[4][0] = self.dimX
-        self.fanout[self.IReg2mem][2] = self.dimY
-        self.fanout[self.OReg2mem][1] = self.dimX
+        # self.fanout = [[1 for op in range(3)] for i in range(self.Num_mem)]
+        # #  ['Dram'1, 'Global_buffer'2, 'Output_buffer'3, 'Input_buffer'4, 'OReg'5, 'IReg'6, 'Macro'7]
+        # self.fanout[self.Global2mem][0] = self.Num_core
+        # self.fanout[self.Global2mem][1] = self.Num_core*self.dimX * self.dimY
+        # self.fanout[self.Global2mem][2] = self.Num_core
+        # self.fanout[3][2] = self.dimY
+        # self.fanout[4][0] = self.dimX
+        # self.fanout[self.IReg2mem][2] = self.dimY
+        # self.fanout[self.OReg2mem][1] = self.dimX
 
         self.SpUnrolling = [self.Num_core, self.dimX, self.dimY]
         self.Num_SpUr = len(self.SpUnrolling)
 
-        self.Num_compartment = MacroSpec.hd_param["group_depth"]
+        '''
+        ------------- mappingRule ------------------ WTD, Dim-Group always 0 / mapping configuration
+        'spatial_mapping_hint': {'D1': ['K'], 'D3': ['K', 'OX', 'OY'], 'D2': ['B', 'K', 'G', 'OX', 'OY', 'C', 'FX', 'FY']}, 
+        '''
+        self.mappingRule = [
+            # self.dim2Dict = ['-','R', 'S', 'P', 'Q', 'C', 'K', 'G']
+            [0, 0, 0, 1, 1, 0, 1, 0],  # 轴0允许展开P, Q, K
+            [0, 1, 1, 0, 0, 1, 0, 0],  # 轴1允许展开R, S, C
+            [0, 0, 0, 0, 0, 0, 1, 0]   # 轴2允许展开K
+        ]
+
+        '''
+        Not use self.Num_compartment, memSize has considered compartment in zigzag (self.memSize.append(inst.size)). Dimension can be mapped into macro in temporal loop 
+        '''
+        # self.Num_compartment = MacroSpec.hd_param["group_depth"]
         
         # self.unrollingArray = {}
         # for op in range(3):

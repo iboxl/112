@@ -21,11 +21,16 @@ def build_shape_dict(onnx_graph):
 def loopdims_from_conv_node(node, shape_dict, initializer_dict):
     """提取单个 Conv 节点的 loopDim"""
     W = initializer_dict[node.input[1]]          # 权重：K,Cg,R,S
-    K, Cg, R, S = W.dims
+    Kg, Cg, R, S = W.dims
     group   = next((a.i   for a in node.attribute if a.name == "group"),   1)
     strides = next((a.ints for a in node.attribute if a.name == "strides"), [1, 1])
     pads    = next((a.ints for a in node.attribute if a.name == "pads"),    [0, 0, 0, 0])
-    C = Cg * group
+    # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+    """ 分组卷积的输入输出通道处理，将分组卷积视为 Group 个完全独立的、重复的子任务 """
+    """ 为了方便与Zigzag对齐 将输出通道直接按组切分 不与pytorch的表示方法保持一致 """
+    C = Cg
+    K = Kg // group
+    # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
     X, Y = node.input[0], node.output[0]
     in_shape  = shape_dict.get(X, [None]*4)
     out_shape = shape_dict.get(Y, [None]*4)
@@ -68,7 +73,7 @@ def parse_single_onnx(fp: str):
             continue
         dims = loopdims_from_conv_node(node, shapes, inits)
         lname = f"Conv_{conv_idx}_{dims['R']}_{dims['S']}_{dims['P']}_" \
-                f"{dims['Q']}_{dims['C']}_{dims['K']}"
+                f"{dims['Q']}_{dims['C']}_{dims['K']}_{dims['G']}"
         layer_names.append(lname)
         loopdims.append(dims)
         conv_idx += 1

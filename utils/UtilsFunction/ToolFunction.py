@@ -1,11 +1,14 @@
 # this file is prepared for project 026
 # Created by iboxl
+# Modified in project 112
 
 import os
 import configparser
 import torch.nn as nn
 import sympy
 import pathlib
+import itertools
+from functools import reduce
 
 func_conv_info = {}
 def _getDim(input_shape, weight_shape, stride=1, pad=0):
@@ -345,7 +348,8 @@ def getPrimeFactors(list_factors):
 
     # 将去重后的集合转换为列表并排序
     sorted_list = sorted(unique_factors)
-    return sorted_list
+    # return sorted_list
+    return sorted_list[1:] if sorted_list[0] == 1 else sorted_list
 
 def prepare_save_dir(save_dir: str) -> pathlib.Path:
     """
@@ -367,4 +371,78 @@ def prepare_save_dir(save_dir: str) -> pathlib.Path:
     else:
         p.mkdir(parents=True, exist_ok=False)  # 递归创建
     return p
+
+def get_Spatial_Unrolling(dim, mappingRule, SpUnrolling, MIN_UTIL_COEFFICIENT:float = 0):
+    """
+    dim: 维度大小列表
+    mappingRule: [轴][维度] 的映射矩阵
+    SpUnrolling: 各轴最大展开限制
+    MIN_UTIL_COEFFICIENT: 最小资源占用量
+
+    # generator = solve_unrolling(dim, mappingRule, SpUnrolling)
+    # for scheme in generator:
+    #     ...
+    """
+    num_dims = len(dim)
+    num_axes = len(mappingRule)
+    
+    # --- 第1步：生成每个维度各自的合法“列”方案 ---
+    # 结果结构：all_dim_candidates[d] = [[u0, u1, u2], [u0', u1', u2']...]
+    all_dim_candidates = []
+    
+    for d_idx, d_val in enumerate(dim):
+        # 1.1 找出该维度允许映射到的轴
+        active_axes = [u for u in range(num_axes) if mappingRule[u][d_idx] == 1]
+        
+        # 1.2 获取该维度的所有因子 (作为可能的展开大小)
+        factors = getDivisors(d_val)
+        
+        candidates = []
+        # 生成因子的笛卡尔积。例如该维度映射到2个轴，就找 (f1, f2)
+        # 只有当 mappingRule 允许该维度映射到某轴时，才从因子中取值，否则强制为1
+        for p in itertools.product(factors, repeat=len(active_axes)):
+            # 检查A：展开因子的乘积必须能整除维度大小
+            total_unroll = reduce(lambda x, y: x*y, p, 1)
+            if d_val % total_unroll != 0:
+                continue
+                
+            # 构造完整的列向量 (对应每个轴的展开大小)
+            col = [1] * num_axes
+            is_valid_candidate = True
+            
+            for i, axis_idx in enumerate(active_axes):
+                val = p[i]
+                # 检查B (单维度预剪枝)：如果单维度的因子已经超过了该轴的总限制，直接丢弃
+                if val > SpUnrolling[axis_idx]:
+                    is_valid_candidate = False
+                    break
+                col[axis_idx] = val
+            
+            if is_valid_candidate:
+                candidates.append(col)
+        
+        all_dim_candidates.append(candidates)
+
+    # --- 第2步：组合所有维度 (笛卡尔积) ---
+    # itertools.product 会从每个 all_dim_candidates[i] 中选一个 col 拼成完整方案
+    for combination in itertools.product(*all_dim_candidates):
+        # combination 结构是 tuple(col_dim0, col_dim1, ...)
+        # 我们需要按轴汇总，检查总乘积是否超标
+        
+        # 转置矩阵：将 (维度, 轴) 变为 (轴, 维度)
+        # zip(*combination) 实现了矩阵转置
+        scheme_by_axis = list(zip(*combination)) 
+        
+        # --- 第3步：全局合法性检查 ---
+        valid_scheme = True
+        for u in range(num_axes):
+            # 计算该轴上所有维度展开因子的乘积
+            axis_total_prod = reduce(lambda x, y: x*y, scheme_by_axis[u], 1)
+            if axis_total_prod > SpUnrolling[u] or axis_total_prod < SpUnrolling[u] * MIN_UTIL_COEFFICIENT:
+                valid_scheme = False
+                break
+        
+        if valid_scheme:
+            # 转换回 list of lists 格式以便输出
+            yield [list(col) for col in scheme_by_axis]
 

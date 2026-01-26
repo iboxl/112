@@ -129,7 +129,7 @@ def convert_ZZMP_to_loopMP(
     """
     # ---------------- 0. 参数 / 默认 -----------------
     if dim_code is None:
-        dim_code = {"FX": 1, "FY": 2, "OX": 3, "OY": 4, "C": 5, "K": 6}
+        dim_code = {"FX": 1, "FY": 2, "OX": 3, "OY": 4, "C": 5, "K": 6, "G":7}
 
     if len(mappingArray) != len(array_row_order):
         raise ValueError("mappingArray 行数必须等于 array_row_order 长度")
@@ -250,7 +250,7 @@ def normalize_spatial_mapping(mapping):
 def convert_zz_to_miredo(loops:LoopNest, cme=None):
     
     temporal_mapping_dic=cme.temporal_mapping.mapping_dic_origin
-    spatial_mapping_dict=cme.spatial_mapping.mapping_dict_origin
+    spatial_mapping_dict=cme.spatial_mapping_int.mapping_dict_origin
     double_buffer_flag=cme.double_buffer_true
 
     # top_r_loop_size=cme.temporal_mapping.top_r_loop_size
@@ -291,11 +291,12 @@ def compare_ops_cme(loopDim, cme):
         loopDim['P'] == cme_dim['OX'] and
         loopDim['Q'] == cme_dim['OY'] and
         loopDim['C'] == cme_dim['C']  and
-        loopDim['K'] == cme_dim['K']
+        loopDim['K'] == cme_dim['K']  and
+        loopDim['G'] == cme_dim['G']
     ) 
 
 def get_dim_from_cme(cme):
-    # f"Conv_{conv_idx}_
+    # Not Use
     dims = cme.layer.loop_dim_size
     loop_dim = f"{dims['FX']}_{dims['FY']}_{dims['OX']}_{dims['OY']}_{dims['C']}_{dims['K']}"
     if len(loop_dim) < 6:

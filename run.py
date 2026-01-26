@@ -42,7 +42,7 @@ def get_Args():
     parser.add_argument('-m', '--model', dest='model', required=False, 
                         type=str, default='resnet18', help = 'NN model Name')
     parser.add_argument('-log', '--log_file', dest='log', required=False, 
-                        type=str, default='419.log', help = 'Log file Name')
+                        type=str, default='112.log', help = 'Log file Name')
     parser.add_argument('-opt', '--flag_opt', dest='opt', choices=["Latency", "Energy", "EDP"], required=False, 
                         type=str, default="Feasible", help = 'kind of model optimization: 0=Feasible solution, 1=MIN_latency  2=MIN_energy  3=MIN_EDP')
     parser.add_argument('-class', '--num_classes', dest='classes', choices=[10, 1000], required=False, 
@@ -116,7 +116,7 @@ def __main__(**kwargs):
     accelerator_eval  = CIM_Acc(acc_template.cores[0])
 
     for i, (Conv, loopdim) in enumerate(zip(convs, loopdims)):
-        # if i==5 :
+        # if i == 9 :
         #     pass
         # else:
         #     continue
@@ -153,10 +153,10 @@ def __main__(**kwargs):
             try:
                 simu = tranSimulator(acc=accelerator, ops=ops, dataflow=loops)
                 l_zz, e_zz = simu.run()
-            except ValueError:  
+            except ValueError as e:  
                 Logger.error('Wrong Match') 
                 Logger.changeFile(new_file = os.path.join(outFolder,args.log))
-                Logger.error('Wrong Match') 
+                Logger.error(e) 
                 continue
             PD_Z = simu.PD
 
@@ -169,7 +169,7 @@ def __main__(**kwargs):
             for dChar in ['P','Q','H','W']: #newdim[dChar] += (loopdim[dChar] % 2)
                 if loopdim[dChar] % 2==1 and loopdim[dChar]>15:
                     newdim[dChar] += 1
-            l_solver, e_solver, edp_solver, l_simu, e_simu, PD_M = SolveMapping(acc=accelerator, ops=WorkLoad(loopDim=newdim), outputdir=outputdir_layer)
+            l_solver, e_solver, edp_solver, l_simu, e_simu, PD_M = SolveMapping(acc=accelerator, ops=WorkLoad(loopDim=newdim), cycBound=l_zz, outputdir=outputdir_layer)
             cache[key] = (l_solver, e_solver, l_simu, e_simu, l_zz, e_zz)
             
             pstr += "\n-------- MemHierarchy ----- DB_M -- DB_Z --- PowerRate --- Power_M - Power_E -----\n"
@@ -205,6 +205,7 @@ def __main__(**kwargs):
         Logger.info(pstr)
         Logger.critical(rstr)
 
+    # exit()
     Logger.info("* " * 50)
     Logger.info('\n\n'+'* '*20+f"The WHOLE Model"+' *'*20)
     Logger.info(f"* * * Zigzag-Running  * * *  Latency:{round(latency_zz,3):<15}, Energy:{round(energy_zz,3):<15}, EDP:{round(latency_zz * energy_zz,3):.5e}")

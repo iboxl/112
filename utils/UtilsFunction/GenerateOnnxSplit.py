@@ -1,6 +1,11 @@
+# this file is prepared for project 511
+# Created by iboxl
+
 import os
 import onnx
 from onnx import helper, TensorProto, shape_inference
+from utils.UtilsFunction.ToolFunction import prepare_save_dir
+
 
 def safe_load_onnx(fp):
     """
@@ -46,7 +51,7 @@ def split_conv_layers(
     """Split each **Conv** layer in an ONNX model into a standalone ONNX file and
     name the file using the convention::
 
-        Conv_<idx>_<R>_<S>_<P>_<Q>_<C>_<K>.onnx
+        Conv_<idx>_<R>_<S>_<P>_<Q>_<C>_<K>_<G>.onnx
 
     where
         * ``idx`` — discovery index (1‑based)
@@ -54,6 +59,7 @@ def split_conv_layers(
         * ``P, Q`` — output feature‑map height/width
         * ``C`` — number of input channels
         * ``K`` — number of output channels (filters)
+        * ``G`` — number of groups
 
     Parameters
     ----------
@@ -69,6 +75,23 @@ def split_conv_layers(
         raise FileNotFoundError(f"Input model '{input_model_path}' not found.")
 
     os.makedirs(output_dir, exist_ok=True)
+
+    # =========================================================
+    # Generate a file explaining the naming conventions.
+    # =========================================================
+    readme_path = os.path.join(outputdir, "Conv_idx_R_S_P_Q_C_K_G.txt")
+    with open(readme_path, "w", encoding='utf-8') as f:
+        f.write("Filename Format:\n")
+        f.write("Conv_<idx>_<R>_<S>_<P>_<Q>_<C>_<K>_<G>.onnx\n\n")
+        f.write("Legend:\n")
+        f.write("  idx : Layer Index (discovery order)\n")
+        f.write("  R   : Kernel Height\n")
+        f.write("  S   : Kernel Width\n")
+        f.write("  P   : Output Height\n")
+        f.write("  Q   : Output Width\n")
+        f.write("  C   : Input Channels (per group)\n")
+        f.write("  K   : Output Channels\n")
+        f.write("  G   : Groups\n")
 
     model = safe_load_onnx(input_model_path)
     graph = model.graph
@@ -143,7 +166,16 @@ def split_conv_layers(
         weight_dims = initializer_map[w_name].dims  # (K, C, R, S)
         if len(weight_dims) != 4:
             raise RuntimeError("Expected 4‑D weight tensor for Conv")
-        K, C, R, S = weight_dims
+        K_ori, C, R, S = weight_dims
+
+        # --------------------------------------------------------------------
+        #  Derive group_attr <G>  
+        # --------------------------------------------------------------------
+        group_attr = next((a for a in node.attribute if a.name == "group"), None)
+        G = helper.get_attribute_value(group_attr) if group_attr else 1
+
+        """ 为了方便与Zigzag对齐 将输出通道直接按组切分 不与pytorch的表示方法保持一致 """
+        K = K_ori // G
 
         # Output dims; may contain unknowns if shape inference failed ----------
         out_vi = next((vi for vi in new_model.graph.output if vi.name == out_name), None)
@@ -156,7 +188,7 @@ def split_conv_layers(
         else:
             P = Q = "x"
 
-        file_name = f"Conv-{conv_count}_{R}_{S}_{P}_{Q}_{C}_{K}.onnx"
+        file_name = f"Conv-{conv_count}_{R}_{S}_{P}_{Q}_{C}_{K}_{G}.onnx"
         out_path = os.path.join(output_dir, file_name)
         onnx.save(new_model, out_path)
 
@@ -167,12 +199,12 @@ def split_conv_layers(
 
 
 if __name__ == "__main__":
-    from utils.UtilsFunction.ToolFunction import prepare_save_dir
-    import argparse
 
-    inputdir = "model/resnet18.onnx"
-    outputdir = 'model/Res18'
+    inputdir = "model/googlenet.onnx"
+    outputdir = 'model/GoogleNet'
     prepare_save_dir(outputdir)
 
 
     split_conv_layers(inputdir, outputdir)
+    
+# python -m utils.UtilsFunction.GenerateOnnxSplit

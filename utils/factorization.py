@@ -1,3 +1,6 @@
+# this file is prepared for project 511
+# Created by iboxl
+
 from functools import lru_cache
 import math
 from typing import List, Tuple, Optional
@@ -20,6 +23,7 @@ def prime_factors(n: int) -> List[int]:
         factors.append(n)
     return factors                      # 升序
 
+# Not use
 @lru_cache(maxsize=None)
 def divisors(x: int) -> Tuple[int, ...]:
     ds = []
@@ -30,6 +34,7 @@ def divisors(x: int) -> Tuple[int, ...]:
                 ds.append(x // i)
     return tuple(sorted(ds))
 
+# Not use
 def reachable_products(factors: Tuple[int, ...]) -> int:
     """返回可达循环尺寸个数（去 1）"""
     n, prods = len(factors), set()
@@ -54,6 +59,7 @@ def reachable_products(factors: Tuple[int, ...]) -> int:
     dfs(0, [])
     return len(prods)
 
+# Not use
 # ----------------------------------------------------------------------
 # 2) 固定 M 求最优分解（无 1）
 # ----------------------------------------------------------------------
@@ -86,6 +92,7 @@ def best_factorization(N: int, M: int) -> Tuple[List[int], int]:
         raise ValueError(f"No factorization of {N} into {M} factors ≥2.")
     return list(best_seq), best_key[0]
 
+# Not use
 # ----------------------------------------------------------------------
 # 3) 自适应选择 M  (gamma 饱和式为默认)
 # ----------------------------------------------------------------------
@@ -131,6 +138,7 @@ def adaptive_factorization(
             raise RuntimeError("No feasible factorization found.")
         return best_M, best_seq, best_cover, cover_max
 
+# Not use
 def manual_factorization(DimSize: int) -> List[int]:
     if DimSize <= 128:
         return adaptive_factorization(DimSize=DimSize)[1]
@@ -240,6 +248,8 @@ if __name__ == "__main__":
     #     print(f"{N} 在 {M} 个因子下的最优分解：{seq}, 覆盖范围:{cover}, 最大范围:{cover_max}")
     for N in [112,1,3,7,14,28,56,64,128,256,512]:
         print(f"{N}的最优分解因子为：")
+        if N > 1:
+            print(f"-----prime_factorization: {prime_factors(N)}")
         print(f"-----adaptive_factorization: {adaptive_factorization(N)[1]}")
         print(f"-----manual_factorization:   {manual_factorization(N)}")
         
