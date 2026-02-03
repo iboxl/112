@@ -77,8 +77,6 @@ class WorkLoad():
 
         self.Divisors = [getDivisors(d) for d in self.dim2bound]
 
-        self.PrimeFactors = getPrimeFactors(self.Factors)
-
         self.size = [_ for _ in range(3)]
         # self.size[0] = (self.P + self.R - 1) * (self.Q + self.S - 1) * self.C
         # self.size[0] = ((self.P-1)*self.Stride+self.R) * ((self.Q-1)*self.Stride+self.S) * self.C      

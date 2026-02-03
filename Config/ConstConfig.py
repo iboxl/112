@@ -29,6 +29,8 @@ class _const_num_config():
 
         self.UTIL_COEFFICIENT = 0.5
 
+        self.EPS = 1e-5
+
 class _constraint_flag_config():
     def __init__(self):
         self.DOUBLE_BUFFER = False                          # 和 FLAG_PIPELINE_LOAD_AND_COMPUTATION 的联系、相关性

@@ -235,7 +235,7 @@ def make_hook_linear(layer_idx_name):
             }
     return hook_fn_linear
 
-def _prime_factors(n):
+def getPrimeFactors(n):
     factors = []
     for prime in sympy.primerange(2, n+1):
         while n % prime == 0:
@@ -281,7 +281,7 @@ def combine_factors(factors, min_factor, max_factor):
             combined_factors.append(f)
         else:
             # 分解为因子
-            sub_factors = _prime_factors(f)
+            sub_factors = getPrimeFactors(f)
             # 递归合并这些因子
             sub_combined = combine_factors(sub_factors, min_factor, max_factor)
             combined_factors.extend(sub_combined)
@@ -294,7 +294,7 @@ def combine_factors(factors, min_factor, max_factor):
             if sympy.isprime(f):
                 final_factors.append(f)
             else:
-                sub_factors = _prime_factors(f)
+                sub_factors = getPrimeFactors(f)
                 sub_combined = combine_factors(sub_factors, min_factor, max_factor)
                 final_factors.extend(sub_combined)
         else:
@@ -308,7 +308,7 @@ def prime_factorization_list(numbers, min_factor=2, max_factor=100):
         # 检查是否为素数，且大于 8
         if sympy.isprime(number) and number > max_factor:
             number += 1
-        factors = _prime_factors(number)
+        factors = getPrimeFactors(number)
         combined = combine_factors(factors, min_factor, max_factor)
         result.append(combined)
     return result
@@ -328,7 +328,7 @@ def getDivisors(N: int) -> list[int]:
         i += 1
     return small_divs + large_divs[::-1]
 
-def getPrimeFactors(list_factors):
+def getUniqueFactors(list_factors):
     """
     从嵌套列表 nested_list 中提取所有整数，去重并升序排序后返回。
 

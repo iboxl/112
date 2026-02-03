@@ -151,6 +151,7 @@ def __main__(**kwargs):
             loops.usr_defined_double_flag[accelerator.Macro2mem][1] = accelerator.double_Macro
 
             try:
+                Logger.info("Running: Zigzag-in-MIREDO-Simulator - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -")
                 simu = tranSimulator(acc=accelerator, ops=ops, dataflow=loops)
                 l_zz, e_zz = simu.run()
             except ValueError as e:  
@@ -169,7 +170,7 @@ def __main__(**kwargs):
             for dChar in ['P','Q','H','W']: #newdim[dChar] += (loopdim[dChar] % 2)
                 if loopdim[dChar] % 2==1 and loopdim[dChar]>15:
                     newdim[dChar] += 1
-            l_solver, e_solver, edp_solver, l_simu, e_simu, PD_M = SolveMapping(acc=accelerator, ops=WorkLoad(loopDim=newdim), cycBound=l_zz, outputdir=outputdir_layer)
+            l_solver, e_solver, edp_solver, l_simu, e_simu, PD_M = SolveMapping(acc=accelerator, ops=WorkLoad(loopDim=newdim), cycBound=l_zz*2, outputdir=outputdir_layer)
             cache[key] = (l_solver, e_solver, l_simu, e_simu, l_zz, e_zz)
             
             pstr += "\n-------- MemHierarchy ----- DB_M -- DB_Z --- PowerRate --- Power_M - Power_E -----\n"

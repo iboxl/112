@@ -201,6 +201,12 @@ class CIM_Acc():                         # WTD. init CIM_Acc from zigzag | Yaml 
         self.SpUrArray[2,2] = 3
 
 
+        self.minBW = [1e9, 1e9, 1e9]
+        for m in range(1,self.Num_mem):
+            for op, op_name in enumerate(['I','W','O']):
+                if self.mappingArray[op][m]:
+                    self.minBW[op] = min(self.minBW[op], self.bw[m])
+
         # self.bw[self.IReg2mem] *= self.dimX
         # self.memSize[self.IReg2mem] *= self.dimX 
         # self.bw[self.OReg2mem] *= self.dimY 

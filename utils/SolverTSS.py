@@ -14,15 +14,17 @@ from utils.GlobalUT import *
 from utils.UtilsFunction.SolverFunction import *
 from utils.UtilsFunction.CostFunction import _Cost_model
 from utils.factorization import flexible_factorization
-from utils.UtilsFunction.ToolFunction import getDivisors, getPrimeFactors
+from utils.UtilsFunction.ToolFunction import getDivisors, getUniqueFactors
+import copy
 
 class Solver():
-    def __init__(self, acc:CIM_Acc, ops:WorkLoad, tu, su, cycBound, outputdir=None):
-        self.acc = acc
-        self.ops = ops
+    def __init__(self, acc:CIM_Acc, ops:WorkLoad, tu, su, latency_lb, latency_ub, outputdir=None):
+        self.acc = copy.deepcopy(acc)
+        self.ops = copy.deepcopy(ops)
         self.tu = tu
         self.su = su
-        self.cycBound = cycBound
+        self.lb_latency = latency_lb
+        self.ub_latency = max(latency_lb, latency_ub)
         self.outputdir = outputdir
 
         self.model = gp.Model(name="MIREDO")
@@ -33,10 +35,10 @@ class Solver():
         self.model.setParam('Cuts', 2)
         # self.model.setParam('Threads', psutil.cpu_count(logical=False))
         self.model.setParam('Threads', psutil.cpu_count())
-        self.model.setParam('FeasibilityTol', 1e-4)                  # 降低容忍度容易导致求解失败
-        self.model.setParam('IntFeasTol', 1e-4)                      # 通过SIMU避免最终结果的差异
+        # self.model.setParam('FeasibilityTol', 1e-4)                  # 降低容忍度容易导致求解失败
+        # self.model.setParam('IntFeasTol', 1e-4)                      # 通过SIMU避免最终结果的差异
         self.model.setParam('Presolve', 2)
-        # self.model.setParam('DualReductions', 0)          # dont
+        self.model.setParam('DualReductions', 0)          # dont
         self.model.setParam('Heuristics', 0.2)
         # self.model.setParam('BranchDir', -1)
         # self.model.setParam('VarBranch', 1)  
@@ -48,6 +50,12 @@ class Solver():
         self.model.setParam("ScaleFlag", 2)                          # 用于调节数值比例问题coefficient range
         self.model.setParam("NumericFocus", 2)
         # self.model.setParam('MIPGap', 0.015)
+
+        # self.model.setParam('FlowCoverCuts', 2)
+        # self.model.setParam('Method', 3)
+        # self.model.setParam('NoRelHeuristic', 1)
+
+        self.ExpOption = "FuncPieces=-2 FuncPieceError=0.01"
         
         self.model.setParam('LogFile',os.path.join(self.outputdir, "Solver.log"))
 
@@ -59,10 +67,13 @@ class Solver():
         self.result = {}
         self.dataflow = {}
 
+        self.maxTrans = max([math.ceil(x / y) for x, y in zip(acc.memSize, acc.bw)][2:] + [math.ceil(x * 8 / y) for x, y in zip(ops.size, acc.minBW)])
+
     def run(self):
-        Logger.debug("Start Running MIP Solver")
+        Logger.info('* '*20 + "Start Running MIP Solver" + ' *'*20)
+        Logger.critical(f"Most UB is {self.ub_latency}")
         model = self.model
-        COST = _Cost_model(acc=self.acc, model=self.model, ops=self.ops)
+        # COST = _Cost_model(acc=self.acc, model=self.model, ops=self.ops)
         acc:CIM_Acc = self.acc
         ops:WorkLoad = self.ops
         factors = [flexible_factorization(_) for _ in self.tu]
@@ -70,48 +81,18 @@ class Solver():
         tempDivisors = [getDivisors(d) for d in self.tu]
         # tempDivisors = ops.Divisors
 
-        primefactor = getPrimeFactors(factors)
+        uniqueFactor = getUniqueFactors(factors)
 
         Num_Loops = sum(len(f) for f in factors[1:ops.Num_dim] if f != [1])
 
         MAX_FACTOR = max([item for sublist in factors for item in sublist])
         MAX_SIZE = self.ops.size
 
-        # Logger.critical(f"factors: {[f'{ops.dim2Dict[d]}:{factors[d]}' for d in range(1, ops.Num_dim) ]}")
-
         ###########################################################  Variable & Constant & Constraints  ##################################################################
         # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -# 
         logF = {(d, f): math.log(factors[d][f]) 
                         for d in range(1, ops.Num_dim) 
                         for f in range(len(factors[d]))}
-
-        # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -# 
-        # indic_factor2SpUr = gp.tupledict()          # indic_factor2SpUr[d,f,u] = {0,1}
-        # "spatial_mapping_hint": {"D1": ["K"], "D3": ["K", "OX", "OY"]},
-        
-        
-        # mappingRule = acc.mappingRule
-
-        # for d in range(1, ops.Num_dim):
-        #     if factors[d] == [1]:     # DimSize == 1
-        #         for u in range(acc.Num_SpUr):
-        #             indic_factor2SpUr[d,0,u] = 0
-        #         continue
-        #     for f in range(len(factors[d])):
-        #         for u in range(acc.Num_SpUr):
-        #             if mappingRule[u][d] == 1:
-        #                 indic_factor2SpUr[d,f,u] = model.addVar(vtype=GRB.BINARY, name=f"indic_factor2SpUr_({ops.dim2Dict[d]},{f},{u})")
-        #             else:
-        #                 indic_factor2SpUr[d,f,u] = 0
-        
-        # for u in range(acc.Num_SpUr):
-        #     sum_u = 0
-        #     for d in range(1, ops.Num_dim):
-        #         if factors[d] == [1]:      # DimSize == 1
-        #             continue
-        #         if mappingRule[u][d] == 1:
-        #             for f in range(len(factors[d])):
-        #                 sum_u += logF[d,f]*indic_factor2SpUr[d,f,u]
 
         #     if u == 0:
         #         model.addConstr(sum_u == math.log(acc.SpUnrolling[u]), name=f"C_Spatial_Unrolling_({u})")
@@ -246,10 +227,10 @@ class Solver():
                                                     
         indic_loop2Factor = gp.tupledict()
         for i in range(Num_Loops):
-            for p in range(len(primefactor)):
+            for p in range(len(uniqueFactor)):
                 indic_loop2Factor[i,p] = model.addVar(vtype=GRB.BINARY, name=f"Indic_loop2Factor_({i},{p})")
-            model.addConstr(quicksum(indic_loop2Factor[i,p] for p in range(len(primefactor))) == 1)
-            model.addConstr(quicksum(primefactor[p] * indic_loop2Factor[i,p] for p in range(len(primefactor))) == loop2Factor[i])
+            model.addConstr(quicksum(indic_loop2Factor[i,p] for p in range(len(uniqueFactor))) == 1)
+            model.addConstr(quicksum(uniqueFactor[p] * indic_loop2Factor[i,p] for p in range(len(uniqueFactor))) == loop2Factor[i])
 
         # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -# 
 
@@ -365,8 +346,6 @@ class Solver():
                             
                         for u in range(acc.Num_SpUr):
                             if m <= acc.SpUrArray[u,op]:
-                                # for f in range(len(factors[d])):
-                                #     dimOfTile += logF[d,f]*indic_factor2SpUr[d,f,u]
                                 dimOfTile += math.log(self.su[u][d])
                                 
                         model.addConstr(lg_dimOfTile[m,op,d] == dimOfTile, 
@@ -376,253 +355,191 @@ class Solver():
         spur = {}
         for m in range(1,acc.Num_mem):
             for d in range(1, ops.Num_dim):
-                spur[m,d] = 1
-                for u in range(acc.Num_SpUr):
-                    if m <= acc.SpUrArray[u,op]:
-                        spur[m,d] *= self.su[u][d]
+                for op, op_name in enumerate(['I','W','O']):
+                    spur[m,op,d] = 1
+                    for u in range(acc.Num_SpUr):
+                        if m <= acc.SpUrArray[u,op]:
+                            spur[m,op,d] *= self.su[u][d]
 
         exp_dataVolume = gp.tupledict()     # exp_dataVolume[m,op]
+        lg_dataVolume = gp.tupledict()     # lg_dataVolume[m,op]
         for m in range(2,acc.Num_mem):      # Sufficient off-chip capacity [1-Dram]
 
             op, op_name = 0,'I'     # Input
-            if acc.mappingArray[op][m]:
-                exp_dataVolume[m,op] = model.addVar(lb=1, ub=min(acc.memSize[m]//acc.precision[m,op], MAX_SIZE[op]), vtype=GRB.INTEGER, name=f"exp_dataVolume_({acc.mem2dict(m)},{op_name})")
-                indic_sum, sum_volume = 0, 0
+            if acc.mappingArray[op][m] == True:
                 sum_r, sum_s, sum_c, sum_p, sum_q, = 0,0,0,0,0
-                for i_r, r in enumerate(tempDivisors[ops.dict2Dim('R')]):
-                    for i_s, s in enumerate(tempDivisors[ops.dict2Dim('S')]):
-                        for i_c, c in enumerate(tempDivisors[ops.dict2Dim('C')]):
-                            for i_p, p in enumerate(tempDivisors[ops.dict2Dim('P')]):
-                                for i_q, q in enumerate(tempDivisors[ops.dict2Dim('Q')]):
-                                    r = r * spur[m,ops.dict2Dim('R')]
-                                    s = s * spur[m,ops.dict2Dim('S')]
-                                    c = c * spur[m,ops.dict2Dim('C')]
-                                    p = p * spur[m,ops.dict2Dim('P')]
-                                    q = q * spur[m,ops.dict2Dim('Q')]
-                                    if ops.Stride >= r:
-                                        h = p * r
-                                    else:
-                                        h = (p-1) * ops.Stride + r
-                                    if ops.Stride >= s:
-                                        w = q * s
-                                    else:
-                                        w = (q-1) * ops.Stride + s
-                                    # op_volume = h*w*c
-                                    op_volume = min(h,ops.H) * min(w,ops.W) *c
-                                    if op_volume <= acc.memSize[m] // acc.precision[m,op]:
-                                        indic_opVolume = model.addVar(vtype=gp.GRB.BINARY, name=f"Indic_opVolume_({acc.mem2dict(m)},{op_name},{i_r},{i_s},{i_c},{i_p},{i_q})")
-                                        sum_volume += indic_opVolume*op_volume
-                                        sum_r += indic_opVolume*math.log(r)
-                                        sum_s += indic_opVolume*math.log(s)
-                                        sum_c += indic_opVolume*math.log(c)
-                                        sum_p += indic_opVolume*math.log(p)
-                                        sum_q += indic_opVolume*math.log(q)
-                                        indic_sum += indic_opVolume
-                model.addConstr(indic_sum == 1, name=f"C_Uniqueness_IndicSum_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(sum_r == lg_dimExistMem[m,op,ops.dict2Dim('R')], name=f"C_Uniqueness_IndicSumR_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(sum_s == lg_dimExistMem[m,op,ops.dict2Dim('S')], name=f"C_Uniqueness_IndicSumS_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(sum_c == lg_dimExistMem[m,op,ops.dict2Dim('C')], name=f"C_Uniqueness_IndicSumC_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(sum_p == lg_dimExistMem[m,op,ops.dict2Dim('P')], name=f"C_Uniqueness_IndicSumP_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(sum_q == lg_dimExistMem[m,op,ops.dict2Dim('Q')], name=f"C_Uniqueness_IndicSumQ_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(exp_dataVolume[m,op] == sum_volume, name=f"sum_dataVolume_({acc.mem2dict(m)},{op_name})")
+                indic_sum, sum_dim_h = 0, 0
+                for i_r, rd in enumerate(tempDivisors[ops.dict2Dim('R')]):
+                    for i_p, pd in enumerate(tempDivisors[ops.dict2Dim('P')]):
+                        r = rd * spur[m,op,ops.dict2Dim('R')]
+                        p = pd * spur[m,op,ops.dict2Dim('P')]
+                        if ops.Stride >= r:
+                            h = p * r
+                        else:
+                            h = (p-1) * ops.Stride + r
+                        h = min(h,ops.H)
+                        indic_dim = model.addVar(vtype=gp.GRB.BINARY, name=f"Indic_dim_Height_({acc.mem2dict(m)},{op_name},{i_r},{i_p})")
+                        sum_dim_h += indic_dim * math.log(h)
+                        sum_r += indic_dim * math.log(r)
+                        sum_p += indic_dim * math.log(p)
+                        indic_sum += indic_dim
+                model.addConstr(indic_sum == 1, name=f"C_Uniqueness_IndicSum_Height_({acc.mem2dict(m)},{op_name})")
+                # model.addConstr(sum_r == lg_dimExistMem[m,op,ops.dict2Dim('R')], name=f"C_Uniqueness_IndicSumR_({acc.mem2dict(m)},{op_name})")
+                # model.addConstr(sum_p == lg_dimExistMem[m,op,ops.dict2Dim('P')], name=f"C_Uniqueness_IndicSumP_({acc.mem2dict(m)},{op_name})")
+                model.addRange(sum_r - lg_dimExistMem[m,op,ops.dict2Dim('R')], -CONST.EPS, CONST.EPS, name=f"C_Uniqueness_IndicSumR_({acc.mem2dict(m)},{op_name})")
+                model.addRange(sum_p - lg_dimExistMem[m,op,ops.dict2Dim('P')], -CONST.EPS, CONST.EPS, name=f"C_Uniqueness_IndicSumP_({acc.mem2dict(m)},{op_name})")
 
+                indic_sum, sum_dim_w = 0, 0
+                for i_s, sd in enumerate(tempDivisors[ops.dict2Dim('S')]):
+                    for i_q, qd in enumerate(tempDivisors[ops.dict2Dim('Q')]):
+                        s = sd * spur[m,op,ops.dict2Dim('S')]
+                        q = qd * spur[m,op,ops.dict2Dim('Q')]
+                        if ops.Stride >= s:
+                            w = q * s
+                        else:
+                            w = (q-1) * ops.Stride + s
+                        w = min(w,ops.W)
+                        indic_dim = model.addVar(vtype=gp.GRB.BINARY, name=f"Indic_dim_Width_({acc.mem2dict(m)},{op_name},{i_s},{i_q})")
+                        sum_dim_w += indic_dim * math.log(w)
+                        sum_s += indic_dim * math.log(s)
+                        sum_q += indic_dim * math.log(q)
+                        indic_sum += indic_dim
+                model.addConstr(indic_sum == 1, name=f"C_Uniqueness_IndicSum_Width_({acc.mem2dict(m)},{op_name})")
+                # model.addConstr(sum_s == lg_dimExistMem[m,op,ops.dict2Dim('S')], name=f"C_Uniqueness_IndicSumS_({acc.mem2dict(m)},{op_name})")
+                # model.addConstr(sum_q == lg_dimExistMem[m,op,ops.dict2Dim('Q')], name=f"C_Uniqueness_IndicSumQ_({acc.mem2dict(m)},{op_name})")
+                model.addRange(sum_s - lg_dimExistMem[m,op,ops.dict2Dim('S')], -CONST.EPS, CONST.EPS, name=f"C_Uniqueness_IndicSumS_({acc.mem2dict(m)},{op_name})")
+                model.addRange(sum_q - lg_dimExistMem[m,op,ops.dict2Dim('Q')], -CONST.EPS, CONST.EPS, name=f"C_Uniqueness_IndicSumQ_({acc.mem2dict(m)},{op_name})")
+
+                lg_dataVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=min(acc.memSize[m]//acc.precision[m,op], math.log(ops.size[op])),
+                                                    name=f"lg_dataVolume_({acc.mem2dict(m)},{op_name})")
+                model.addConstr(lg_dataVolume[m,op] == sum_dim_h + sum_dim_w + lg_dimExistMem[m,op,ops.dict2Dim('C')],
+                                    name=f"C_lg_dataVolume_({acc.mem2dict(m)},{op_name})")
+                if acc.shareMemory[m] == True:
+                    exp_dataVolume[m,op] = model.addVar(lb=0, ub=min(acc.memSize[m]//acc.precision[m,op], MAX_SIZE[op]), vtype=GRB.CONTINUOUS,
+                                                         name=f"exp_dataVolume_({acc.mem2dict(m)},{op_name})")
+                    model.addGenConstrExp(xvar=lg_dataVolume[m,op], yvar=exp_dataVolume[m,op], options=self.ExpOption, name=f"C_exp_dataVolume_({acc.mem2dict(m)},{op_name})")
+                        
             op, op_name = 1,'W'     # Weight
-            if acc.mappingArray[op][m]:
-                exp_dataVolume[m,op] = model.addVar(lb=1, ub=min(acc.memSize[m]//acc.precision[m,op], MAX_SIZE[op]), vtype=GRB.INTEGER, name=f"exp_dataVolume_({acc.mem2dict(m)},{op_name})")
-                indic_sum, sum_volume = 0, 0
-                sum_r, sum_c, sum_k, sum_s = 0,0,0,0
-                for i_r, r in enumerate(tempDivisors[ops.dict2Dim('R')]):
-                    for i_s, s in enumerate(tempDivisors[ops.dict2Dim('S')]):
-                        for i_c, c in enumerate(tempDivisors[ops.dict2Dim('C')]):
-                            for i_k, k in enumerate(tempDivisors[ops.dict2Dim('K')]):
-                                r = r * spur[m,ops.dict2Dim('R')]
-                                s = s * spur[m,ops.dict2Dim('S')]
-                                c = c * spur[m,ops.dict2Dim('C')]
-                                k = k * spur[m,ops.dict2Dim('K')]
-                                op_volume = r*s*c*k
-                                if op_volume <= acc.memSize[m] // acc.precision[m,op]:
-                                    indic_opVolume = model.addVar(vtype=gp.GRB.BINARY, name=f"Indic_opVolume_({acc.mem2dict(m)},{op_name},{i_r},{i_s},{i_c},{i_k})")
-                                    sum_volume += indic_opVolume*op_volume
-                                    sum_r += indic_opVolume*math.log(r)
-                                    sum_s += indic_opVolume*math.log(s)
-                                    sum_c += indic_opVolume*math.log(c)
-                                    sum_k += indic_opVolume*math.log(k)
-                                    indic_sum += indic_opVolume
-                model.addConstr(indic_sum == 1, name=f"C_Uniqueness_IndicSum_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(sum_r == lg_dimExistMem[m,op,ops.dict2Dim('R')], name=f"C_Uniqueness_IndicSumR_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(sum_s == lg_dimExistMem[m,op,ops.dict2Dim('S')], name=f"C_Uniqueness_IndicSumS_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(sum_c == lg_dimExistMem[m,op,ops.dict2Dim('C')], name=f"C_Uniqueness_IndicSumC_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(sum_k == lg_dimExistMem[m,op,ops.dict2Dim('K')], name=f"C_Uniqueness_IndicSumK_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(exp_dataVolume[m,op] == sum_volume, name=f"sum_dataVolume_({acc.mem2dict(m)},{op_name})")
+            if acc.mappingArray[op][m] == True:
+                lg_dataVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=min(acc.memSize[m]//acc.precision[m,op], math.log(ops.size[op])),
+                                                name=f"lg_dataVolume_({acc.mem2dict(m)},{op_name})")
+                model.addConstr(lg_dataVolume[m,op] == quicksum(lg_dimExistMem[m,op,ops.dict2Dim(dChar)] for dChar in ['R','S','C','K']),
+                                name=f"C_lg_dataVolume_({acc.mem2dict(m)},{op_name})")
+                if acc.shareMemory[m] == True:
+                    exp_dataVolume[m,op] = model.addVar(lb=0, ub=min(acc.memSize[m]//acc.precision[m,op], MAX_SIZE[op]), vtype=GRB.CONTINUOUS,
+                                                        name=f"exp_dataVolume_({acc.mem2dict(m)},{op_name})")
+                    model.addGenConstrExp(xvar=lg_dataVolume[m,op], yvar=exp_dataVolume[m,op], options=self.ExpOption, name=f"C_exp_dataVolume_({acc.mem2dict(m)},{op_name})")
 
             op, op_name = 2,'O'     # Output
-            if acc.mappingArray[op][m]:
-                exp_dataVolume[m,op] = model.addVar(lb=1, ub=min(acc.memSize[m]//acc.precision[m,op], MAX_SIZE[op]), vtype=GRB.INTEGER, name=f"exp_dataVolume_({acc.mem2dict(m)},{op_name})")
-                indic_sum, sum_volume = 0, 0
-                sum_p, sum_q, sum_k = 0,0,0
-                for i_p, p in enumerate(tempDivisors[ops.dict2Dim('P')]):
-                    for i_q, q in enumerate(tempDivisors[ops.dict2Dim('Q')]):
-                        for i_k, k in enumerate(tempDivisors[ops.dict2Dim('K')]):
-                            p = p * spur[m,ops.dict2Dim('P')]
-                            q = q * spur[m,ops.dict2Dim('Q')]
-                            k = k * spur[m,ops.dict2Dim('K')]
-                            op_volume = p*q*k
-                            if op_volume <= acc.memSize[m] // acc.precision[m,op]:
-                                indic_opVolume = model.addVar(vtype=gp.GRB.BINARY, name=f"Indic_opVolume_({acc.mem2dict(m)},{op_name},{i_p},{i_q},{i_k})")
-                                sum_volume += indic_opVolume*op_volume
-                                sum_p += indic_opVolume*math.log(p)
-                                sum_q += indic_opVolume*math.log(q)
-                                sum_k += indic_opVolume*math.log(k)
-                                indic_sum += indic_opVolume
-                model.addConstr(indic_sum == 1, name=f"C_Uniqueness_IndicSum_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(sum_p == lg_dimExistMem[m,op,ops.dict2Dim('P')], name=f"C_Uniqueness_IndicSumP_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(sum_q == lg_dimExistMem[m,op,ops.dict2Dim('Q')], name=f"C_Uniqueness_IndicSumQ_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(sum_k == lg_dimExistMem[m,op,ops.dict2Dim('K')], name=f"C_Uniqueness_IndicSumK_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(exp_dataVolume[m,op] == sum_volume, name=f"sum_dataVolume_({acc.mem2dict(m)},{op_name})")
+            if acc.mappingArray[op][m] == True:
+                lg_dataVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=min(acc.memSize[m]//acc.precision[m,op], math.log(ops.size[op])),
+                                                    name=f"lg_dataVolume_({acc.mem2dict(m)},{op_name})")
+                model.addConstr(lg_dataVolume[m,op] == quicksum(lg_dimExistMem[m,op,ops.dict2Dim(dChar)] for dChar in ['P','Q','K']),
+                                    name=f"C_lg_dataVolume_({acc.mem2dict(m)},{op_name})")
+                if acc.shareMemory[m] == True:
+                    exp_dataVolume[m,op] = model.addVar(lb=0, ub=min(acc.memSize[m]//acc.precision[m,op], MAX_SIZE[op]), vtype=GRB.CONTINUOUS,
+                                                        name=f"exp_dataVolume_({acc.mem2dict(m)},{op_name})")
+                    model.addGenConstrExp(xvar=lg_dataVolume[m,op], yvar=exp_dataVolume[m,op], options=self.ExpOption, name=f"C_exp_dataVolume_({acc.mem2dict(m)},{op_name})")
 
-        exp_transVolume = gp.tupledict()    # exp_transVolume[m,op]
-        tile_offChip = gp.tupledict()       # tile_offChip[op]
+        transVolume = gp.tupledict()    # exp_transVolume[m,op]
+        lg_transVolume = gp.tupledict()     # lg_transVolume[m,op]
         for m in range(1,acc.Num_mem):      
 
             op, op_name = 0,'I'     # Input
             if acc.mappingArray[op][m]:
-                exp_transVolume[m,op] = model.addVar(lb=1, ub=min(acc.memSize[m]//acc.precision[m,op], MAX_SIZE[op]), vtype=GRB.INTEGER, name=f"exp_transVolume_({acc.mem2dict(m)},{op_name})")
-                indic_sum, sum_tile = 0, 0
-                lg_sum_tile = 0
                 sum_r, sum_s, sum_c, sum_p, sum_q, = 0,0,0,0,0
-                for i_r, r in enumerate(tempDivisors[ops.dict2Dim('R')]):
-                    for i_s, s in enumerate(tempDivisors[ops.dict2Dim('S')]):
-                        for i_c, c in enumerate(tempDivisors[ops.dict2Dim('C')]):
-                            for i_p, p in enumerate(tempDivisors[ops.dict2Dim('P')]):
-                                for i_q, q in enumerate(tempDivisors[ops.dict2Dim('Q')]):
-                                    r = r * spur[m,ops.dict2Dim('R')]
-                                    s = s * spur[m,ops.dict2Dim('S')]
-                                    c = c * spur[m,ops.dict2Dim('C')]
-                                    p = p * spur[m,ops.dict2Dim('P')]
-                                    q = q * spur[m,ops.dict2Dim('Q')]
-                                    if ops.Stride >= r:
-                                        h = p * r
-                                    else:
-                                        h = (p-1) * ops.Stride + r
-                                    if ops.Stride >= s:
-                                        w = q * s
-                                    else:
-                                        w = (q-1) * ops.Stride + s
-                                    op_volume = min(h,ops.H) * min(w,ops.W) *c
-                                    if op_volume <= acc.memSize[m] // acc.precision[m,op]:
-                                        indic_opVolume = model.addVar(vtype=gp.GRB.BINARY, name=f"Indic_tileVolume_({acc.mem2dict(m)},{op_name},{i_r},{i_s},{i_c},{i_p},{i_q})")
-                                        sum_tile += indic_opVolume*op_volume
-                                        if m == 1:
-                                            lg_sum_tile += indic_opVolume*math.log(op_volume)
-                                        sum_r += indic_opVolume*math.log(r)
-                                        sum_s += indic_opVolume*math.log(s)
-                                        sum_c += indic_opVolume*math.log(c)
-                                        sum_p += indic_opVolume*math.log(p)
-                                        sum_q += indic_opVolume*math.log(q)
-                                        indic_sum += indic_opVolume
-                model.addConstr(indic_sum == 1, name=f"C_Uniqueness_IndicTile_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(sum_r == lg_dimOfTile[m,op,ops.dict2Dim('R')], name=f"C_Uniqueness_IndicTileR_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(sum_s == lg_dimOfTile[m,op,ops.dict2Dim('S')], name=f"C_Uniqueness_IndicTileS_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(sum_c == lg_dimOfTile[m,op,ops.dict2Dim('C')], name=f"C_Uniqueness_IndicTileC_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(sum_p == lg_dimOfTile[m,op,ops.dict2Dim('P')], name=f"C_Uniqueness_IndicTileP_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(sum_q == lg_dimOfTile[m,op,ops.dict2Dim('Q')], name=f"C_Uniqueness_IndicTileQ_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(exp_transVolume[m,op] == sum_tile, name=f"sum_transVolume_({acc.mem2dict(m)},{op_name})")
-                if m == 1:
-                    tile_offChip[op] = model.addVar(lb=1,ub=math.log(MAX_SIZE[op]),vtype=GRB.CONTINUOUS, name=f"tile_offChip_({op_name})")
-                    model.addConstr(tile_offChip[op] == lg_sum_tile)
+
+                indic_sum, sum_dim_h = 0, 0
+                for i_r, rd in enumerate(tempDivisors[ops.dict2Dim('R')]):
+                    for i_p, pd in enumerate(tempDivisors[ops.dict2Dim('P')]):
+                        r = rd * spur[m,op,ops.dict2Dim('R')]
+                        p = pd * spur[m,op,ops.dict2Dim('P')]
+                        if ops.Stride >= r:
+                            h = p * r
+                        else:
+                            h = (p-1) * ops.Stride + r
+                        h = min(h,ops.H)
+                        indic_dim = model.addVar(vtype=gp.GRB.BINARY, name=f"Indic_dim_TileHeight_({acc.mem2dict(m)},{op_name},{i_r},{i_p})")
+                        sum_dim_h += indic_dim * math.log(h)
+                        sum_r += indic_dim * math.log(r)
+                        sum_p += indic_dim * math.log(p)
+                        indic_sum += indic_dim
+                model.addConstr(indic_sum == 1, name=f"C_Uniqueness_IndicTile_Height_({acc.mem2dict(m)},{op_name})")
+                # model.addConstr(sum_r == lg_dimOfTile[m,op,ops.dict2Dim('R')], name=f"C_Uniqueness_IndicTileR_({acc.mem2dict(m)},{op_name})")
+                # model.addConstr(sum_p == lg_dimOfTile[m,op,ops.dict2Dim('P')], name=f"C_Uniqueness_IndicTileP_({acc.mem2dict(m)},{op_name})")
+                model.addRange(sum_r - lg_dimOfTile[m,op,ops.dict2Dim('R')], -CONST.EPS, CONST.EPS, name=f"C_Uniqueness_IndicTileR_({acc.mem2dict(m)},{op_name})")
+                model.addRange(sum_p - lg_dimOfTile[m,op,ops.dict2Dim('P')], -CONST.EPS, CONST.EPS, name=f"C_Uniqueness_IndicTileP_({acc.mem2dict(m)},{op_name})")
+
+                indic_sum, sum_dim_w = 0, 0
+                for i_s, sd in enumerate(tempDivisors[ops.dict2Dim('S')]):
+                    for i_q, qd in enumerate(tempDivisors[ops.dict2Dim('Q')]):
+                        s = sd * spur[m,op,ops.dict2Dim('S')]
+                        q = qd * spur[m,op,ops.dict2Dim('Q')]
+                        if ops.Stride >= s:
+                            w = q * s
+                        else:
+                            w = (q-1) * ops.Stride + s
+                        w = min(w,ops.W)
+                        indic_dim = model.addVar(vtype=gp.GRB.BINARY, name=f"Indic_dim_TileWidth_({acc.mem2dict(m)},{op_name},{i_s},{i_q})")
+                        sum_dim_w += indic_dim * math.log(w)
+                        sum_s += indic_dim * math.log(s)
+                        sum_q += indic_dim * math.log(q)
+                        indic_sum += indic_dim
+                model.addConstr(indic_sum == 1, name=f"C_Uniqueness_IndicTile_Width_({acc.mem2dict(m)},{op_name})")
+                # model.addConstr(sum_s == lg_dimOfTile[m,op,ops.dict2Dim('S')], name=f"C_Uniqueness_IndicTileS_({acc.mem2dict(m)},{op_name})")
+                # model.addConstr(sum_q == lg_dimOfTile[m,op,ops.dict2Dim('Q')], name=f"C_Uniqueness_IndicTileQ_({acc.mem2dict(m)},{op_name})")
+                model.addRange(sum_s - lg_dimOfTile[m,op,ops.dict2Dim('S')], -CONST.EPS, CONST.EPS, name=f"C_Uniqueness_IndicTileS_({acc.mem2dict(m)},{op_name})")
+                model.addRange(sum_q - lg_dimOfTile[m,op,ops.dict2Dim('Q')], -CONST.EPS, CONST.EPS, name=f"C_Uniqueness_IndicTileQ_({acc.mem2dict(m)},{op_name})")
+
+                lg_transVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=min(acc.memSize[m]//acc.precision[m,op], math.log(ops.size[op])),
+                                                     name=f"lg_transVolume_({acc.mem2dict(m)},{op_name})")
+                model.addConstr(lg_transVolume[m,op] == sum_dim_h + sum_dim_w + lg_dimOfTile[m,op,ops.dict2Dim('C')],
+                                    name=f"C_lg_transVolume_({acc.mem2dict(m)},{op_name})")
 
             op, op_name = 1,'W'     # Weight
             if acc.mappingArray[op][m]:
-                exp_transVolume[m,op] = model.addVar(lb=1, ub=min(acc.memSize[m]//acc.precision[m,op], MAX_SIZE[op]), vtype=GRB.INTEGER, name=f"exp_transVolume_({acc.mem2dict(m)},{op_name})")
-                indic_sum, sum_tile = 0, 0
-                lg_sum_tile = 0
-                sum_r, sum_c, sum_k, sum_s = 0,0,0,0
-                for i_r, r in enumerate(tempDivisors[ops.dict2Dim('R')]):
-                    for i_s, s in enumerate(tempDivisors[ops.dict2Dim('S')]):
-                        for i_c, c in enumerate(tempDivisors[ops.dict2Dim('C')]):
-                            for i_k, k in enumerate(tempDivisors[ops.dict2Dim('K')]):
-                                r = r * spur[m,ops.dict2Dim('R')]
-                                s = s * spur[m,ops.dict2Dim('S')]
-                                c = c * spur[m,ops.dict2Dim('C')]
-                                k = k * spur[m,ops.dict2Dim('K')]
-                                op_volume = r*s*c*k
-                                if op_volume <= acc.memSize[m] // acc.precision[m,op]:
-                                    indic_opVolume = model.addVar(vtype=gp.GRB.BINARY, name=f"Indic_tileVolume_({acc.mem2dict(m)},{op_name},{i_r},{i_s},{i_c},{i_k})")
-                                    sum_tile += indic_opVolume*op_volume
-                                    if m == 1:
-                                        lg_sum_tile += indic_opVolume*math.log(op_volume)
-                                    sum_r += indic_opVolume*math.log(r)
-                                    sum_s += indic_opVolume*math.log(s)
-                                    sum_c += indic_opVolume*math.log(c)
-                                    sum_k += indic_opVolume*math.log(k)
-                                    indic_sum += indic_opVolume
-                model.addConstr(indic_sum == 1, name=f"C_Uniqueness_IndicTile_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(sum_r == lg_dimOfTile[m,op,ops.dict2Dim('R')], name=f"C_Uniqueness_IndicTileR_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(sum_s == lg_dimOfTile[m,op,ops.dict2Dim('S')], name=f"C_Uniqueness_IndicTileS_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(sum_c == lg_dimOfTile[m,op,ops.dict2Dim('C')], name=f"C_Uniqueness_IndicTileC_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(sum_k == lg_dimOfTile[m,op,ops.dict2Dim('K')], name=f"C_Uniqueness_IndicTileK_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(exp_transVolume[m,op] == sum_tile, name=f"sum_transVolume_({acc.mem2dict(m)},{op_name})")
-                if m == 1:
-                    tile_offChip[op] = model.addVar(lb=1,ub=math.log(MAX_SIZE[op]),vtype=GRB.CONTINUOUS, name=f"tile_offChip_({op_name})")
-                    model.addConstr(tile_offChip[op] == lg_sum_tile)
+                lg_transVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=min(acc.memSize[m]//acc.precision[m,op], math.log(ops.size[op])),
+                                                     name=f"lg_transVolume_({acc.mem2dict(m)},{op_name})")
+                model.addConstr(lg_transVolume[m,op] == quicksum(lg_dimOfTile[m,op,ops.dict2Dim(dChar)] for dChar in ['R','S','C','K']),
+                                     name=f"C_lg_transVolume_({acc.mem2dict(m)},{op_name})")
 
             op, op_name = 2,'O'     # Output
             if acc.mappingArray[op][m]:
-                exp_transVolume[m,op] = model.addVar(lb=1, ub=min(acc.memSize[m]//acc.precision[m,op], MAX_SIZE[op]), vtype=GRB.INTEGER, name=f"exp_transVolume_({acc.mem2dict(m)},{op_name})")
-                indic_sum, sum_tile = 0, 0
-                lg_sum_tile = 0
-                sum_p, sum_q, sum_k = 0,0,0
-                for i_p, p in enumerate(tempDivisors[ops.dict2Dim('P')]):
-                    for i_q, q in enumerate(tempDivisors[ops.dict2Dim('Q')]):
-                        for i_k, k in enumerate(tempDivisors[ops.dict2Dim('K')]):
-                            p = p * spur[m,ops.dict2Dim('P')]
-                            q = q * spur[m,ops.dict2Dim('Q')]
-                            k = k * spur[m,ops.dict2Dim('K')]
-                            op_volume = p*q*k
-                            if op_volume <= acc.memSize[m] // acc.precision[m,op]:
-                                indic_opVolume = model.addVar(vtype=gp.GRB.BINARY, name=f"Indic_tileVolume_({acc.mem2dict(m)},{op_name},{i_p},{i_q},{i_k})")
-                                sum_tile += indic_opVolume*op_volume
-                                if m == 1:
-                                    lg_sum_tile += indic_opVolume*math.log(op_volume)
-                                sum_p += indic_opVolume*math.log(p)
-                                sum_q += indic_opVolume*math.log(q)
-                                sum_k += indic_opVolume*math.log(k)
-                                indic_sum += indic_opVolume
-                model.addConstr(indic_sum == 1, name=f"C_Uniqueness_IndicTile_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(sum_p == lg_dimOfTile[m,op,ops.dict2Dim('P')], name=f"C_Uniqueness_IndicTileP_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(sum_q == lg_dimOfTile[m,op,ops.dict2Dim('Q')], name=f"C_Uniqueness_IndicTileQ_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(sum_k == lg_dimOfTile[m,op,ops.dict2Dim('K')], name=f"C_Uniqueness_IndicTileK_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(exp_transVolume[m,op] == sum_tile, name=f"sum_transVolume_({acc.mem2dict(m)},{op_name})")
-                if m == 1:
-                    tile_offChip[op] = model.addVar(lb=1,ub=math.log(MAX_SIZE[op]),vtype=GRB.CONTINUOUS, name=f"tile_offChip_({op_name})")
-                    model.addConstr(tile_offChip[op] == lg_sum_tile)
+                lg_transVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=min(acc.memSize[m]//acc.precision[m,op], math.log(ops.size[op])),
+                                                     name=f"lg_transVolume_({acc.mem2dict(m)},{op_name})")
+                model.addConstr(lg_transVolume[m,op] == quicksum(lg_dimOfTile[m,op,ops.dict2Dim(dChar)] for dChar in ['P','Q','K']),
+                                     name=f"C_lg_transVolume_({acc.mem2dict(m)},{op_name})")
 
         # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -#          
         dataVolume = gp.tupledict()
         for m in range(2,acc.Num_mem):
             for op, op_name in enumerate(['I','W','O']):
-                if acc.mappingArray[op][m]:
-                    dataVolume[m,op] = var_mul01(model, indic_usedMem[m,op], exp_dataVolume[m,op], f"dataVolume_({acc.mem2dict(m)},{op_name})")
-                else:
-                    dataVolume[m,op] = 0
+                if acc.shareMemory[m] == True:
+                    if acc.mappingArray[op][m]:
+                        dataVolume[m,op] = var_mul01(model, indic_usedMem[m,op], exp_dataVolume[m,op], f"dataVolume_({acc.mem2dict(m)},{op_name})")
+                    else:
+                        dataVolume[m,op] = 0
         
         sum_util = 0
         for m in range(2,acc.Num_mem):
-            tmp_datavolume = 0
-            for op, op_name in enumerate(['I','W','O']):
-                if acc.mappingArray[op][m] == 1:
-                    tmp_datavolume += (dataVolume[m,op] + var_mul01(model, indic_doubleMem[m,op], dataVolume[m,op], f"C_mul_{m}_{op}")) * acc.precision[m,op]
-                    sum_util += dataVolume[m,op]* (acc.precision[m,op] * m)
-                    # dataVolume better than tmp_dataVolume
-            model.addConstr( tmp_datavolume <= acc.memSize[m], name=f"C_dataVolume_({acc.mem2dict(m)})" )
+            if acc.shareMemory[m] == True:
+                tmp_datavolume = 0
+                for op, op_name in enumerate(['I','W','O']):
+                    if acc.mappingArray[op][m] == 1:
+                        tmp_datavolume += (dataVolume[m,op] + var_mul01(model, indic_doubleMem[m,op], dataVolume[m,op], f"C_mul_{m}_{op}")) * acc.precision[m,op]
+                        sum_util += dataVolume[m,op]* (acc.precision[m,op] * m)
+                        # dataVolume better than tmp_dataVolume
+                model.addConstr( tmp_datavolume <= acc.memSize[m], name=f"C_dataVolume_({acc.mem2dict(m)})" )
+            else:
+                for op, op_name in enumerate(['I','W','O']):
+                    if acc.mappingArray[op][m] == 1:
+                        model.addConstr(lg_dataVolume[m,op] + math.log(2)*indic_doubleMem[m,op] <= math.log(acc.memSize[m])-math.log(acc.precision[m,op]))
 
-        transVolume = gp.tupledict()                # transVolume[m,op] = INTEGER
+
+        # transVolume = gp.tupledict()                # transVolume[m,op] = INTEGER
         for m in range(1,acc.Num_mem):
             for op, op_name in enumerate(['I','W','O']):
-                if acc.mappingArray[op][m]:
-                    transVolume[m,op] = model.addVar(lb=0, ub=min(ops.size[op], acc.memSize[m]//acc.precision[m,op]), vtype=GRB.INTEGER, name=f"transVolume_({acc.mem2dict(m)},{op_name})")
-                    model.addConstr(transVolume[m,op] == var_mul01(model, indic_usedMem[m,op], exp_transVolume[m,op], f"transVolume_({acc.mem2dict(m)},{op_name})_tmp") * acc.precision[m,op])
-                else:
+                if acc.mappingArray[op][m] == False:
                     transVolume[m,op] = 0
 
         ####################################################################  Execution Performance   #######################################################################
@@ -637,33 +554,39 @@ class Solver():
                 indic_xMem[i,op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_xMem_({i},{op_name})")
                 model.addGenConstrIndicator(indic_xMem[i,op], True, loop2Mem[i,op] + 1 <= loop2Mem[i+1,op], name=f"C_xMem_({i},{op_name})_T")
                 model.addGenConstrIndicator(indic_xMem[i,op], False, loop2Mem[i,op] == loop2Mem[i+1,op], name=f"C_xMem_({i},{op_name})_F")
+        for op, op_name in enumerate(['I','W','O']):
+            model.addConstr(quicksum(indic_xMem[i,op] for i in range(Num_Loops)) <= 4, name=f"max_xMem_{op_name}")
 
         transfer = gp.tupledict()                       # transfer[i,op]
         transfer_z = gp.tupledict()                     # transfer_z[i,op]
+        lg_transfer = gp.tupledict()
         transfer_z_oneway = gp.tupledict()              # transfer_z_oneway[i,op]
         for i in range(Num_Loops):
             for op, op_name in enumerate(['I','W','O']):
-                transfer[i,op] = model.addVar(lb=0, ub=ops.size[op], vtype=GRB.CONTINUOUS, name=f"transfer_({i},{op_name})")   #WTD max precision
-                # for m in range(1,acc.Num_mem):
-                #     if acc.mappingArray[op][m]:         # WTD
-                #         model.addGenConstrIndicator(indic_loop2Mem[i,op,m], True, transfer[i,op]*acc.bw[m]>=transVolume[m,op], name=f"C_transfer_({i},{op_name},{acc.mem2dict(m)})")
-                # model.addConstr(transfer[i,op]*acc.bw[m] >= quicksum(indic_loop2Mem[i,op,m] * transVolume[m,op] * acc.mappingArray[op][m] for m in range(1,acc.Num_mem)), 
-                model.addConstr(transfer[i,op]*acc.bw[m] >= quicksum(var_mul01(model, indic_loop2Mem[i,op,m], transVolume[m,op], 
-                                                                               name=f"tmp_transfer_({i},{op_name},{acc.mem2dict(m)})")
-                                                                     * acc.mappingArray[op][m] 
-                                                                     for m in range(1,acc.Num_mem)), 
-                                name=f"C_transfer_({i},{op_name},{acc.mem2dict(m)})")
+                transfer[i,op] = model.addVar(lb=0, ub=self.maxTrans, vtype=GRB.CONTINUOUS, name=f"transfer_({i},{op_name})")   #WTD max precision
 
-                transfer_z[i,op] = model.addVar(lb=0, vtype=GRB.INTEGER, name=f"transfer_z_({i},{op_name})")
+                lg_transfer[i,op] = model.addVar(lb=0, ub=math.log(self.maxTrans), vtype=GRB.CONTINUOUS, name=f"lg_transfer_({i},{op_name})")   
+                for m in range(1,acc.Num_mem):
+                    if acc.mappingArray[op][m]:         # WTD
+                        model.addGenConstrIndicator(indic_loop2Mem[i,op,m], True, 
+                                                    lg_transfer[i,op] + math.log(acc.bw[m]) == lg_transVolume[m,op] + math.log(acc.precision[m,op]),
+                                                    name=f"C_lg_transfer_({i},{op_name},{acc.mem2dict(m)})")
+                model.addGenConstrExp(xvar=lg_transfer[i,op], yvar=transfer[i,op], options=self.ExpOption, name=f"C_transfer_({i},{op_name})")
+
+                transfer_z[i,op] = model.addVar(lb=0, ub=self.maxTrans, vtype=GRB.INTEGER, name=f"transfer_z_({i},{op_name})")
                 if i < Num_Loops-1:
                     if op < 2:
                         model.addGenConstrIndicator(indic_xMem[i,op], True, transfer_z[i,op]==transfer[i,op], name=f"test_({i},{op_name})") 
                     else:
                         model.addGenConstrIndicator(indic_xMem[i,op], True, transfer_z[i,op]==transfer[i,op]*2, name=f"test_({i},{op_name})") 
+                    # model.addGenConstrIndicator(indic_xMem[i,op], True, transfer_z[i,op]>=transfer[i,op], name=f"test_({i},{op_name})") 
                     model.addGenConstrIndicator(indic_xMem[i,op], False, transfer_z[i,op]==0, name=f"test_({i},{op_name})_F") 
                 if op_name == 'O':
-                    transfer_z_oneway[i,op] = model.addVar(lb=0, vtype=GRB.INTEGER, name=f"transfer_output_oneway_({i},{op_name})")
-                    model.addConstr(transfer_z_oneway[i,op] * 2 == transfer_z[i,op], name=f"C_transfer_output_oneway_({i},{op_name})")
+                    transfer_z_oneway[i,op] = model.addVar(lb=0, ub=self.maxTrans, vtype=GRB.INTEGER, name=f"transfer_output_oneway_({i},{op_name})")
+                    # model.addConstr(transfer_z_oneway[i,op] * 2 == transfer_z[i,op], name=f"C_transfer_output_oneway_({i},{op_name})")
+                    # model.addGenConstrMax(transfer_z_oneway[i,op], [transfer_z[i,op]*0.5], constant=1, name=f"C_transfer_output_oneway_({i},{op_name})")
+                    model.addGenConstrIndicator(indic_xMem[i,op], True, transfer_z_oneway[i,op]>=transfer_z[i,op]*0.5, name=f"C_transfer_output_oneway_({i},{op_name})_T")
+                    model.addGenConstrIndicator(indic_xMem[i,op], False, transfer_z_oneway[i,op]==0, name=f"C_transfer_output_oneway_({i},{op_name})_F")
 
         indic_usedLastMem = gp.tupledict()              # indic_usedLastMem[op] = {0,1}
         for op, op_name in enumerate(['I','W','O']):
@@ -680,10 +603,10 @@ class Solver():
         latency_consu = gp.tupledict()
         critical_term = gp.tupledict()
         for i in range(Num_Loops):
-            latency_cp[i] = model.addVar(lb=0, ub=self.cycBound, vtype=GRB.CONTINUOUS, name=f"latency_cp_({i})")
-            critical_term[i] = model.addVar(lb=0, ub=self.cycBound, vtype=GRB.CONTINUOUS, name=f"creitical_({i})")
+            latency_cp[i] = model.addVar(lb=acc.t_MAC*math.pow(2,Num_Loops-1-i), ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"latency_cp_({i})")
+            critical_term[i] = model.addVar(lb=acc.t_MAC*math.pow(2,Num_Loops-1-i), ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"creitical_({i})")
             for op, op_name in enumerate(['I','W','O']):
-                latency_consu[i,op] = model.addVar(lb=0, ub=self.cycBound, vtype=GRB.CONTINUOUS, name=f"latency_consume_({i},{op_name})")
+                latency_consu[i,op] = model.addVar(lb=acc.t_MAC*math.pow(2,Num_Loops-1-i), ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"latency_consume_({i},{op_name})")
         for op, op_name in enumerate(['I','W','O']):
             critical_term[Num_Loops] = acc.t_MAC
             latency_consu[Num_Loops,op] = acc.t_MAC
@@ -691,80 +614,78 @@ class Solver():
 
         latency_opN = gp.tupledict()
         latency_maxTL = gp.tupledict()
-        exp_critical_term = gp.tupledict()         # latency_cp[i] = Latency of Critical Path
+        exp_critical_term = gp.tupledict()     
         for i in range(Num_Loops):
-            exp_critical_term[i] = model.addVar(lb=0, ub=self.cycBound, vtype=GRB.CONTINUOUS, name=f"exp_critical_term_({i})")
-            for p in range(len(primefactor)):
-                model.addGenConstrIndicator(indic_loop2Factor[i,p], True, exp_critical_term[i] == latency_cp[i]*primefactor[p], name=f"C_exp_critical_({i},{p})")
+            exp_critical_term[i] = model.addVar(lb=acc.t_MAC*math.pow(2,Num_Loops-1-i), ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"exp_critical_term_({i})")
+            for p in range(len(uniqueFactor)):
+                model.addGenConstrIndicator(indic_loop2Factor[i,p], True, exp_critical_term[i] == latency_cp[i]*uniqueFactor[p], name=f"C_exp_critical_({i},{p})")
             for op, op_name in enumerate(['I','W','O']):
-                latency_opN[i,op] = model.addVar(lb=0, ub=self.cycBound, vtype=GRB.CONTINUOUS, name=f"latency_opN_({i},{op_name})")
-                latency_maxTL[i,op] = model.addVar(lb=0, ub=self.cycBound, vtype=GRB.CONTINUOUS, name=f"latency_maxTL_({i},{op_name})")
-                model.addConstr(latency_maxTL[i,op] == gp.max_(transfer_z[i,op],latency_consu[i+1,op]), name=f"C_tmp_lmax_({i},{op_name})")
+                latency_opN[i,op] = model.addVar(lb=acc.t_MAC*math.pow(2,Num_Loops-1-i), ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"latency_opN_({i},{op_name})")
+                latency_maxTL[i,op] = model.addVar(lb=acc.t_MAC*math.pow(2,Num_Loops-1-i), ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"latency_maxTL_({i},{op_name})")
+                model.addConstr(latency_maxTL[i,op] >= transfer_z[i,op],      name=f"C_tmp_lmax_({i},{op_name})_1")
+                model.addConstr(latency_maxTL[i,op] >= latency_consu[i+1,op], name=f"C_tmp_lmax_({i},{op_name})_2")
                 model.addGenConstrIndicator(indic_doubleLoop[i,op], True,  latency_opN[i,op] == latency_maxTL[i,op], 
                                             name=f"C_latency_opN_({i},{op_name})_T")
                 
                 model.addGenConstrIndicator(indic_doubleLoop[i,op], False, latency_opN[i,op] == transfer_z[i,op]+latency_consu[i+1,op], 
                                             name=f"C_latency_opN_({i},{op_name})_F")
                 
-            # model.addGenConstrMax(latency_cp[i], [critical_term[i+1]]+[latency_opN[i,op] for op in range(3)], constant=0, name=f"C_latency_cp_({i})")
             model.addConstr(latency_cp[i] >= critical_term[i+1], name=f"C_latency_cp_({i})_cpTerm")
             for op in range(3):
                 model.addConstr(latency_cp[i] >= latency_opN[i,op], name=f"C_latency_cp_({i})_opN[{op}]")
                 
         exp_latency_consu = gp.tupledict()
-        latency_transMatters = gp.tupledict()
+        latency_transMatters = gp.tupledict() 
         for i in range(Num_Loops):
             for op, op_name in enumerate(['I','W','O']):
-                exp_latency_consu[i,op] = model.addVar(lb=0, ub=self.cycBound, vtype=GRB.CONTINUOUS, name=f"exp_latency_consume_({i},{op_name})")
-                latency_transMatters[i,op] = model.addVar(lb=0, ub=self.cycBound, vtype=GRB.CONTINUOUS, name=f"latency_transMatters_({i},{op_name})")
+                exp_latency_consu[i,op] = model.addVar(lb=acc.t_MAC*math.pow(2,Num_Loops-1-i), ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"exp_latency_consume_({i},{op_name})")
+                latency_transMatters[i,op] = model.addVar(lb=acc.t_MAC*math.pow(2,Num_Loops-1-i), ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"latency_transMatters_({i},{op_name})")
 
-                tmp_consu = model.addVar(lb=0, ub=self.cycBound, vtype=GRB.CONTINUOUS, name=f"tmp_consu_({i},{op_name})")
-                for p in range(len(primefactor)):
-                    model.addGenConstrIndicator(indic_loop2Factor[i,p], True, tmp_consu == latency_cp[i] * (primefactor[p]-1) + latency_consu[i+1,op],
+                tmp_consu = model.addVar(lb=acc.t_MAC*math.pow(2,Num_Loops-1-i), ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"tmp_consu_({i},{op_name})")
+                for p in range(len(uniqueFactor)):
+                    model.addGenConstrIndicator(indic_loop2Factor[i,p], True, tmp_consu == latency_cp[i] * (uniqueFactor[p]-1) + latency_consu[i+1,op],
                                                  name=f"C_tmp_consu_({i},{op_name},{p})")
                 model.addGenConstrIndicator(indic_xMem[i,op], False, exp_latency_consu[i,op] == tmp_consu)          
                 
                 
                 if op < 2:      # I,W
-                    tmp_consu_sing = model.addVar(lb=0, ub=self.cycBound, vtype=GRB.CONTINUOUS, name=f"tmp_consu_sing_({i},{op_name})")
-                    for p in range(len(primefactor)):
-                        model.addGenConstrIndicator(indic_loop2Factor[i,p], True, tmp_consu_sing == latency_cp[i] * (primefactor[p]-2) + 2*transfer_z[i,op] + latency_consu[i+1,op])
+                    tmp_consu_sing = model.addVar(lb=acc.t_MAC*math.pow(2,Num_Loops-1-i), ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"tmp_consu_sing_({i},{op_name})")
+                    for p in range(len(uniqueFactor)):
+                        model.addGenConstrIndicator(indic_loop2Factor[i,p], True, tmp_consu_sing == latency_cp[i] * (uniqueFactor[p]-2) + 2*transfer_z[i,op] + latency_consu[i+1,op])
                     
-                    tmp_consu_doub_1 = model.addVar(lb=0, ub=self.cycBound, vtype=GRB.CONTINUOUS, name=f"tmp_consu_doub_({i},{op_name})_1")
-                    for p in range(len(primefactor)):
-                        model.addGenConstrIndicator(indic_loop2Factor[i,p], True, tmp_consu_doub_1 == latency_cp[i] * max(0,primefactor[p]-3) + 2*transfer_z[i,op] + latency_maxTL[i,op])
-                    tmp_consu_doub_2 = model.addVar(lb=0, ub=self.cycBound, vtype=GRB.CONTINUOUS, name=f"tmp_consu_doub_({i},{op_name})_2")
-                    for p in range(len(primefactor)):
-                        model.addGenConstrIndicator(indic_loop2Factor[i,p], True, tmp_consu_doub_2 == transfer_z[i,op] * primefactor[p])
+                    tmp_consu_doub_1 = model.addVar(lb=acc.t_MAC*math.pow(2,Num_Loops-1-i), ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"tmp_consu_doub_({i},{op_name})_1")
+                    for p in range(len(uniqueFactor)):
+                        model.addGenConstrIndicator(indic_loop2Factor[i,p], True, tmp_consu_doub_1 == latency_cp[i] * max(0,uniqueFactor[p]-3) + 2*transfer_z[i,op] + latency_maxTL[i,op])
+                    tmp_consu_doub_2 = model.addVar(lb=0, ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"tmp_consu_doub_({i},{op_name})_2")
+                    # lb of tmp_consu_doub_2 cannot be acc.t_MAC
+                    for p in range(len(uniqueFactor)):
+                        model.addGenConstrIndicator(indic_loop2Factor[i,p], True, tmp_consu_doub_2 == transfer_z[i,op] * uniqueFactor[p])
 
-                    tmp_vmax = model.addVar(lb=0, ub=self.cycBound, vtype=GRB.CONTINUOUS, name=f"tmp_max_double12_({i},{op_name})")
-                    # model.addGenConstrMax(tmp_vmax, [tmp_consu_doub_1, tmp_consu_doub_2])
+                    tmp_vmax = model.addVar(lb=acc.t_MAC*math.pow(2,Num_Loops-1-i), ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"tmp_max_double12_({i},{op_name})")
                     model.addConstr(tmp_vmax >= tmp_consu_doub_1, name=f"C_tmp_vmax_({i},{op_name})_1")
                     model.addConstr(tmp_vmax >= tmp_consu_doub_2, name=f"C_tmp_vmax_({i},{op_name})_2")
-                    # model.addGenConstrIndicator(indic_doubleLoop[i,op], True, latency_transMatters[i,op] == tmp_vmax)
-                    # model.addGenConstrIndicator(indic_doubleLoop[i,op], False, latency_transMatters[i,op] == tmp_consu_sing)
-                    model.addConstr(latency_transMatters[i,op]>= tmp_vmax - self.cycBound * (1-indic_doubleLoop[i,op]))
-                    model.addConstr(latency_transMatters[i,op]>= tmp_consu_sing - self.cycBound * indic_doubleLoop[i,op])
+                    model.addGenConstrIndicator(indic_doubleLoop[i,op], True, latency_transMatters[i,op] >= tmp_vmax)
+                    model.addGenConstrIndicator(indic_doubleLoop[i,op], False,latency_transMatters[i,op] >= tmp_consu_sing)
 
                 else:           # O
-                    tmp_consu_sing = model.addVar(lb=0, ub=self.cycBound, vtype=GRB.CONTINUOUS, name=f"tmp_consu_sing_({i},{op_name})")
-                    for p in range(len(primefactor)):
-                        model.addGenConstrIndicator(indic_loop2Factor[i,p], True, tmp_consu_sing == latency_cp[i] * (primefactor[p]-1) + transfer_z[i,op] + latency_consu[i+1,op])
+                    tmp_consu_sing = model.addVar(lb=0, ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"tmp_consu_sing_({i},{op_name})")
+                    for p in range(len(uniqueFactor)):
+                        model.addGenConstrIndicator(indic_loop2Factor[i,p], True, tmp_consu_sing == latency_cp[i] * (uniqueFactor[p]-1) + transfer_z[i,op] + latency_consu[i+1,op])
                     
-                    tmp_consu_doub_1 = model.addVar(lb=0, ub=self.cycBound, vtype=GRB.CONTINUOUS, name=f"tmp_consu_doub_({i},{op_name})_1")
+                    tmp_consu_doub_1 = model.addVar(lb=0, ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"tmp_consu_doub_({i},{op_name})_1")
                     
-                    tmp_vmax_1 = model.addVar(lb=0, ub=self.cycBound, vtype=GRB.CONTINUOUS, name=f"tmp_max_Outdouble_({i},{op_name})_1")
-                    tmp_vmax_2 = model.addVar(lb=0, ub=self.cycBound, vtype=GRB.CONTINUOUS, name=f"tmp_max_Outdouble_({i},{op_name})_2")
-                    # model.addGenConstrMax(tmp_vmax_1, [transfer_z_oneway[i,op], latency_cp[i]])
+                    tmp_vmax_1 = model.addVar(lb=0, ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"tmp_max_Outdouble_({i},{op_name})_1")
+                    tmp_vmax_2 = model.addVar(lb=0, ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"tmp_max_Outdouble_({i},{op_name})_2")
+
                     model.addConstr(tmp_vmax_1 >= transfer_z_oneway[i,op], name=f"C_tmp_vmax_1_({i},{op_name})_1")
                     model.addConstr(tmp_vmax_1 >= latency_cp[i], name=f"C_tmp_vmax_1_({i},{op_name})_2")
-                    # model.addGenConstrMax(tmp_vmax_2, [transfer_z_oneway[i,op], latency_consu[i+1,op]])
+                    
                     model.addConstr(tmp_vmax_2 >= transfer_z_oneway[i,op], name=f"C_tmp_vmax_2_({i},{op_name})_1")
                     model.addConstr(tmp_vmax_2 >= latency_consu[i+1,op], name=f"C_tmp_vmax_2_({i},{op_name})_2")
 
-                    for p in range(len(primefactor)):
+                    for p in range(len(uniqueFactor)):
                         model.addGenConstrIndicator(indic_loop2Factor[i,p], True, tmp_consu_doub_1 == \
-                                                    latency_cp[i] * (primefactor[p]-2) + transfer_z[i,op] + tmp_vmax_1 + tmp_vmax_2)
+                                                    latency_cp[i] * (uniqueFactor[p]-2) + transfer_z[i,op] + tmp_vmax_1 + tmp_vmax_2)
 
                     model.addGenConstrIndicator(indic_doubleLoop[i,op], True, latency_transMatters[i,op] == tmp_consu_doub_1)
                     model.addGenConstrIndicator(indic_doubleLoop[i,op], False, latency_transMatters[i,op] == tmp_consu_sing)        
@@ -772,12 +693,8 @@ class Solver():
                 model.addGenConstrIndicator(indic_xMem[i,op], True, exp_latency_consu[i,op] == latency_transMatters[i,op])
 
         for i in range(Num_Loops):
-            # model.addGenConstrIndicator(indic_usedLoop[i], True, critical_term[i]==exp_critical_term[i])
-            # model.addGenConstrIndicator(indic_usedLoop[i], False, critical_term[i]==critical_term[i+1])
             model.addConstr(critical_term[i]==exp_critical_term[i])
             for op, op_name in enumerate(['I','W','O']): 
-                # model.addGenConstrIndicator(indic_usedLoop[i], True, latency_consu[i,op]==exp_latency_consu[i,op])
-                # model.addGenConstrIndicator(indic_usedLoop[i], False, latency_consu[i,op]==latency_consu[i+1,op])
                 model.addConstr(latency_consu[i,op]==exp_latency_consu[i,op])
 
             #  - - - - - - - - - - - - - - - - - - - Spatial Constraints - - - - - - - - - - - - - - - - - - -
@@ -789,88 +706,57 @@ class Solver():
             # self.dim2Dict = ['R', 'S', 'P', 'Q', 'C', 'K'] 
 
         
-        res_latency = model.addVar(lb=1, ub=self.cycBound, vtype=GRB.INTEGER,     name="res_latency")
-        res_energy  = model.addVar(lb=1, ub=self.cycBound, vtype=GRB.CONTINUOUS,  name="res_energy")
-        res_EDP     = model.addVar(lb=1, ub=self.cycBound, vtype=GRB.CONTINUOUS,  name="res_EDP")
+        res_latency = model.addVar(lb=self.lb_latency, ub=self.ub_latency, vtype=GRB.CONTINUOUS,     name="res_latency")
+        res_energy  = model.addVar(lb=1, vtype=GRB.CONTINUOUS,  name="res_energy")
+        res_EDP     = model.addVar(lb=1, vtype=GRB.CONTINUOUS,  name="res_EDP")
         model.addConstr(res_latency >= critical_term[0])
         for op in range(3):
             model.addConstr(res_latency >= latency_consu[0,op])
         
 
         # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -#          
-        # utliz_all = model.addVar(vtype=GRB.CONTINUOUS, name=f"utilzation_all")
-        # model.addConstr(utliz_all == sum((indic_usedMem[1,op]*MAX_SIZE[op]) for op in range(3)) )
+        utliz_all = model.addVar(vtype=GRB.CONTINUOUS, name=f"utilzation_all")
+        model.addConstr(utliz_all == sum((indic_usedMem[1,op]*MAX_SIZE[op]) for op in range(3)) )
 
+        model.write(os.path.join(self.outputdir, "debug_model.lp"))
+        # exit()
         # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -#          
         
         model.ModelSense = GRB.MINIMIZE
 
-        if FLAG.WEIGHT_STATIONARY:
-                
-            for Dchar1 in ['R','S','C']:
-                d1 = ops.dict2Dim(Dchar1)
-                for f1 in range(len(factors[d1])):
-                    for Dchar2 in ['P','Q']:
-                        d2 = ops.dict2Dim(Dchar2)
-                        for f2 in range(len(factors[d2])):
-                            model.addConstr( 
-                                            quicksum(i*indic_factor2Loop[d1,f1,i] for i in range(Num_Loops)) <= 
-                                            quicksum(i*indic_factor2Loop[d2,f2,i] for i in range(Num_Loops)) + 
-                                            (Num_Loops+1)*quicksum(indic_factor2SpUr[d2,f2,u] for u in range(acc.Num_SpUr)),
-                                             name=f"C_WS_dimSquence_({Dchar1}_{f1}_{Dchar2}_{f2})")
+        model.Params.TimeLimit = 10  # 设置 10 秒硬性限制
+        model.Params.MIPFocus = 1 
+        model.update()
+        model.optimize()
+        # 检查第一阶段结果
+        if model.SolCount == 0:
+            if model.Status == GRB.TIME_LIMIT or model.Status == GRB.INFEASIBLE:
+                print("No feasible solution found within 10 seconds, considered unsolvable.")
+                print("# # # # # The Scheme has been Determined to be Suboptimal # # # # #")
+            self.result = [CONST.MAX_POS, CONST.MAX_POS, CONST.MAX_POS]
+            return 1
+        
+        # 恢复或调整参数
+        # model.Params.MIPFocus = 2  # 恢复平衡模式或设为 2 (侧重最优边界)
+        model.Params.MIPFocus = 3 
+
+        model.setObjectiveN(res_latency, 0, priority=3, name='Latency')    
+        env0 = model.getMultiobjEnv(0)                                     
+        env0.setParam('TimeLimit', CONST.TIMELIMIT * 0.7)
+        # env0.setParam('ImproveStartTime', CONST.TIMELIMIT * 0.7 * 0.15)
+        env0.setParam('ImproveStartTime', CONST.TIMELIMIT * 0.7 * 0.7)
+
+        model.setObjectiveN(utliz_all, 1, priority=2,
+                    reltol=0.0, abstol=0.0, name='Trans-OffChip')
+        env1 = model.getMultiobjEnv(1)
+        env1.setParam('TimeLimit', CONST.TIMELIMIT * 0.1)
+
+        model.setObjectiveN(-sum_util, 2, priority=1,       # -sum_util = “max sum_util”
+                        reltol=0.0, abstol=0.0, name='TemporalInner')
+        env2 = model.getMultiobjEnv(2)
+        env2.setParam('TimeLimit', CONST.TIMELIMIT * 0.2)
+        
             
-            exp_ws = 0
-
-            for Dchar1 in ['R','S','C']:
-                d = ops.dict2Dim(Dchar1)
-                op, op_name = 1,'W'     # Weight
-                if factors[d] == [1]:     # DimSize == 1
-                    continue
-                for f in range(len(factors[d])):
-                    exp_ws += logF[d,f]*indic_factor2Mem[d,f,op,acc.Macro2mem]
-                    exp_ws += logF[d,f]*indic_factor2SpUr[d,f,1]
-            d = ops.dict2Dim('K')
-            for f in range(len(factors[d])):
-                exp_ws += logF[d,f]*indic_factor2Mem[d,f,op,acc.Macro2mem]
-                exp_ws += logF[d,f]*indic_factor2SpUr[d,f,0]
-                exp_ws += logF[d,f]*indic_factor2SpUr[d,f,2]
-            model.setObjectiveN(-exp_ws, 0, priority=5, name='WeightStationary')    
-            env0 = model.getMultiobjEnv(0)                                     
-            env0.setParam('TimeLimit', CONST.TIMELIMIT * 0.4)
-            env0.setParam('ImproveStartTime', CONST.TIMELIMIT * 0.4 * 0.1)
-
-            model.setObjectiveN(res_latency, 1, priority=3, name='Latency')    
-            env1 = model.getMultiobjEnv(1)                                     
-            env1.setParam('TimeLimit', CONST.TIMELIMIT * 0.4)
-            env1.setParam('ImproveStartTime', CONST.TIMELIMIT * 0.4 * 0.1)
-            model.setObjectiveN(utliz_all, 2, priority=2,
-                        reltol=0.0, abstol=0.0, name='Trans-OffChip')
-            env2 = model.getMultiobjEnv(2)
-            env2.setParam('TimeLimit', CONST.TIMELIMIT * 0.1)
-
-            model.setObjectiveN(-sum_util, 3, priority=1,       # -sum_util = “max sum_util”
-                            reltol=0.0, abstol=0.0, name='TemporalInner')
-            env3 = model.getMultiobjEnv(3)
-            env3.setParam('TimeLimit', CONST.TIMELIMIT * 0.1)
-        else:
-            model.setObjectiveN(res_latency, 0, priority=3, name='Latency')    
-            env0 = model.getMultiobjEnv(0)                                     
-            env0.setParam('TimeLimit', CONST.TIMELIMIT * 0.7)
-            env0.setParam('ImproveStartTime', CONST.TIMELIMIT * 0.7 * 0.15)
-
-            # model.setObjectiveN(utliz_all, 1, priority=2,
-            #             reltol=0.0, abstol=0.0, name='Trans-OffChip')
-            # env1 = model.getMultiobjEnv(1)
-            # env1.setParam('TimeLimit', CONST.TIMELIMIT * 0.1)
-
-            # model.setObjectiveN(-sum_util, 2, priority=1,       # -sum_util = “max sum_util”
-            #                 reltol=0.0, abstol=0.0, name='TemporalInner')
-            # env2 = model.getMultiobjEnv(2)
-            # env2.setParam('TimeLimit', CONST.TIMELIMIT * 0.2)
-            
-            
-
-
         
         ####################################################################  Set Constraint Flag ###################################################################
         
@@ -912,22 +798,16 @@ class Solver():
                             Logger.debug(f"{i:<2} for {ops.dim2Dict[d]} in {loop2Factor[i].x:<3}: {[ f'{round(indic_xMem[i,op].x)}|{acc.mem2dict(loop2Mem[i,op].x)}' for op in range(3)]}")
                             
                             loops.tm.append(Mapping(dim=d, 
-                                                  dimSize=factors[d][f],
-                                                  mem=[round(loop2Mem[i,op].x) for op in range(3)]))
+                                                    dimSize=factors[d][f],
+                                                    mem=[round(loop2Mem[i,op].x) for op in range(3)]))
             
-            # loops.sm
             Logger.debug(self.su)
-            # for u in range(acc.Num_SpUr):
-            #     for d in range(1, ops.Num_dim):
-            #         if factors[d] == [1]:     # DimSize == 1
-            #             continue
-            #         for f in range(len(factors[d])):
-            #             if mappingRule[u][d] == 1:
-            #                 if (round(indic_factor2SpUr[d,f,u].x) == 1):
-            #                     Logger.debug(f"spfor {ops.dim2Dict[d]} in {factors[d][f]}: {[acc.mem2dict(acc.SpUrArray[u,op]) for op in range(3)]}")
-            #                     loops.sm.append(Mapping(dim=d, 
-            #                                         dimSize=factors[d][f],
-            #                                         mem=[acc.SpUrArray[u,op] for op in range(3)]))
+            for u in range(acc.Num_SpUr):
+                for d in range(1, ops.Num_dim):
+                    if self.su[u][d] > 1:
+                        loops.sm.append(Mapping(dim=d, 
+                                                dimSize=self.su[u][d],
+                                                mem=[acc.SpUrArray[u,op] for op in range(3)]))
 
             double_tag = [[1 for _ in range(3)] for __ in range(acc.Num_mem+1)]
             for m in range(1,acc.Num_mem+1):
@@ -941,51 +821,8 @@ class Solver():
                         double_tag[m][op] = 0
             loops.usr_defined_double_flag = double_tag
 
-
             self.dataflow = loops
             
-            print("\nDebug in MIP Solver")
-            print("dataVolume (Word)")
-            for m in range(2,acc.Num_mem):
-                print(f"{acc.mem2dict(m):<15}:", end="")
-                for op, op_name in enumerate(['I','W','O']):
-                    print(f"{(dataVolume[m,op].x if acc.mappingArray[op][m] == 1 else 0):<20}", end="")
-                print("")
-
-            print("exp_transVolume") 
-            for m in range(1,acc.Num_mem):
-                print(f"{acc.mem2dict(m):<15}:", end="")
-                for op, op_name in enumerate(['I','W','O']):
-                    print(f"{(exp_transVolume[m,op].x if acc.mappingArray[op][m] == 1 else 0):<20}", end="")
-                print("")
-            print(f"Utilization all: {utliz_all.x}")
-            
-            print("doubleMem | TransVolume (bit)")
-            for m in range(1,acc.Num_mem):
-                print(f"{acc.mem2dict(m):<15}:", end="")
-                for op, op_name in enumerate(['I','W','O']):
-                    tmp = round(transVolume[m,op].x) if acc.mappingArray[op][m] == 1 else 0
-                    dtag = round(indic_doubleMem[m,op].x) if acc.double_config[m][op] == 1 else 0
-                    print(f"{dtag}|{tmp:<20}", end="")
-                print("")
-
-            print("doubleLoop | transfer_time")
-            for i in range(Num_Loops):
-                print(f"{i:<3} for {int(loop2Factor[i].x)}:  ", end="")
-                for op, op_name in enumerate(['I','W','O']):
-                    dtag = round(indic_doubleLoop[i,op].x)
-                    print(f"{dtag}|{transfer_z[i,op].x:<10}", end="")
-                print(f"Lcp: {round(latency_cp[i].x)}")
-            
-            print("Latency")
-            for i in range(Num_Loops):
-                print(f"{i:<3} for {int(loop2Factor[i].x)}:  ", end="")
-                for op, op_name in enumerate(['I','W','O']):
-                    print(f"{round(latency_consu[i,op].x):<10}", end="")
-                print(f"Critical-term latency: {round(critical_term[i].x)}")
-
-                
-
         def get_constr_debug(constraintname='test'):
             constr = model.getConstrByName(constraintname)
             debug_str = ""
@@ -1035,15 +872,17 @@ class Solver():
                     Logger.debug(f"Get simple solution, L={res_latency.x}, E={res_energy.x}")
             else:
                 self.result = [CONST.MAX_POS, CONST.MAX_POS, CONST.MAX_POS]
+                return 1
                 Logger.error("TLE---No Feasible Solution Yet")
                 model.setParam('IISMethod', 2)
                 model.computeIIS()
                 model.write(os.path.join(self.outputdir, "iis_full.ilp"))
                 model.write(os.path.join(self.outputdir, "model.mps"))
                 Logger.error("TLE---Debug in contric.ilp")
-                # exit()
+                exit()
         else:
             self.result = [CONST.MAX_POS, CONST.MAX_POS, CONST.MAX_POS]
+            return 1
             model.setParam("IISMethod", 2) 
             model.computeIIS()
             model.write(os.path.join(self.outputdir, "iis_full.ilp"))
