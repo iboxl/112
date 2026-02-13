@@ -67,7 +67,9 @@ class Solver():
         self.result = {}
         self.dataflow = {}
 
-        self.maxTrans = max([math.ceil(x / y) for x, y in zip(acc.memSize, acc.bw)][2:] + [math.ceil(x * 8 / y) for x, y in zip(ops.size, acc.minBW)])
+        self.maxTrans = [ max([math.ceil(min(ops.size[op] * acc.precision[m,op], acc.memSize[m]) / acc.bw[m]) 
+                                for m in range(1, acc.Num_mem) if acc.mappingArray[op][m]] 
+                            + [0]) for op in range(3) ]
 
     def run(self):
         Logger.info('* '*20 + "Start Running MIP Solver" + ' *'*20)
@@ -79,9 +81,6 @@ class Solver():
         factors = [flexible_factorization(_) for _ in self.tu]
 
         tempDivisors = [getDivisors(d) for d in self.tu]
-        # tempDivisors = ops.Divisors
-
-        uniqueFactor = getUniqueFactors(factors)
 
         Num_Loops = sum(len(f) for f in factors[1:ops.Num_dim] if f != [1])
 
@@ -94,28 +93,7 @@ class Solver():
                         for d in range(1, ops.Num_dim) 
                         for f in range(len(factors[d]))}
 
-        #     if u == 0:
-        #         model.addConstr(sum_u == math.log(acc.SpUnrolling[u]), name=f"C_Spatial_Unrolling_({u})")
-        #     else:
-        #         model.addConstr(sum_u <= math.log(acc.SpUnrolling[u]), name=f"C_Spatial_Unrolling_({u})")
-        #         # model.addConstr(sum_u >= math.log(acc.SpUnrolling[u]) + math.log(0.5), name=f"C_Spatial_Unrolling_({u})_2")
-        #         # if math.prod(math.prod(factors[d]) if mappingRule[u][d] else 1 for d in range(1,ops.Num_dim)) >= acc.SpUnrolling[u] * CONST.UTIL_COEFFICIENT:
-        #         if ops.R <= 5:
-        #             model.addConstr(sum_u >= math.log(acc.SpUnrolling[u]) + math.log(CONST.UTIL_COEFFICIENT), name=f"C_Spatial_Unrolling_({u})_2")
-
-        # par_u = {}
-        # for u in range(acc.Num_SpUr):
-        #     for Dchar in ['R','S','P','Q']:
-        #         d = ops.dict2Dim(Dchar)
-        #         par_u[u,d] = model.addVar(lb=0, ub=math.log(ops.dim2bound[d]), vtype=GRB.CONTINUOUS, name=f"par_d_({u},{Dchar})")
-        #         model.addConstr(par_u[u,d] == quicksum(logF[d,f]*indic_factor2SpUr[d,f,u] for f in range(len(factors[d]))), name=f"C_par_d_({u},{Dchar})")
-
-        #     if ops.P + ops.R == ops.Q + ops.S:
-        #         model.addConstr(par_u[u,ops.dict2Dim('P')] + par_u[u,ops.dict2Dim('R')] >= par_u[u,ops.dict2Dim('Q')] + par_u[u,ops.dict2Dim('S')], 
-        #                         name=f"C_Symmetrical_pruning_{u}")
-
         # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -# 
-
         
         indic_factor2Loop = gp.tupledict()          # indic_factor2Loop[d,f,i] = {0,1}
                                                     
@@ -134,7 +112,10 @@ class Solver():
             for f in range(len(factors[d])):
                 model.addConstr( quicksum(indic_factor2Loop[d,f,i] for i in range(Num_Loops)) == 1,
                                  name=f"C_Uniqueness_FactorMapping_({ops.dim2Dict[d]},{f})")
-                
+        for i in range(Num_Loops):
+            model.addConstr( quicksum(indic_factor2Loop[d,f,i]
+                                        for d in range(1, ops.Num_dim)
+                                        for f in range(len(factors[d]))) == 1) 
         # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -# 
 
         # ['PLACEHOLD'0, 'Dram'1, 'Global_buffer'2, 'Output_buffer'3, 'Input_buffer'4, 'OReg'5, 'IReg'6, 'Macro'7] acc.Num_mem = 8
@@ -164,24 +145,17 @@ class Solver():
             for op, op_name in enumerate(['I','W','O']):
                 if acc.mappingArray[op][m] == 1:
                     indic_usedMem[m,op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_usedMem_({acc.mem2dict(m)},{op_name})")
-                    tmp_var_or = []
-                    for d in range(1, ops.Num_dim):
-                        if (len(factors[d])==1 and factors[d][0]==1):       # DimSize == 1
-                            continue
-                        for f in range(len(factors[d])):
-                            tmp_var_or.append(indic_factor2Mem[d,f,op,m])
+                    
+                    sum_factors_in_mem = quicksum(indic_factor2Mem[d,f,op,m] 
+                                                for d in range(1, ops.Num_dim) if factors[d]!=[1]
+                                                for f in range(len(factors[d])))
+
+                    model.addConstr(sum_factors_in_mem <= Num_Loops * indic_usedMem[m,op], name=f"C_UsedMem_Trigger_({acc.mem2dict(m)},{op_name})")
+                    model.addConstr(indic_usedMem[m,op] <= sum_factors_in_mem, name=f"C_UsedMem_Limit_({acc.mem2dict(m)},{op_name})")
                 
-                    model.addGenConstrOr(indic_usedMem[m,op], tmp_var_or, name=f'C_Indic_usedMem_({acc.mem2dict(m)},{op_name})')
                 else:
                     indic_usedMem[m,op] = 0
         
-        # indic_usedLoop = gp.tupledict()
-        # for i in range(Num_Loops):
-        #     indic_usedLoop[i] = model.addVar(vtype=GRB.BINARY, name=f"Indic_usedLoop_({i})")
-        #     model.addConstr(indic_usedLoop[i] == quicksum(indic_factor2Loop[d,f,i] for d in range(1, ops.Num_dim) for f in range(len(factors[d]))), 
-        #                     name=f"C_Uniqueness_Indic_factor2Loop_({i})")
-        # model.addConstr(indic_usedLoop[Num_Loops-1] == 1, name=f"C_Monotonicity_indicLoop")
-
         # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -# 
             
         indic_loop2Mem = gp.tupledict()           # indic_loop2Mem[i,op,m] = {0,1}
@@ -209,8 +183,6 @@ class Solver():
                 loop2Mem[Num_Loops, op] = acc.Num_mem
             for i in range(Num_Loops):
                 loop2Mem[i,op] = model.addVar(lb=1, ub=acc.Num_mem-1, vtype=GRB.INTEGER, name=f"loop2Mem_({i},{op_name})")
-                # model.addGenConstrIndicator(indic_usedLoop[i], True, loop2Mem[i,op] == quicksum(m*indic_loop2Mem[i,op,m] for m in range(1,acc.Num_mem)),
-                #                             name=f"C_loop2Mem_({i},{op_name})")
                 model.addConstr(loop2Mem[i,op] == quicksum(m*indic_loop2Mem[i,op,m] for m in range(1,acc.Num_mem)),
                                             name=f"C_loop2Mem_({i},{op_name})")
         for i in range(Num_Loops-1):
@@ -225,13 +197,6 @@ class Solver():
             model.addConstr(loop2Factor[i] == quicksum(indic_factor2Loop[d,f,i] * factors[d][f] 
                                                           for d in range(1, ops.Num_dim) for f in range(len(factors[d]))), name=f"C_loop2Factor_({i})") 
                                                     
-        indic_loop2Factor = gp.tupledict()
-        for i in range(Num_Loops):
-            for p in range(len(uniqueFactor)):
-                indic_loop2Factor[i,p] = model.addVar(vtype=GRB.BINARY, name=f"Indic_loop2Factor_({i},{p})")
-            model.addConstr(quicksum(indic_loop2Factor[i,p] for p in range(len(uniqueFactor))) == 1)
-            model.addConstr(quicksum(uniqueFactor[p] * indic_loop2Factor[i,p] for p in range(len(uniqueFactor))) == loop2Factor[i])
-
         # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -# 
 
         for op in range(3):
@@ -242,53 +207,64 @@ class Solver():
             for op, op_name in enumerate(['I','W','O']):
                 if acc.mappingArray[op][m] == 0:
                     continue
-                for m1 in range(m+1, acc.Num_mem+1):
-                    if acc.mappingArray[op][m1] == 1:
-                        indic_nxtMem[m,m1,op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_nextMem_({acc.mem2dict(m)},{acc.mem2dict(m1)},{op_name})")
-                    else:
-                        indic_nxtMem[m,m1,op] = 0
-        for m in range(1, acc.Num_mem):
-            for op, op_name in enumerate(['I','W','O']):
-                if acc.mappingArray[op][m] == 0:
-                    continue
+
                 sum_nxt = 0
                 for m1 in range(m+1, acc.Num_mem+1):
-                    # if m1 == acc.Num_mem:
-                    #     sum_nxt += indic_nxtMem[m,m1,op]
-                    if acc.mappingArray[op][m1] == 1:
-                        for m2 in range(m1+1, acc.Num_mem+1):
-                            if acc.mappingArray[op][m2] == 0:
-                                continue
-                            else:
-                                model.addConstr(1 - indic_usedMem[m1,op] + indic_nxtMem[m,m1,op] >= indic_nxtMem[m,m2,op])
-                        model.addConstr(indic_nxtMem[m,m1,op] <= indic_usedMem[m1,op])
-                        sum_nxt += indic_nxtMem[m,m1,op]
+                    if acc.mappingArray[op][m1] == 0:
+                        indic_nxtMem[m,m1,op] = 0
+                        continue
+                        
+                    indic_nxtMem[m,m1,op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_nextMem_({acc.mem2dict(m)},{acc.mem2dict(m1)},{op_name})")
+
+                    model.addConstr(indic_nxtMem[m,m1,op] <= indic_usedMem[m1,op], name=f"C_nxtMem_Valid_({acc.mem2dict(m)},{acc.mem2dict(m1)},{op_name})")
+                    for m2 in range(m+1, m1):
+                        if acc.mappingArray[op][m2] == 1:
+                            model.addConstr(indic_nxtMem[m, m1, op] <= 1 - indic_usedMem[m2, op],
+                                            name=f"C_NxtMem_Block_({acc.mem2dict(m)},{acc.mem2dict(m1)},{op_name})_by_({acc.mem2dict(m2)})")
+                    
+                    sum_nxt += indic_nxtMem[m,m1,op]
+
                 model.addConstr(sum_nxt == indic_usedMem[m,op])
 
         # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -# 
 
         indic_doubleMem = gp.tupledict()        # indic_doubleMem[m,op] = {0,1}
-        indic_doubleLoop = gp.tupledict()       # indic_doubleloop[i,op] = {0,1}
+        indic_doubleLoop = gp.tupledict()       # indic_doubleloop[i,op] = {0,1} 
+        indic_feeds_DB = gp.tupledict()         # indic_feeds_DB[m,op] = {0,1}  表示 Memory m 的下一级是否双缓冲（无论是通过 Bypass 还是直接连接）
+
         for m in range(1, acc.Num_mem):
             for op, op_name in enumerate(['I','W','O']):
                 if acc.double_config[m][op] == 0:   # or doubleConfig
                     indic_doubleMem[m,op] = 0
                 else:
                     indic_doubleMem[m,op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_doubleMem_({acc.mem2dict(m)},{op_name})")
-                    # model.addConstr(indic_doubleMem[m,op]==0)
+                    model.addConstr(indic_doubleMem[m,op] <= indic_usedMem[m,op], name=f"C_DoubleMem_Valid_{m}_{op_name}")
+
+        for m in range(1, acc.Num_mem):
+            for op, op_name in enumerate(['I','W','O']):
+                if acc.mappingArray[op][m] == 0:
+                    indic_feeds_DB[m, op] = 0
+                    continue
+                indic_feeds_DB[m, op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_feeds_DB_({acc.mem2dict(m)},{op_name})")
+                
+                quad_expr = 0
+                for m1 in range(m+1, acc.Num_mem): # 注意边界，假设 acc.Num_mem 是最大索引(如Macro)
+                    if acc.mappingArray[op][m1]:
+                        if acc.double_config[m1][op] == 1:
+                            quad_expr += indic_nxtMem[m,m1,op] * indic_doubleMem[m1,op]
+                
+                model.addConstr(indic_feeds_DB[m,op] == quad_expr, name=f"C_indic_feeds_DB_{m}_{op_name}")
+        
         for i in range(Num_Loops):
             for op, op_name in enumerate(['I','W','O']):
                 indic_doubleLoop[i,op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_doubleLoop_({i},{op_name})")
-                tmp_indics = []
-                for m in range(1,acc.Num_mem):
-                    if acc.mappingArray[op][m] == 1:
-                        for m1 in range(m+1, acc.Num_mem):
-                            if acc.double_config[m1][op] == 1:
-                                tmp_indic = model.addVar(vtype=GRB.BINARY, name=f"tmp_Indic_doubleLoop_({i},{op_name},{acc.mem2dict(m)},{acc.mem2dict(m1)})")
-                                model.addGenConstrAnd(tmp_indic, [indic_loop2Mem[i,op,m], indic_nxtMem[m,m1,op], indic_doubleMem[m1,op]],
-                                                    name=f"C_tmp_Indic_doubleLoop_({i},{op_name},{acc.mem2dict(m)},{acc.mem2dict(m1)})")
-                                tmp_indics.append(tmp_indic)
-                model.addGenConstrOr(indic_doubleLoop[i,op], tmp_indics, name=f"C_Indic_doubleLoop_({i},{op_name})")
+                
+                quad_expr_loop = 0
+                for m in range(1, acc.Num_mem):
+                    if acc.mappingArray[op][m]:
+                        quad_expr_loop += indic_loop2Mem[i,op,m] * indic_feeds_DB[m,op]
+                
+                model.addConstr(indic_doubleLoop[i,op] == quad_expr_loop, name=f"C_Indic_doubleLoop_({i},{op_name})")
         
 
         ####################################################################  Capacity Constraints   #######################################################################
@@ -316,8 +292,6 @@ class Solver():
                             
                         for u in range(acc.Num_SpUr):
                             if m <= acc.SpUrArray[u,op]:
-                                # for f in range(len(factors[d])):
-                                #     dimExistMem += logF[d,f]*indic_factor2SpUr[d,f,u]
                                 dimExistMem += math.log(self.su[u][d])
                                 
                         model.addConstr(lg_dimExistMem[m,op,d] == dimExistMem, 
@@ -528,7 +502,6 @@ class Solver():
                     if acc.mappingArray[op][m] == 1:
                         tmp_datavolume += (dataVolume[m,op] + var_mul01(model, indic_doubleMem[m,op], dataVolume[m,op], f"C_mul_{m}_{op}")) * acc.precision[m,op]
                         sum_util += dataVolume[m,op]* (acc.precision[m,op] * m)
-                        # dataVolume better than tmp_dataVolume
                 model.addConstr( tmp_datavolume <= acc.memSize[m], name=f"C_dataVolume_({acc.mem2dict(m)})" )
             else:
                 for op, op_name in enumerate(['I','W','O']):
@@ -536,7 +509,6 @@ class Solver():
                         model.addConstr(lg_dataVolume[m,op] + math.log(2)*indic_doubleMem[m,op] <= math.log(acc.memSize[m])-math.log(acc.precision[m,op]))
 
 
-        # transVolume = gp.tupledict()                # transVolume[m,op] = INTEGER
         for m in range(1,acc.Num_mem):
             for op, op_name in enumerate(['I','W','O']):
                 if acc.mappingArray[op][m] == False:
@@ -549,169 +521,85 @@ class Solver():
 
         # - - - - - - - - - - - - - - - - - - - - - - - - - - - - Latency - - - - - - - - - - - - - - - - - - - - - - - - - -- - - - - - - - - - - - - - - - - - - -#          
         indic_xMem = gp.tupledict()                 # indic_xMem[i,op] = {0,1}
-        for i in range(Num_Loops):
-            for op, op_name in enumerate(['I','W','O']):
-                indic_xMem[i,op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_xMem_({i},{op_name})")
-                model.addGenConstrIndicator(indic_xMem[i,op], True, loop2Mem[i,op] + 1 <= loop2Mem[i+1,op], name=f"C_xMem_({i},{op_name})_T")
-                model.addGenConstrIndicator(indic_xMem[i,op], False, loop2Mem[i,op] == loop2Mem[i+1,op], name=f"C_xMem_({i},{op_name})_F")
         for op, op_name in enumerate(['I','W','O']):
-            model.addConstr(quicksum(indic_xMem[i,op] for i in range(Num_Loops)) <= 4, name=f"max_xMem_{op_name}")
-
-        transfer = gp.tupledict()                       # transfer[i,op]
-        transfer_z = gp.tupledict()                     # transfer_z[i,op]
-        lg_transfer = gp.tupledict()
-        transfer_z_oneway = gp.tupledict()              # transfer_z_oneway[i,op]
-        for i in range(Num_Loops):
-            for op, op_name in enumerate(['I','W','O']):
-                transfer[i,op] = model.addVar(lb=0, ub=self.maxTrans, vtype=GRB.CONTINUOUS, name=f"transfer_({i},{op_name})")   #WTD max precision
-
-                lg_transfer[i,op] = model.addVar(lb=0, ub=math.log(self.maxTrans), vtype=GRB.CONTINUOUS, name=f"lg_transfer_({i},{op_name})")   
-                for m in range(1,acc.Num_mem):
-                    if acc.mappingArray[op][m]:         # WTD
-                        model.addGenConstrIndicator(indic_loop2Mem[i,op,m], True, 
-                                                    lg_transfer[i,op] + math.log(acc.bw[m]) == lg_transVolume[m,op] + math.log(acc.precision[m,op]),
-                                                    name=f"C_lg_transfer_({i},{op_name},{acc.mem2dict(m)})")
-                model.addGenConstrExp(xvar=lg_transfer[i,op], yvar=transfer[i,op], options=self.ExpOption, name=f"C_transfer_({i},{op_name})")
-
-                transfer_z[i,op] = model.addVar(lb=0, ub=self.maxTrans, vtype=GRB.INTEGER, name=f"transfer_z_({i},{op_name})")
-                if i < Num_Loops-1:
-                    if op < 2:
-                        model.addGenConstrIndicator(indic_xMem[i,op], True, transfer_z[i,op]==transfer[i,op], name=f"test_({i},{op_name})") 
-                    else:
-                        model.addGenConstrIndicator(indic_xMem[i,op], True, transfer_z[i,op]==transfer[i,op]*2, name=f"test_({i},{op_name})") 
-                    # model.addGenConstrIndicator(indic_xMem[i,op], True, transfer_z[i,op]>=transfer[i,op], name=f"test_({i},{op_name})") 
-                    model.addGenConstrIndicator(indic_xMem[i,op], False, transfer_z[i,op]==0, name=f"test_({i},{op_name})_F") 
-                if op_name == 'O':
-                    transfer_z_oneway[i,op] = model.addVar(lb=0, ub=self.maxTrans, vtype=GRB.INTEGER, name=f"transfer_output_oneway_({i},{op_name})")
-                    # model.addConstr(transfer_z_oneway[i,op] * 2 == transfer_z[i,op], name=f"C_transfer_output_oneway_({i},{op_name})")
-                    # model.addGenConstrMax(transfer_z_oneway[i,op], [transfer_z[i,op]*0.5], constant=1, name=f"C_transfer_output_oneway_({i},{op_name})")
-                    model.addGenConstrIndicator(indic_xMem[i,op], True, transfer_z_oneway[i,op]>=transfer_z[i,op]*0.5, name=f"C_transfer_output_oneway_({i},{op_name})_T")
-                    model.addGenConstrIndicator(indic_xMem[i,op], False, transfer_z_oneway[i,op]==0, name=f"C_transfer_output_oneway_({i},{op_name})_F")
-
+            for i in range(Num_Loops):
+                indic_xMem[i,op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_xMem_({i},{op_name})")
+                tmp_diff = loop2Mem[i+1,op] - loop2Mem[i,op]
+                model.addConstr(tmp_diff >= indic_xMem[i,op], name=f"C_tmp_diff_({i},{op_name})")
+                model.addConstr(tmp_diff <= acc.Num_mem * indic_xMem[i,op], name=f"C_tmp_diff_ub_({i},{op_name})")
+                
+            if op_name == 'W':      # Weight
+                model.addConstr(quicksum(indic_xMem[i,op] for i in range(Num_Loops)) <= 2, name=f"max_xMem_{op_name}")
+            else:                   # Feature
+                model.addConstr(quicksum(indic_xMem[i,op] for i in range(Num_Loops)) <= 4, name=f"max_xMem_{op_name}")
+        
         indic_usedLastMem = gp.tupledict()              # indic_usedLastMem[op] = {0,1}
         for op, op_name in enumerate(['I','W','O']):
             indic_usedLastMem[op] = model.addVar(vtype=GRB.BINARY, name=f"indic_usedLastMem_({op_name})")
-            model.addGenConstrIndicator(indic_usedLastMem[op], True, loop2Mem[Num_Loops-1,op] == acc.lastMem[op])
-            model.addGenConstrIndicator(indic_usedLastMem[op], False, loop2Mem[Num_Loops-1,op]+1 <= acc.lastMem[op])
-            
-            tmp_coeff = 2 if op_name == 'O' else 1
-            model.addConstr(transfer_z[Num_Loops-1, op] == (transfer[Num_Loops-1, op] + (1 - indic_usedLastMem[op])) * tmp_coeff,
-                             name=f"C_RegTrans_({op_name})")
+            tmp_diff = acc.lastMem[op] - loop2Mem[Num_Loops-1,op] 
+            model.addConstr(tmp_diff >= 1-indic_usedLastMem[op], name=f"C_tmp_diff_lastMem_({op_name})")
+            model.addConstr(tmp_diff <= acc.Num_mem * (1-indic_usedLastMem[op]), name=f"C_tmp_diff_lastMem_ub_({op_name})")
 
-
-        latency_cp = gp.tupledict()         # latency_cp[i] = Latency of Critical Path
-        latency_consu = gp.tupledict()
-        critical_term = gp.tupledict()
-        for i in range(Num_Loops):
-            latency_cp[i] = model.addVar(lb=acc.t_MAC*math.pow(2,Num_Loops-1-i), ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"latency_cp_({i})")
-            critical_term[i] = model.addVar(lb=acc.t_MAC*math.pow(2,Num_Loops-1-i), ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"creitical_({i})")
-            for op, op_name in enumerate(['I','W','O']):
-                latency_consu[i,op] = model.addVar(lb=acc.t_MAC*math.pow(2,Num_Loops-1-i), ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"latency_consume_({i},{op_name})")
-        for op, op_name in enumerate(['I','W','O']):
-            critical_term[Num_Loops] = acc.t_MAC
-            latency_consu[Num_Loops,op] = acc.t_MAC
-
-
-        latency_opN = gp.tupledict()
-        latency_maxTL = gp.tupledict()
-        exp_critical_term = gp.tupledict()     
-        for i in range(Num_Loops):
-            exp_critical_term[i] = model.addVar(lb=acc.t_MAC*math.pow(2,Num_Loops-1-i), ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"exp_critical_term_({i})")
-            for p in range(len(uniqueFactor)):
-                model.addGenConstrIndicator(indic_loop2Factor[i,p], True, exp_critical_term[i] == latency_cp[i]*uniqueFactor[p], name=f"C_exp_critical_({i},{p})")
-            for op, op_name in enumerate(['I','W','O']):
-                latency_opN[i,op] = model.addVar(lb=acc.t_MAC*math.pow(2,Num_Loops-1-i), ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"latency_opN_({i},{op_name})")
-                latency_maxTL[i,op] = model.addVar(lb=acc.t_MAC*math.pow(2,Num_Loops-1-i), ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"latency_maxTL_({i},{op_name})")
-                model.addConstr(latency_maxTL[i,op] >= transfer_z[i,op],      name=f"C_tmp_lmax_({i},{op_name})_1")
-                model.addConstr(latency_maxTL[i,op] >= latency_consu[i+1,op], name=f"C_tmp_lmax_({i},{op_name})_2")
-                model.addGenConstrIndicator(indic_doubleLoop[i,op], True,  latency_opN[i,op] == latency_maxTL[i,op], 
-                                            name=f"C_latency_opN_({i},{op_name})_T")
-                
-                model.addGenConstrIndicator(indic_doubleLoop[i,op], False, latency_opN[i,op] == transfer_z[i,op]+latency_consu[i+1,op], 
-                                            name=f"C_latency_opN_({i},{op_name})_F")
-                
-            model.addConstr(latency_cp[i] >= critical_term[i+1], name=f"C_latency_cp_({i})_cpTerm")
-            for op in range(3):
-                model.addConstr(latency_cp[i] >= latency_opN[i,op], name=f"C_latency_cp_({i})_opN[{op}]")
-                
-        exp_latency_consu = gp.tupledict()
-        latency_transMatters = gp.tupledict() 
+        transfer = gp.tupledict()                       # transfer[i,op]
+        lg_transfer = gp.tupledict()
         for i in range(Num_Loops):
             for op, op_name in enumerate(['I','W','O']):
-                exp_latency_consu[i,op] = model.addVar(lb=acc.t_MAC*math.pow(2,Num_Loops-1-i), ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"exp_latency_consume_({i},{op_name})")
-                latency_transMatters[i,op] = model.addVar(lb=acc.t_MAC*math.pow(2,Num_Loops-1-i), ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"latency_transMatters_({i},{op_name})")
+                transfer[i,op] = model.addVar(lb=0, ub=self.maxTrans[op], vtype=GRB.CONTINUOUS, name=f"transfer_({i},{op_name})")   #WTD max precision
+                lg_transfer[i,op] = model.addVar(lb=0, ub=math.log(self.maxTrans[op]), vtype=GRB.CONTINUOUS, name=f"lg_transfer_({i},{op_name})")   
+                
+                tmp_rhs_expr = 0
+                for m in range(1, acc.Num_mem):
+                    if acc.mappingArray[op][m]:
+                        tmp_rhs_expr += indic_loop2Mem[i,op,m] * (lg_transVolume[m,op] - math.log(acc.bw[m]) + math.log(acc.precision[m,op]))
+                model.addConstr(lg_transfer[i,op] == tmp_rhs_expr, name=f"C_lg_transfer_linear_({i},{op_name})")
 
-                tmp_consu = model.addVar(lb=acc.t_MAC*math.pow(2,Num_Loops-1-i), ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"tmp_consu_({i},{op_name})")
-                for p in range(len(uniqueFactor)):
-                    model.addGenConstrIndicator(indic_loop2Factor[i,p], True, tmp_consu == latency_cp[i] * (uniqueFactor[p]-1) + latency_consu[i+1,op],
-                                                 name=f"C_tmp_consu_({i},{op_name},{p})")
-                model.addGenConstrIndicator(indic_xMem[i,op], False, exp_latency_consu[i,op] == tmp_consu)          
+                model.addGenConstrExp(xvar=lg_transfer[i,op], yvar=transfer[i,op], options=self.ExpOption, name=f"C_transfer_({i},{op_name})")
+
+
+        latency_Critical = gp.tupledict()           # latency_cp[i] = Latency of Critical Path
+        latency_Process = gp.tupledict()            # latency_Process[i,op] 
+        latency_Transfer = gp.tupledict()           # latency_Transfer[i,op]
+        for i in range(Num_Loops):
+            latency_Critical[i] = model.addVar(lb=acc.t_MAC*math.pow(2,Num_Loops-1-i), ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"latency_Critical_({i})")
+            for op, op_name in enumerate(['I','W','O']):
+                latency_Process[i,op] = model.addVar(lb=acc.t_MAC*math.pow(2,Num_Loops-1-i), ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"latency_Process_({i},{op_name})")
                 
+                if i < Num_Loops-1:
+                    latency_Transfer[i,op] = var_mul01(model, indic_xMem[i, op], transfer[i, op], name=f"latency_Transfer_({i},{op_name})", A_ub=self.maxTrans[op])
+                else:
+                    latency_Transfer[i,op] = model.addVar(lb=0, ub=self.maxTrans[op], vtype=GRB.CONTINUOUS, name=f"latency_Transfer_({i},{op_name})")
+                    model.addConstr(latency_Transfer[i,op] == transfer[Num_Loops-1, op] + 1 - indic_usedLastMem[op], name=f"C_RegTrans_({op_name})")
+                    latency_Process[Num_Loops,op] = acc.t_MAC
+
+
+        for i in range(Num_Loops):
+            for op, op_name in enumerate(['I','W','O']):
+
+                tmp_coeff = 2 if op_name == 'O' else 1
+
+                model.addConstr(latency_Critical[i] >= tmp_coeff * latency_Transfer[i,op], name=f"C_latency_cp_transfer_({i},{op_name})")
+                model.addConstr(latency_Critical[i] >= latency_Process[i+1,op], name=f"C_latency_cp_process_({i},{op_name})")
+                model.addConstr(latency_Critical[i] >= tmp_coeff * latency_Transfer[i,op] + latency_Process[i+1,op] - (self.ub_latency/math.pow(2,i)*indic_doubleLoop[i,op]),
+                                 name=f"C_latency_cp_transfer+process_({i},{op_name})")
+
+        for i in range(Num_Loops):
+            for op, op_name in enumerate(['I','W','O']):
+                model.addConstr(latency_Process[i,op] >= latency_Process[i+1,op] + latency_Critical[i] * (loop2Factor[i]-1) - (self.ub_latency/math.pow(2,i) * indic_xMem[i,op]),
+                                 name=f"C_latency_process_stationary_({i},{op_name})")
                 
+                tmp_2TPcpN = 2 * latency_Transfer[i,op] + latency_Process[i+1,op] + latency_Critical[i] * loop2Factor[i]
+
                 if op < 2:      # I,W
-                    tmp_consu_sing = model.addVar(lb=acc.t_MAC*math.pow(2,Num_Loops-1-i), ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"tmp_consu_sing_({i},{op_name})")
-                    for p in range(len(uniqueFactor)):
-                        model.addGenConstrIndicator(indic_loop2Factor[i,p], True, tmp_consu_sing == latency_cp[i] * (uniqueFactor[p]-2) + 2*transfer_z[i,op] + latency_consu[i+1,op])
-                    
-                    tmp_consu_doub_1 = model.addVar(lb=acc.t_MAC*math.pow(2,Num_Loops-1-i), ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"tmp_consu_doub_({i},{op_name})_1")
-                    for p in range(len(uniqueFactor)):
-                        model.addGenConstrIndicator(indic_loop2Factor[i,p], True, tmp_consu_doub_1 == latency_cp[i] * max(0,uniqueFactor[p]-3) + 2*transfer_z[i,op] + latency_maxTL[i,op])
-                    tmp_consu_doub_2 = model.addVar(lb=0, ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"tmp_consu_doub_({i},{op_name})_2")
-                    # lb of tmp_consu_doub_2 cannot be acc.t_MAC
-                    for p in range(len(uniqueFactor)):
-                        model.addGenConstrIndicator(indic_loop2Factor[i,p], True, tmp_consu_doub_2 == transfer_z[i,op] * uniqueFactor[p])
-
-                    tmp_vmax = model.addVar(lb=acc.t_MAC*math.pow(2,Num_Loops-1-i), ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"tmp_max_double12_({i},{op_name})")
-                    model.addConstr(tmp_vmax >= tmp_consu_doub_1, name=f"C_tmp_vmax_({i},{op_name})_1")
-                    model.addConstr(tmp_vmax >= tmp_consu_doub_2, name=f"C_tmp_vmax_({i},{op_name})_2")
-                    model.addGenConstrIndicator(indic_doubleLoop[i,op], True, latency_transMatters[i,op] >= tmp_vmax)
-                    model.addGenConstrIndicator(indic_doubleLoop[i,op], False,latency_transMatters[i,op] >= tmp_consu_sing)
-
+                    model.addConstr(latency_Process[i,op] >= tmp_2TPcpN - (2 + indic_doubleLoop[i,op]) * latency_Critical[i], name=f"C_latency_process_({i},{op_name})")
                 else:           # O
-                    tmp_consu_sing = model.addVar(lb=0, ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"tmp_consu_sing_({i},{op_name})")
-                    for p in range(len(uniqueFactor)):
-                        model.addGenConstrIndicator(indic_loop2Factor[i,p], True, tmp_consu_sing == latency_cp[i] * (uniqueFactor[p]-1) + transfer_z[i,op] + latency_consu[i+1,op])
-                    
-                    tmp_consu_doub_1 = model.addVar(lb=0, ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"tmp_consu_doub_({i},{op_name})_1")
-                    
-                    tmp_vmax_1 = model.addVar(lb=0, ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"tmp_max_Outdouble_({i},{op_name})_1")
-                    tmp_vmax_2 = model.addVar(lb=0, ub=self.ub_latency/math.pow(2,i), vtype=GRB.CONTINUOUS, name=f"tmp_max_Outdouble_({i},{op_name})_2")
-
-                    model.addConstr(tmp_vmax_1 >= transfer_z_oneway[i,op], name=f"C_tmp_vmax_1_({i},{op_name})_1")
-                    model.addConstr(tmp_vmax_1 >= latency_cp[i], name=f"C_tmp_vmax_1_({i},{op_name})_2")
-                    
-                    model.addConstr(tmp_vmax_2 >= transfer_z_oneway[i,op], name=f"C_tmp_vmax_2_({i},{op_name})_1")
-                    model.addConstr(tmp_vmax_2 >= latency_consu[i+1,op], name=f"C_tmp_vmax_2_({i},{op_name})_2")
-
-                    for p in range(len(uniqueFactor)):
-                        model.addGenConstrIndicator(indic_loop2Factor[i,p], True, tmp_consu_doub_1 == \
-                                                    latency_cp[i] * (uniqueFactor[p]-2) + transfer_z[i,op] + tmp_vmax_1 + tmp_vmax_2)
-
-                    model.addGenConstrIndicator(indic_doubleLoop[i,op], True, latency_transMatters[i,op] == tmp_consu_doub_1)
-                    model.addGenConstrIndicator(indic_doubleLoop[i,op], False, latency_transMatters[i,op] == tmp_consu_sing)        
-
-                model.addGenConstrIndicator(indic_xMem[i,op], True, exp_latency_consu[i,op] == latency_transMatters[i,op])
-
-        for i in range(Num_Loops):
-            model.addConstr(critical_term[i]==exp_critical_term[i])
-            for op, op_name in enumerate(['I','W','O']): 
-                model.addConstr(latency_consu[i,op]==exp_latency_consu[i,op])
-
-            #  - - - - - - - - - - - - - - - - - - - Spatial Constraints - - - - - - - - - - - - - - - - - - -
-            # Macro-level           K <= D1 | R*S*C  <= D2 * D3 | P-Q <= D3
-            # localBuffer-level     Product <= Num_macro
-            # GlobalBuffer-level    Product <= Num_core
-            # Dram-level            Product <= 1
-            # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-            # self.dim2Dict = ['R', 'S', 'P', 'Q', 'C', 'K'] 
+                    model.addConstr(latency_Process[i,op] >= tmp_2TPcpN - latency_Critical[i], name=f"C_latency_process_({i},{op_name})")
 
         
         res_latency = model.addVar(lb=self.lb_latency, ub=self.ub_latency, vtype=GRB.CONTINUOUS,     name="res_latency")
         res_energy  = model.addVar(lb=1, vtype=GRB.CONTINUOUS,  name="res_energy")
         res_EDP     = model.addVar(lb=1, vtype=GRB.CONTINUOUS,  name="res_EDP")
-        model.addConstr(res_latency >= critical_term[0])
         for op in range(3):
-            model.addConstr(res_latency >= latency_consu[0,op])
+            model.addConstr(res_latency >= latency_Process[0,op])
         
 
         # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -#          
