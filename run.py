@@ -1,8 +1,6 @@
 # this file is prepared for project 419
 # Created by iboxl
 
-import torch
-import torch.nn as nn
 from utils.Tools import *
 from Architecture.ArchSpec import CIM_Acc
 from utils.Workload import Operands, WorkLoad, LoopNest
@@ -77,15 +75,22 @@ def __main__(**kwargs):
     FLAG.DEBUG_PER_LAYER_DETAIL = False               # illegal Tmp setting
 
     Logger.info("* " * 50)
-    Logger.info(f"model={args.model}, Architecture={args.architecture}, Weight_stationary={FLAG.WEIGHT_STATIONARY}" )
+    Logger.info(f"model={args.model}, Architecture={args.architecture}, Weight_stationary={FLAG.WEIGHT_STATIONARY}, Optimization_Flag={CONST.FLAG_OPT}" )
     Logger.info("* " * 50)
 
     model = f"model/{args.model}.onnx"
 
     convs, loopdims = extract_loopdims(model)
 
-    opt_flag = "latency" 
-    # opt_flag = "EDP" 
+    match CONST.FLAG_OPT:
+        case "Latency":
+            opt_flag = "latency" 
+        case "Energy":
+            opt_flag = "energy" 
+        case "EDP":
+            opt_flag = "EDP" 
+        case _:
+            opt_flag = "latency"            # flagOPT = infeasible
     
     compare_filePrefix = f"zzz_outputs/{opt_flag}_{args.model}_{args.architecture}"
     if os.path.isfile(f"{compare_filePrefix}.pickle") == False:     # Zigzag-CME is not exist, running ZZ-opt
@@ -109,7 +114,6 @@ def __main__(**kwargs):
 
     cache = {}
 
-    CONST.FLAG_OPT="Latency"
     latency_zz, energy_zz, latency_mi, energy_mi = 0, 0, 0, 0
     
     acc_template = import_module(f"Architecture.{args.architecture}").accelerator
@@ -170,7 +174,18 @@ def __main__(**kwargs):
             for dChar in ['P','Q','H','W']: #newdim[dChar] += (loopdim[dChar] % 2)
                 if loopdim[dChar] % 2==1 and loopdim[dChar]>15:
                     newdim[dChar] += 1
-            l_solver, e_solver, edp_solver, l_simu, e_simu, PD_M = SolveMapping(acc=accelerator, ops=WorkLoad(loopDim=newdim), cycBound=l_zz*2, outputdir=outputdir_layer)
+
+            match CONST.FLAG_OPT:
+                case "Latency":
+                    bestMetric = l_zz
+                case "Energy":
+                    bestMetric = e_zz
+                case "EDP":
+                    bestMetric = l_zz * e_zz * CONST.SCALINGFACTOR
+                case _:
+                    bestMetric = 1e9            # flagOPT = infeasible
+
+            l_solver, e_solver, edp_solver, l_simu, e_simu, PD_M = SolveMapping(acc=accelerator, ops=WorkLoad(loopDim=newdim), bestMetric=bestMetric * 1.5, outputdir=outputdir_layer)
             cache[key] = (l_solver, e_solver, l_simu, e_simu, l_zz, e_zz)
             
             pstr += "\n-------- MemHierarchy ----- DB_M -- DB_Z --- PowerRate --- Power_M - Power_E -----\n"

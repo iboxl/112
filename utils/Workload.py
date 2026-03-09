@@ -2,16 +2,12 @@
 # Created by iboxl
 # Modified in project 112
 
-import torch 
-import torch.nn as nn
 import math
-from utils.UtilsFunction.ToolFunction import getDivisors, getPrimeFactors
+from utils.UtilsFunction.ToolFunction import getDivisors
 from Architecture.ArchSpec import CIM_Acc
 from dataclasses import dataclass
 from utils.factorization import flexible_factorization
 from utils.GlobalUT import *
-
-
 
 class Operand():
     def __init__(self):

@@ -9,6 +9,8 @@ class _const_num_config():
         
         self.FLAG_OPT = "Feasible"
 
+        self.MIPFOCUS = 1                               # MIPFocus: 0=balanced, 1=feasibility, 2=optimality, 3=best bound
+
         self.WEIGHT_LATENCY = 0.8
 
         self.MAX_BLOCK_N = 35                   # 太大会导致某些操作数维度infeasible
@@ -25,7 +27,11 @@ class _const_num_config():
 
         # self.TIMELIMIT_AFTER_TLE = 10
 
-        self.SCALINGFACTOR = 1e3
+        self.SCALINGFACTOR = 1e-6
+
+        # self.SCALE_LATENCY = 1000       # latency 以千周期为单位
+        
+        # self.SCALE_BW = 1024            # bandwidth 以 KB/cycle 为单位
 
         self.UTIL_COEFFICIENT = 0.5
 

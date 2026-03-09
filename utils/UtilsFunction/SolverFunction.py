@@ -174,11 +174,18 @@ def var_AleB(model:gp.Model, A, B):
     return var, var_A, var_B
 
 def var_AandB(model, A, B, name):
-    var = model.addVar(vtype=GRB.BINARY, name=f'indic_{name}') 
-    model.addConstr( var <= A, name=f'C_AandB_{name}_1')
-    model.addConstr( var <= B, name=f'C_AandB_{name}_2')
-    model.addConstr( var >= A + B - 1, name=f'C_AandB_{name}_3')
-    return var
+    if not isinstance(A, gp.Var) and not isinstance(B, gp.Var):
+        return 1.0 if A and B else 0.0
+    elif not isinstance(A, gp.Var):
+        return B if A==True else 0.0
+    elif not isinstance(B, gp.Var):
+        return A if B==True else 0.0
+    else:
+        var = model.addVar(lb=0.0, ub=1.0, vtype=GRB.CONTINUOUS, name=f'indic_{name}') 
+        model.addConstr( var <= A, name=f'C_AandB_{name}_1')
+        model.addConstr( var <= B, name=f'C_AandB_{name}_2')
+        model.addConstr( var >= A + B - 1, name=f'C_AandB_{name}_3')
+        return var
 
 def var_AorB(model, A, B, name):
     var = model.addVar(vtype=GRB.BINARY, name=f'indic_{name}')

@@ -1,5 +1,6 @@
 #  this file is prepared for project 419
 #  Created by iboxl
+#  Modified in project 112
 
 from utils.Workload import WorkLoad, LoopNest
 from Architecture.ArchSpec import CIM_Acc
@@ -172,32 +173,17 @@ class tranSimulator():
                     tileSize[mem,op] = 0
         self.tileSize = tileSize
 
-        unicast_size = {}
-        multicast_size = {}
-        for mem in range(1,acc.Num_mem):
-            for op, op_name in enumerate(['I','W','O']):
-                if acc.mappingArray[op][mem] == 0:
-                    multicast_size[mem,op], unicast_size[mem,op] = 0, 0
-                else:
-                    multicast_size[mem,op], unicast_size[mem,op] = 1, 1
-        for sm in dataflow.sm:
-            for op, op_name in enumerate(['I','W','O']):
-                if ops.relevance[op][sm.dim] == 1:
-                    unicast_size[sm.mem[op],op] *= sm.dimSize 
-                else:
-                    multicast_size[sm.mem[op],op] *= sm.dimSize
-        for mem in range(acc.Num_mem-1, 1, -1):                     # 将被bypass的Unrolling移动到对应的上一层
-            for op, op_name in enumerate(['I','W','O']):
-                if self.dataflow.bypassMem[mem][op] == 1:
-                    for mem2 in range(mem-1,0,-1):
-                        if acc.nxtMem[op][mem2] == mem:
-                            unicast_size[mem2,op] *= unicast_size[mem,op]
-                            multicast_size[mem2,op] *= multicast_size[mem,op]
-                            unicast_size[mem,op] = 0
-                            multicast_size[mem,op] = 0
-                            break
-        self.unicast_size, self.multicast_size = unicast_size, multicast_size
-
+        self.instance_Used_count = {}
+        for op, op_name in enumerate(['I','W','O']):
+            for m in range(1, acc.Num_mem):
+                cnt = 1
+                for mapping in dataflow.sm:
+                    if m > mapping.mem[op] and acc.mappingArray[op][m] == 1:
+                        cnt *= mapping.dimSize
+                self.instance_Used_count[m, op] = cnt
+        for op, op_name in enumerate(['I','W','O']):
+            self.instance_Used_count[acc.Num_mem, op] = self.instance_Used_count[acc.lastMem[1], 1]
+        
         self.count_mac = 0
 
         self.timer = {}
@@ -294,18 +280,15 @@ class tranSimulator():
                         stall = Cons[op]
                     self.memCost[mem_cur[op]].t += stall
 
-                    # WTD
                     if mem_cur[op] == self.lastMappingMem[op] and self.lastMemReg[op] is False:
                         self.memCost[self.lastMappingMem[op]].r += self.acc.cost_r[self.lastMappingMem[op]] * tileSize[op] * self.acc.precision[self.lastMappingMem[op],op]
-                        self.memCost[self.acc.lastMem[op]].w += self.acc.cost_w[self.acc.lastMem[op]] * nxtSize[op]  * self.acc.precision[self.lastMappingMem[op],op] 
+                        self.memCost[self.acc.lastMem[op]].w += self.acc.cost_w[self.acc.lastMem[op]] * nxtSize[op]  * self.acc.precision[self.acc.lastMem[op],op]
 
-                        self.memCost[self.acc.lastMem[op]].r += self.acc.cost_r[self.acc.lastMem[op]] * nxtSize[op]  * self.acc.precision[self.acc.lastMem[op],op]
-                        self.memCost[mem_nxt[op]].w += self.acc.cost_w[mem_nxt[op]] * nxtSize[op]  * self.acc.precision[self.acc.lastMem[op],op] * \
-                                                    self.unicast_size[mem_cur[op],op] * self.multicast_size[mem_cur[op],op]
+                        self.memCost[self.acc.lastMem[op]].r += self.acc.cost_r[self.acc.lastMem[op]] * nxtSize[op]  * self.acc.precision[self.acc.lastMem[op],op] 
+                        self.memCost[mem_nxt[op]].w += self.acc.cost_w[mem_nxt[op]] * nxtSize[op]  * self.acc.precision[mem_nxt[op],op]
                     else:
-                        self.memCost[mem_cur[op]].r += self.acc.cost_r[mem_cur[op]] * tileSize[op] * self.acc.precision[mem_cur[op],op]
-                        self.memCost[mem_nxt[op]].w += self.acc.cost_w[mem_nxt[op]] * nxtSize[op]  * self.acc.precision[mem_cur[op],op] * \
-                                                    self.unicast_size[mem_cur[op],op] * self.multicast_size[mem_cur[op],op]
+                        self.memCost[mem_cur[op]].r += self.acc.cost_r[mem_cur[op]] * tileSize[op] * self.acc.precision[mem_cur[op],op] 
+                        self.memCost[mem_nxt[op]].w += self.acc.cost_w[mem_nxt[op]] * nxtSize[op]  * self.acc.precision[mem_nxt[op],op]
 
                 self.loopExecution(loopidx=loopidx+1)
 
@@ -321,43 +304,60 @@ class tranSimulator():
                             self.timer[mem_cur[op],op] = self.timer[mem_nxt[op],op]
 
                         if mem_cur[op] == self.lastMappingMem[op] and self.lastMemReg[op] is False:
-                            self.memCost[mem_nxt[op]].r += self.acc.cost_r[mem_nxt[op]] * nxtSize[op]  * self.acc.precision[mem_cur[op],op] * \
-                                                    self.unicast_size[mem_cur[op],op] * self.multicast_size[mem_cur[op],op]
+                            self.memCost[mem_nxt[op]].r += self.acc.cost_r[mem_nxt[op]] * nxtSize[op]  * self.acc.precision[mem_nxt[op],op]
                             self.memCost[self.acc.lastMem[op]].w += self.acc.cost_w[self.acc.lastMem[op]] * nxtSize[op] * self.acc.precision[self.acc.lastMem[op],op]
 
-                            self.memCost[self.acc.lastMem[op]].r += self.acc.cost_r[self.acc.lastMem[op]] * tileSize[op]  * self.acc.precision[self.acc.lastMem[op],op]
-                            self.memCost[mem_cur[op]].w += self.acc.cost_w[mem_cur[op]] * tileSize[op] * self.acc.precision[mem_cur[op],op]
+                            self.memCost[self.acc.lastMem[op]].r += self.acc.cost_r[self.acc.lastMem[op]] * nxtSize[op]  * self.acc.precision[self.acc.lastMem[op],op] 
+                            self.memCost[mem_cur[op]].w += self.acc.cost_w[mem_cur[op]] * tileSize[op] * self.acc.precision[mem_cur[op],op] 
                         else:
-                            self.memCost[mem_nxt[op]].r += self.acc.cost_r[mem_nxt[op]] * nxtSize[op]  * self.acc.precision[mem_cur[op],op] * \
-                                                    self.unicast_size[mem_cur[op],op] * self.multicast_size[mem_cur[op],op]
+                            self.memCost[mem_nxt[op]].r += self.acc.cost_r[mem_nxt[op]] * nxtSize[op]  * self.acc.precision[mem_nxt[op],op]
                             self.memCost[mem_cur[op]].w += self.acc.cost_w[mem_cur[op]] * tileSize[op] * self.acc.precision[mem_cur[op],op]
                 
                         self.memCost[mem_cur[op]].t += stall 
                 self.ptimer(loopidx, i+1)
 
     def run(self):
-        Logger.info("Evaluation by running translation simulator") 
+        Logger.critical("Evaluation by running translation simulator") 
 
+        self.firstMemDram = {}
+        self.firstMappingMem = {}
         self.lastMemReg = {}
         self.lastMappingMem = {}
         for op, op_name in enumerate(['I','W','O']):
+            self.firstMappingMem[op] = self.dataflow.tm[0].mem[op]
+            self.firstMemDram[op] = True if self.dataflow.tm[0].mem[op] == self.acc.Dram2mem else False
             self.lastMappingMem[op] = self.dataflow.tm[-1].mem[op]
             self.lastMemReg[op] = True if self.lastMappingMem[op] == self.acc.lastMem[op] else False
 
-        # self.dataSize[self.acc.Num_mem,1] = 0       # macro has no transfer cost
+        for op, op_name in enumerate(['I','W','O']):
+            if self.firstMemDram[op] is False:
+                self.timer[self.acc.Dram2mem, op]        += self.ops.size[op] * self.acc.precision[self.acc.Dram2mem,op] / self.acc.bw[self.acc.Dram2mem]
+                self.timer[self.firstMappingMem[op], op] += self.ops.size[op] * self.acc.precision[self.acc.Dram2mem,op] / self.acc.bw[self.acc.Dram2mem]
+
         self.loopExecution(0)
+
+        for op, op_name in enumerate(['I','W','O']):
+            if op_name == 'O' and self.firstMemDram[op] is False:
+                self.timer[self.acc.Dram2mem, op]        += self.ops.size[op] * self.acc.precision[self.acc.Dram2mem,op] / self.acc.bw[self.acc.Dram2mem]
+                self.timer[self.firstMappingMem[op], op] += self.ops.size[op] * self.acc.precision[self.acc.Dram2mem,op] / self.acc.bw[self.acc.Dram2mem]
 
         res_Latency = max(self.timer[mem, op] for op in range(3) for mem in range(self.acc.Num_mem))
 
         # ['PLACEHOLD'0, 'Dram'1, 'Global_buffer'2, 'Output_buffer'3, 'Input_buffer'4, 'OReg'5, 'IReg'6, 'Macro'7] acc.Num_mem = 8
-        self.memCost[3].r *= self.acc.Num_core
-        self.memCost[4].r *= self.acc.Num_core
-        self.memCost[5].r *= self.acc.dimY * self.acc.Num_core
-        self.memCost[6].r *= self.acc.dimX * self.acc.Num_core
-        self.memCost[3].w *= self.acc.Num_core
-        self.memCost[4].w *= self.acc.Num_core
-        self.memCost[5].w *= self.acc.dimY * self.acc.Num_core
-        self.memCost[6].w *= self.acc.dimX * self.acc.Num_core
+        
+        for op, op_name in enumerate(['I','W','O']):
+            if self.firstMemDram[op] is False:
+                self.memCost[self.acc.Dram2mem].r += self.dataSize[self.firstMappingMem[op],op] * \
+                                                    self.acc.cost_r[self.acc.Dram2mem] * self.acc.precision[self.acc.Dram2mem,op]
+                self.memCost[self.firstMappingMem[op]].w += self.dataSize[self.firstMappingMem[op],op] * \
+                                                       self.acc.cost_w[self.firstMappingMem[op]] * self.acc.precision[self.firstMappingMem[op],op]
+        
+        for m in range(1, self.acc.Num_mem):
+            for op, op_name in enumerate(['I','W','O']):
+                if self.acc.mappingArray[op][m] == 1 and self.instance_Used_count[m,op] > 1:
+                    self.memCost[m].r *= self.instance_Used_count[m,op]
+                    self.memCost[m].w *= self.instance_Used_count[m,op]
+                    continue
 
         self.memCost[self.acc.Macro2mem].r = 0
 
@@ -368,18 +368,21 @@ class tranSimulator():
             cost_w += self.memCost[m].w
             self.PD.memCost[m] += self.memCost[m].r + self.memCost[m].w
 
-        cost_m = self.acc.cost_ActMacro * self.count_mac * self.acc.Num_core
+        cost_m = self.acc.cost_ActMacro * self.count_mac * self.instance_Used_count[4,0]
+                                                           # the number of multi-core is equal with the number of input buffer instance
 
         cost_s = res_Latency * self.acc.leakage_per_cycle
 
         res_Energy = cost_r+cost_w+cost_m+cost_s
         
-        Logger.info(f"* * SimuLax-Running  * *  Latency:{res_Latency}, MAC-times:{self.count_mac}, MAC-Latency:{self.count_mac*self.acc.t_MAC}")
+        Logger.info(f"* * SimuLax-Running  * *  Latency:{res_Latency}, MAC-times:{self.count_mac}, MAC-Latency:{self.count_mac*self.acc.t_MAC}, MAC-Energy:{cost_m:.3e} nJ")
         Logger.info(f"* * SimuLax-Running  * *  EnergyCost:{round(res_Energy,3)}, Dynamic({cost_r+cost_w+cost_m}), Leakage:{round(cost_s,3)}")
         # Logger.info(f"* * SimuLax-Running  * *  readOUT:{round(cost_r,3)}, writeIN:{round(cost_w,3)}, MAC:{round(cost_m,3)}")
         Logger.info(f"* * SimuLax-Running  * *  Memory Cost:") 
         for m in range(1,self.acc.Num_mem):
-            Logger.info('-'*4 + f" {self.acc.mem2dict(m)}: {(self.memCost[m].r + self.memCost[m].w):.3e} pJ, ({round((self.memCost[m].r + self.memCost[m].w)/res_Energy*100,2)}%)")
+            Logger.info('-'*4 + f" {self.acc.mem2dict(m)}: {(self.memCost[m].r + self.memCost[m].w):.3e} nJ" +
+                        f" {self.memCost[m].r:.3e}(Read) + {self.memCost[m].w:.3e}(Write), "
+                        f" ({round((self.memCost[m].r + self.memCost[m].w)/res_Energy*100,2)}%)")
         Logger.info(f"* * SimuLax-Running  * *  Energy BreakDown: " + 
                     f"MemoryAccess(On/Off):{round((cost_r+cost_w-(self.memCost[1].r+self.memCost[1].w))/res_Energy*100,2)}%/{round((self.memCost[1].r+self.memCost[1].w)/res_Energy*100,2)}%, " +
                     f"MAC:{round(cost_m/res_Energy*100,2)}%, " + 
@@ -415,8 +418,6 @@ class tranSimulator():
         for loopidx in range(len(tm)-1,-1,-1):
             mem_cur = [self.dataflow.tm[loopidx].mem[op] for op in range(3)]
             mem_nxt = [nxtmem[mem_cur[op],op] for op in range(3)]
-            # dataSize = [self.dataSize[mem_nxt[op],op] for op in range(3)]
-            # trans = [math.ceil(dataSize[op]*self.unicast_size[mem_cur[op],op]*self.acc.precision[mem_cur[op],op]/self.acc.bw[mem_cur[op]]) for op in range(3)]
             tileSize = [self.tileSize[mem_cur[op],op] for op in range(3)]
             trans = [math.ceil(tileSize[op]*self.acc.precision[mem_cur[op],op]/self.acc.bw[mem_cur[op]]) for op in range(3)]
 

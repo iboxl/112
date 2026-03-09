@@ -8,6 +8,7 @@ from zigzag.classes.hardware.architecture.memory_level import MemoryLevel
 from zigzag.classes.hardware.architecture.operational_array import OperationalArray
 import math
 from utils.cacti.EvalCacti import cacti_power, dram_static
+from utils.GlobalUT import Logger as Logger
 
 def convert_mapping_to_next(matrix):
     rows = len(matrix)
@@ -53,7 +54,7 @@ def find_FirstMem_index(mapArray, idx):
 class CIM_Acc():                         # WTD. init CIM_Acc from zigzag | Yaml | ...
     def __init__(self, accSpec:core_zz):
         # self.leakage_per_cycle = 28.824
-        print("Create CIM Acc")
+        Logger.critical("Create CIM Acc")
         self._mem2dict = ['-P-']
         self.memSize = [-1] 
         self.bw     = [-1]
@@ -89,6 +90,7 @@ class CIM_Acc():                         # WTD. init CIM_Acc from zigzag | Yaml 
         self.Macro2mem = find_lastMem_index(self.mappingArray[1], 1)
         self.OReg2mem  = find_lastMem_index(self.mappingArray[2], 1)
         # self.Global2mem= find_FirstMem_index(self.mappingArray[0], 2) 
+        self.Dram2mem   = 1
         self.Global2mem = self._mem2dict.index("Global_buffer")
 
         self.lastMem = {}
@@ -129,7 +131,7 @@ class CIM_Acc():                         # WTD. init CIM_Acc from zigzag | Yaml 
             'O': MacroSpec.hd_param["input_precision"],
         }       # Feature Precision
         self.precision = {}
-        for mem in range(1,self.Num_mem):
+        for mem in range(1,self.Num_mem+1):
             for t, t_name in enumerate(['I','W','O']):
                 self.precision[mem,t] = precision_op[t_name]
 
@@ -145,20 +147,6 @@ class CIM_Acc():                         # WTD. init CIM_Acc from zigzag | Yaml 
         
         self.dimX = MacroSpec.bl_dim_size                               # IN-parallel
         self.dimY = MacroSpec.wl_dim_size                               # OUT-parallel
-
-        '''
-        Not use self.fanout
-        '''
-        # self.fanout = ['PLACEHOLD', 1, self.Num_core, 1, 1, self.dimX*self.dimY, self.dimX*self.dimY, self.dimX*self.dimY]    
-        # self.fanout = [[1 for op in range(3)] for i in range(self.Num_mem)]
-        # #  ['Dram'1, 'Global_buffer'2, 'Output_buffer'3, 'Input_buffer'4, 'OReg'5, 'IReg'6, 'Macro'7]
-        # self.fanout[self.Global2mem][0] = self.Num_core
-        # self.fanout[self.Global2mem][1] = self.Num_core*self.dimX * self.dimY
-        # self.fanout[self.Global2mem][2] = self.Num_core
-        # self.fanout[3][2] = self.dimY
-        # self.fanout[4][0] = self.dimX
-        # self.fanout[self.IReg2mem][2] = self.dimY
-        # self.fanout[self.OReg2mem][1] = self.dimX
 
         self.SpUnrolling = [self.Num_core, self.dimX, self.dimY]
         self.Num_SpUr = len(self.SpUnrolling)
@@ -179,26 +167,19 @@ class CIM_Acc():                         # WTD. init CIM_Acc from zigzag | Yaml 
         '''
         # self.Num_compartment = MacroSpec.hd_param["group_depth"]
         
-        # self.unrollingArray = {}
-        # for op in range(3):
-        #     for m in range(1,self.Num_mem):
-        #         for u in range(self.Num_SpUr):
-        #             self.unrollingArray[m,op,u] = 0
-        #     self.unrollingArray[self.Global2mem,op,0] = 1
-        # self.unrollingArray[self.IReg2mem,0,1] = 1
+        self.SpUr2Mem = {}                          # SpUr2Mem[u,op] = m
+                                                    # SpUr2Mem 表示的是Multicast/Unicast的源地址-存储层次，在这个层次的数据量是Unrolling展开前的
+        self.SpUr2Mem[0,0] = self.Global2mem
+        self.SpUr2Mem[0,1] = self.Global2mem
+        self.SpUr2Mem[0,2] = self.Global2mem
 
-        self.SpUrArray = {}     # SpUrArray[u,op] = m
-        self.SpUrArray[0,0] = self.Global2mem
-        self.SpUrArray[0,1] = self.Global2mem
-        self.SpUrArray[0,2] = self.Global2mem
+        self.SpUr2Mem[1,0] = 4
+        self.SpUr2Mem[1,1] = self.Global2mem
+        self.SpUr2Mem[1,2] = self.OReg2mem
 
-        self.SpUrArray[1,0] = 4
-        self.SpUrArray[1,1] = self.Global2mem
-        self.SpUrArray[1,2] = self.OReg2mem
-
-        self.SpUrArray[2,0] = self.IReg2mem
-        self.SpUrArray[2,1] = self.Global2mem
-        self.SpUrArray[2,2] = 3
+        self.SpUr2Mem[2,0] = self.IReg2mem
+        self.SpUr2Mem[2,1] = self.Global2mem
+        self.SpUr2Mem[2,2] = 3
 
 
         self.minBW = [1e9, 1e9, 1e9]
@@ -207,26 +188,7 @@ class CIM_Acc():                         # WTD. init CIM_Acc from zigzag | Yaml 
                 if self.mappingArray[op][m]:
                     self.minBW[op] = min(self.minBW[op], self.bw[m])
 
-        # self.bw[self.IReg2mem] *= self.dimX
-        # self.memSize[self.IReg2mem] *= self.dimX 
-        # self.bw[self.OReg2mem] *= self.dimY 
-        # self.memSize[self.OReg2mem] *= self.dimY 
-        # self.bw[self.Macro2mem] *= (self.dimX * self.dimY)
-        # self.memSize[self.Macro2mem] *= ( self.dimX * self.dimY  )  # * MacroSpec.hd_param["group_depth"]  ArchZZ already calc
-
         self.t_MAC = math.ceil(precision_op['I'] / MacroSpec.hd_param["input_bit_per_cycle"])
-
-        # self.bw[self.IReg2mem] = int(self.bw[self.IReg2mem] / self.t_MAC)
-        # self.bw[self.OReg2mem] = int(self.bw[self.OReg2mem] / self.t_MAC)
-        # self.bw[self.Macro2mem] = int(self.bw[self.Macro2mem] / self.t_MAC)
-
-        # self.Num_instance = [1 for _ in range(self.Num_mem)]    # self.Num_instance[1] = 1
-        # self.Num_instance.append(0)
-        # for mem in range(1,self.Num_mem):
-        #     for t in range(3):
-        #         self.Num_instance[self.nxtMem[t][mem]] = self.fanout[mem]
-        # print(self.fanout)
-        # print(self.Num_instance)
 
         # != energy_precharging
         precision_Psum = precision_op['I']+ precision_op['W'] + math.ceil(math.log2(self.dimX))
@@ -250,6 +212,18 @@ class CIM_Acc():                         # WTD. init CIM_Acc from zigzag | Yaml 
         self.leakage_per_cycle += cacti_power(capacity_bytes=(self.memSize[7]/8) * self.dimX * self.dimY, 
                                               bitwidth_bits=self.dimY*MacroSpec.hd_param["weight_precision"])[2] * self.Num_core
 
+        """
+        Energy Unit: pJ ---> nJ
+        """
+        def pj_to_nj(value):
+            if isinstance(value, list):
+                return [x * 1e-3 for x in value]
+            return value * 1e-3
+        
+        self.cost_ActMacro, self.leakage_per_cycle, self.cost_r, self.cost_w = map(
+            pj_to_nj, [self.cost_ActMacro, self.leakage_per_cycle, self.cost_r, self.cost_w]
+        )
+        
     def mem2dict(self,x):
         if x>=0 and x<self.Num_mem:
             return self._mem2dict[int(x)]
