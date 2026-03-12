@@ -296,12 +296,13 @@ class tranSimulator():
                 for op, op_name in enumerate(['I','W','O']):
                     if op_name == 'O':
                         if dflag[op] == 1: 
-                            pass        # double-buffer makes that overlap can be placed anytime
-                            # WTD
-                            # self.timer
+                            self.timer[mem_cur[op], op] += Cons[op]
+                            self.timer[mem_nxt[op], op] = max(self.timer[mem_nxt[op], op], self.timer[mem_cur[op], op])
+                            stall = max(0, self.timer[mem_nxt[op], op] - self.timer[mem_nxt[op], op])
                         else:
                             self.timer[mem_nxt[op],op] = max(self.timer[mem_cur[op],op], self.timer[mem_nxt[op],op]) + Cons[op]
                             self.timer[mem_cur[op],op] = self.timer[mem_nxt[op],op]
+                            stall = Cons[op]
 
                         if mem_cur[op] == self.lastMappingMem[op] and self.lastMemReg[op] is False:
                             self.memCost[mem_nxt[op]].r += self.acc.cost_r[mem_nxt[op]] * nxtSize[op]  * self.acc.precision[mem_nxt[op],op]

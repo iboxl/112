@@ -14,7 +14,7 @@ from utils.UtilsFunction.ToolFunction import get_Spatial_Unrolling, prepare_save
 import shutil
 import time
 
-def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str):
+def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str, singleIter=False, **kwargs):
     time_begin = time.time()
 
     if FLAG.INPUT_STATIONARY and (acc.core.size_input_buffer * acc.num_core >= ops.dim_M * ops.dim_K * ops.input.bitwidth):
@@ -35,6 +35,11 @@ def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str):
     result = [CONST.MAX_POS] * 5 + [None]
 
     for scheme in generator:
+        if singleIter == True:
+            Spatial_unrolling = kwargs['Spatial_unrolling']
+            assert Spatial_unrolling is not None, "Single Iteration Mode Requires Spatial Unrolling Input as Scheme."
+            scheme = Spatial_unrolling
+
         count += 1
 
         spatial_unrolling = [math.prod(col) for col in zip(*scheme)]
@@ -80,7 +85,9 @@ def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str):
                     best_dataflow = solver.dataflow
 
         solver.model.dispose()
-        # exit()
+
+        if singleIter == True:
+            exit()
     
     if count == 0:
         raise ValueError("No Feasible Sol Found, Need to reset MIN_UTIL_COEFFICIENT")
@@ -113,15 +120,29 @@ if __name__ == "__main__":
     from Architecture.ZigzagAcc import accelerator as acc_zz
     accelerator = CIM_Acc(acc_zz.cores[0])
 
+    Logger.debug("Running SolveMapping for debugging and testing Solver (MIP model), only one iteration with given scheme")
+
     CONST.FLAG_OPT="Latency"
     # CONST.FLAG_OPT="EDP"
-    ops = WorkLoad(loopDim={'R': 3, 'S': 3, 'C': 64, 'K':64, 'P': 56, 'Q': 56, 'G': 1, 'B': 1, 'H': 56, 'W': 56, 'Stride': 1, 'Padding': 1},
-    # ops = WorkLoad(loopDim={'R': 1, 'S': 1, 'C': 64, 'K':128, 'P': 28, 'Q': 28, 'G': 1, 'B': 1, 'H': 56, 'W': 56, 'Stride': 2, 'Padding': 0},
-                            )
-    lat, eng, edp, c_lat, c_eng, ds = SolveMapping(acc=accelerator, ops=ops, bestMetric=1e10, outputdir=outFolder)
+    
+    CONST.MIPFOCUS = 1
+
+    ops = WorkLoad(loopDim={'R': 3, 'S': 3, 'C': 64, 'K':64, 'P': 56, 'Q': 56, 'G': 1, 'B': 1, 'H': 56, 'W': 56, 'Stride': 1, 'Padding': 1})
+    Spatial_unrolling =    [[1,1,1,2,1,1,4,1],
+                        #   [-,R,S,P,Q,C,K,G],
+                            [1,1,1,1,1,32,1,1],
+                            [1,1,1,1,1,1,16,1]]
+
+    # ops = WorkLoad(loopDim={'R': 7, 'S': 7, 'C': 3, 'K':64, 'P': 112, 'Q': 112, 'G': 1, 'B': 1, 'H': 224, 'W': 224, 'Stride': 2, 'Padding': 3})
+    # Spatial_unrolling = [[1,1,1,2,1,1,4,1],
+    #                  #   [-,R,S,P,Q,C,K,G],
+    #                      [1,1,7,1,1,3,1,1],
+    #                      [1,1,1,1,1,1,16,1]]
+
+    lat, eng, edp, c_lat, c_eng, ds = SolveMapping(acc=accelerator, ops=ops, bestMetric=1e10, outputdir=outFolder, singleIter=True, Spatial_unrolling=Spatial_unrolling)
     Logger.critical(f"* * MIREDO-Running  * *   Latency:{lat}")
     # Logger.critical(f"S_latency={round(lat)}, S_Energy={round(eng,2)}, S_EDP={edp}")
     # Logger.critical(f"C_latency={round(c_lat)}, C_Energy={round(c_eng,2)}")
 
     end_time = time.time()
-    Logger.critical(f"Solving The Whole Model Cost: {round(end_time - start_time,1)}s")
+    Logger.critical(f"Running SolveMapping Cost: {round(end_time - start_time,1)}s")

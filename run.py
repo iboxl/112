@@ -75,7 +75,8 @@ def __main__(**kwargs):
     FLAG.DEBUG_PER_LAYER_DETAIL = False               # illegal Tmp setting
 
     Logger.info("* " * 50)
-    Logger.info(f"model={args.model}, Architecture={args.architecture}, Weight_stationary={FLAG.WEIGHT_STATIONARY}, Optimization_Flag={CONST.FLAG_OPT}" )
+    Logger.info(f"model={args.model}, Architecture={args.architecture}, Weight_stationary={FLAG.WEIGHT_STATIONARY}, " + 
+                f"Optimization_Flag={CONST.FLAG_OPT}, MIPFOCUS={CONST.MIPFOCUS}" )
     Logger.info("* " * 50)
 
     model = f"model/{args.model}.onnx"

@@ -239,22 +239,28 @@ def set_startVar(model:gp.Model, preset_conditions, res_str):
     else:
         Logger.debug("No startVar Found")
 
-def var_mul01(model:gp.Model, indic, A, name, A_ub = None):
+def var_mul01(model:gp.Model, indic, A, name, A_ub = None, A_lb = None, var_ub = None):
     if not isinstance(indic, gp.Var):
         if indic==True:
             return A
         else:
             return 0
-    else:
-        model.update()
-        assert indic.VType == GRB.BINARY
-        if A_ub is not None:
-            ub = A_ub
-        else:
-            ub = A.ub if isinstance(A, gp.Var) else A
-        var = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=ub, name=name)
-        model.addConstr(var<=ub*indic, name=f"C_{name}_1")
-        model.addConstr(var<=A, name=f"C_{name}_2")
-        model.addConstr(var>=A - ub*(1-indic), name=f"C_{name}_3")
-        return var
 
+    assert indic.VType == GRB.BINARY
+    if A_ub is not None:
+        ub = A_ub
+    else:
+        ub = A.ub if isinstance(A, gp.Var) else A
+    if A_lb is not None:
+        lb = A_lb
+    elif isinstance(A, gp.Var):
+        lb = A.lb
+    else:
+        lb = 0
+
+    var = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=(ub if var_ub is None else var_ub), name=name)
+    model.addConstr(var <= ub * indic, name=f"C_{name}_1")
+    model.addConstr(var >= A - ub * (1 - indic), name=f"C_{name}_2")
+    model.addConstr(var >= lb * indic, name=f"C_{name}_3")
+    model.addConstr(var <= A - lb * (1 - indic), name=f"C_{name}_4")
+    return var

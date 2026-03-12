@@ -9,10 +9,9 @@ import math
 import time
 import numpy as np
 import gurobipy as gp
-from gurobipy import GRB, quicksum, min_
+from gurobipy import GRB, quicksum
 from utils.GlobalUT import *
 from utils.UtilsFunction.SolverFunction import *
-from utils.UtilsFunction.CostFunction import _Cost_model
 from utils.factorization import flexible_factorization
 from utils.UtilsFunction.ToolFunction import getDivisors, getUniqueFactors
 import copy
@@ -39,22 +38,14 @@ class Solver():
 
         self.model.setParam('Cuts', -1)
         self.model.setParam('Presolve', 2)
-        self.model.setParam('DualReductions', 0)          # dont
-        self.model.setParam('Heuristics', 0.2)
+        self.model.setParam('Heuristics', 0.25)
         self.model.setParam("ScaleFlag", 2)
-        self.model.setParam('IntegralityFocus', 1)
 
         self.model.setParam("ScaleFlag", 2)                          # 用于调节数值比例问题coefficient range
-        self.model.setParam("NumericFocus", 2)
+        self.model.setParam("NumericFocus", 1)
         # self.model.setParam('MIPGap', 0.03)
 
-        # self.ExpOption = "FuncPieces=-2 FuncPieceError=0.01"
-        # # 尝试更精细的分段线性化
-        # self.model.setParam("FuncPieces", 1)  # 使用指定的片段数，默认是 0
-        # self.model.setParam("FuncPieceLength", 1e-3) # 或进一步细化控制
-        # # 甚至更改 ExpOption 的误差容忍
-        self.ExpOption = "FuncPieces=-2 FuncPieceError=0.001" # 降低误差阈值
-        
+        self.ExpOption = "FuncPieces=-2 FuncPieceError=0.01"
 
         self.model.setParam('FeasibilityTol', 1e-6)
         self.model.setParam('IntFeasTol', 1e-6)
@@ -74,7 +65,6 @@ class Solver():
     def run(self):
         Logger.info('* '*20 + "Start Running MIP Solver" + ' *'*20)
         model = self.model
-        # COST = _Cost_model(acc=self.acc, model=self.model, ops=self.ops)
         acc:CIM_Acc = self.acc
         ops:WorkLoad = self.ops
         factors = self.FACTORS
@@ -96,124 +86,207 @@ class Solver():
 
         factors_val = [f for fs in factors[1:ops.Num_dim] for f in fs if fs != [1]]
         f_asc, f_desc = sorted(factors_val), sorted(factors_val, reverse=True)
-        
-        # 2. 预计算每层循环的最小/最大内部累积乘积
+
         MIN_INNER_PROD, MAX_INNER_PROD = {}, {}
         for i in range(Num_Loops):
-            MIN_INNER_PROD[i] = int(np.prod(  f_asc[:Num_Loops-i] )) 
-            MAX_INNER_PROD[i] = int(np.prod( f_desc[:Num_Loops-i] ))
+            MIN_INNER_PROD[i] = int(np.prod(f_asc[:Num_Loops - i]))
+            MAX_INNER_PROD[i] = int(np.prod(f_desc[:Num_Loops - i]))
         MIN_INNER_PROD[Num_Loops], MAX_INNER_PROD[Num_Loops] = 1, 1
 
         MIN_OUTER_PROD = [1] * (Num_Loops + 1)
         for i in range(1, Num_Loops + 1):
-            MIN_OUTER_PROD[i] = MIN_OUTER_PROD[i-1] * f_asc[i-1]
+            MIN_OUTER_PROD[i] = MIN_OUTER_PROD[i - 1] * f_asc[i - 1]
 
-        UB_Process, LB_Process, UB_Transfer, UB_Critical, LB_Critical = {}, {}, {}, {}, {}
+        spur = {}
+        for m in range(1, acc.Num_mem):
+            for d in range(1, ops.Num_dim):
+                for op, op_name in enumerate(['I','W','O']):
+                    spur[m,op,d] = 1
+                    for u in range(acc.Num_SpUr):
+                        if m <= acc.SpUr2Mem[u,op]:
+                            spur[m,op,d] *= self.su[u][d]
+
+        LB_dataVolume,      UB_dataVolume = {}, {}
+        LB_lg_dataVolume,   UB_lg_dataVolume = {}, {}
+        LB_transLatency,    UB_transLatency = {}, {}
+        LB_lg_transLatency, UB_lg_transLatency = {}, {}
+        for m in range(1, acc.Num_mem):
+            min_dataVolume = [0,0,0]
+            r_min = spur[m,0,ops.dict2Dim('R')]
+            s_min = spur[m,0,ops.dict2Dim('S')]
+            p_min = spur[m,0,ops.dict2Dim('P')]
+            q_min = spur[m,0,ops.dict2Dim('Q')]
+
+            h_min = (p_min * r_min) if ops.Stride >= r_min else ((p_min - 1) * ops.Stride + r_min)
+            w_min = (q_min * s_min) if ops.Stride >= s_min else ((q_min - 1) * ops.Stride + s_min)
+
+            min_dataVolume[0] = max(1, min(h_min, ops.H) * min(w_min, ops.W) * spur[m,0,ops.dict2Dim('C')])
+            min_dataVolume[1] = max(1, spur[m,1,ops.dict2Dim('R')] * spur[m,1,ops.dict2Dim('S')] *
+                                       spur[m,1,ops.dict2Dim('C')] * spur[m,1,ops.dict2Dim('K')])
+            min_dataVolume[2] = max(1, spur[m,2,ops.dict2Dim('P')] * spur[m,2,ops.dict2Dim('Q')] *
+                                       spur[m,2,ops.dict2Dim('K')])
+
+            for op, op_name in enumerate(['I','W','O']):
+                UB_dataVolume[m,op] = min(acc.memSize[m] // acc.precision[m,op], MAX_SIZE[op])
+                LB_dataVolume[m,op] = min(min_dataVolume[op], UB_dataVolume[m,op])
+                LB_lg_dataVolume[m,op] = math.log(LB_dataVolume[m,op])
+                UB_lg_dataVolume[m,op] = math.log(UB_dataVolume[m,op])
+                LB_transLatency[m,op] = LB_dataVolume[m,op] * acc.precision[m,op] / acc.bw[m]
+                UB_transLatency[m,op] = min(MAX_SIZE[op] * acc.precision[m,op], acc.memSize[m]) / acc.bw[m]
+                LB_lg_transLatency[m,op] = math.log(LB_transLatency[m,op])
+                UB_lg_transLatency[m,op] = math.log(UB_transLatency[m,op])
+
+        UB_Process, LB_Process = {}, {}
+        UB_TransferRaw, LB_TransferRaw = {}, {}
+        UB_TransferActive, LB_TransferActive = {}, {}
+        UB_Critical, LB_Critical = {}, {}
 
         t_MAC = acc.t_MAC
-        c_coeff = [1, 1, 2]  # 关键路径传输系数: I=1, W=1, O=2(读+写)
-        T_max = self.MAX_TRANS  # T_max[op]: 操作数 op 在所有内存层的最大传输延迟
-
-        # ---------- (A) Transfer 上界 ----------
-        # transfer[i,op] 取自某一内存层的 transLatency[m,op]
-        # 在任意可行分配下，其上界不超过所有内存层中的最大值
-        for i in range(Num_Loops):
-            for op in range(3):
-                UB_Transfer[i, op] = T_max[op]
-
-        # ---------- (B) 下界：仅考虑计算量，忽略传输开销 ----------
-        # P_LB[i,op] = product_of_(N-i)_smallest_factors × t_MAC
-        # C_LB[i]    = product_of_(N-i-1)_smallest_factors × t_MAC
-        for i in range(Num_Loops):
-            for op in range(3):
-                LB_Process[i, op] = MIN_INNER_PROD[i] * t_MAC
-            LB_Critical[i] = MIN_INNER_PROD[i + 1] * t_MAC
-
-        # ---------- (C) 上界：递推计算 ----------
-        # 对 P_UB[i,op]，取 (N-i) 个最大因子按降序排列于层 i..N-1
-        # 这一排列使 P[i] 取得极大值（由交换论证保证）
-        # 假设最坏情况：无双缓冲、每层均有传输开销
+        c_coeff = [1, 1, 2]
+        XMAX_TOTAL = {0: min(4, Num_Loops), 1: min(2, Num_Loops), 2: min(4, Num_Loops)}
 
         for op in range(3):
-            UB_Process[Num_Loops, op] = t_MAC
+            LB_TransferRaw[op] = min(LB_transLatency[m,op] for m in range(1, acc.Num_mem) if acc.mappingArray[op][m])
+        for i in range(Num_Loops):
+            for op in range(3):
+                UB_TransferRaw[i, op] = self.MAX_TRANS[op]
+                LB_TransferActive[i, op] = LB_TransferRaw[op]
+
+        UB_ProcessBase, UB_CriticalBase = {}, {}
+        for op in range(3):
+            UB_ProcessBase[Num_Loops, op] = t_MAC
 
         for i in range(Num_Loops - 1, -1, -1):
-            num_inner = Num_Loops - i        # 层 i..N-1 共 num_inner 个因子
-            inner_f = f_desc[:num_inner]     # 取 num_inner 个最大因子，降序
-
-            # 递推基准：最内层基准延迟
-            P_cur = {o: float(t_MAC) for o in range(3)}
-
-            # 从最内层（最小因子）向最外层（最大因子）递推
+            num_inner = Num_Loops - i
+            inner_f = f_desc[:num_inner]
+            P_cur = {op: float(t_MAC) for op in range(3)}
             for k in range(num_inner - 1, -1, -1):
                 F = inner_f[k]
-
-                # 关键路径上界（约束 C1 无双缓冲情况下的松弛）
-                C = max(c_coeff[o] * T_max[o] + P_cur[o] for o in range(3))
-
+                C = max(c_coeff[op] * self.MAX_TRANS[op] + P_cur[op] for op in range(3))
                 P_new = {}
-                for o in range(3):
-                    if o < 2:  # Input 或 Weight
-                        P_new[o] = max(
-                            # 约束 C4 驻留态 (x=0): P ≥ P_inner + (F-1)*C
-                            P_cur[o] + (F - 1) * C,
-                            # 约束 C5 非驻留无双缓冲 (x=1,DB=0): P ≥ 2T + P_inner + (F-2)*C
-                            2 * T_max[o] + P_cur[o] + max(0, F - 2) * C,
-                            # 约束 C7 层级衰减: P ≥ 2*P_inner
-                            2 * P_cur[o]
-                        )
-                    else:  # Output
-                        P_new[o] = max(
-                            # 约束 C6: P ≥ 2T + P_inner + (F-1)*C
-                            2 * T_max[o] + P_cur[o] + (F - 1) * C,
-                            # 约束 C7 层级衰减: P ≥ 2*P_inner
-                            2 * P_cur[o]
-                        )
+                for op in range(3):
+                    if op < 2:
+                        P_new[op] = max(P_cur[op] + (F - 1) * C,
+                                        2 * self.MAX_TRANS[op] + P_cur[op] + max(0, F - 2) * C,
+                                        2 * P_cur[op])
+                    else:
+                        P_new[op] = max(P_cur[op] + (F - 1) * C,
+                                        2 * self.MAX_TRANS[op] + P_cur[op] + (F - 1) * C,
+                                        2 * P_cur[op])
                 P_cur = P_new
-
             for op in range(3):
-                UB_Process[i, op] = math.ceil(P_cur[op])
+                UB_ProcessBase[i, op] = math.ceil(P_cur[op])
 
-        # Critical 上界（由约束 C1 的最坏情况:无双缓冲）
-        for i in range(Num_Loops):
-            UB_Critical[i] = math.ceil(
-                max(c_coeff[op] * T_max[op] + UB_Process[i + 1, op] for op in range(3))
-            )
-
-        # ---------- (D) 全局延迟上下界 ----------
         self.lb_latency = max(MIN_INNER_PROD[0] * t_MAC, 1)
 
-        # 片外传输最坏开销（NOTE: 原代码中 tmp_coeff 因 op_name 未更新导致均为 2,
-        #   此处使用正确系数 c_coeff；如需匹配原代码行为请统一改为 2）
-        offchip_max = [c_coeff[op] * MAX_SIZE[op] 
-                       * acc.precision[acc.Dram2mem, op] / acc.bw[acc.Dram2mem]
+        offchip_max = [c_coeff[op] * MAX_SIZE[op] * acc.precision[acc.Dram2mem, op] / acc.bw[acc.Dram2mem]
                        for op in range(3)]
-        computed_ub = max(UB_Process[0, op] + offchip_max[op] for op in range(3))
-
-        # 结合外部 metric_ub 进一步紧缩
+        computed_ub = max(UB_ProcessBase[0, op] + offchip_max[op] for op in range(3))
         if CONST.FLAG_OPT == "Latency" and self.metric_ub < computed_ub:
             self.ub_latency = self.metric_ub
         else:
             self.ub_latency = computed_ub
 
-        # ---------- (E) 层级传播紧缩 ----------
-        # 利用 P[i] ≤ L_UB / MIN_OUTER_PROD[i] 和 C[i] ≤ L_UB / MIN_OUTER_PROD[i+1]
-        # 对内层变量进行额外收紧（内层因外层因子乘积放大，上界衰减更快）
-        for i in range(Num_Loops):
-            # Process 紧缩
-            hierarchy_p_ub = self.ub_latency / max(MIN_OUTER_PROD[i], 1)
-            for op in range(3):
-                UB_Process[i, op] = min(UB_Process[i, op], math.ceil(hierarchy_p_ub))
+        if Num_Loops > 0:
+            min_output_transfer = min(LB_transLatency[m,2] for m in range(1, acc.Num_mem) if acc.mappingArray[2][m])
+            self.lb_latency = max(self.lb_latency,
+                                  MIN_INNER_PROD[0] * t_MAC + 2 * MIN_OUTER_PROD[Num_Loops - 1] * min_output_transfer)
 
-        # Process 紧缩后重新计算 Critical 上界
         for i in range(Num_Loops):
-            # 方法1: 由紧缩后的 P_UB[i+1] 推出
+            hierarchy_p_ub = math.ceil(self.ub_latency / max(MIN_OUTER_PROD[i], 1))
+            for op in range(3):
+                UB_ProcessBase[i, op] = min(UB_ProcessBase[i, op], hierarchy_p_ub)
+
+        for i in range(Num_Loops):
             from_process = math.ceil(
-                max(c_coeff[op] * T_max[op] + UB_Process[i + 1, op] for op in range(3))
+                max(c_coeff[op] * self.MAX_TRANS[op] + UB_ProcessBase[i + 1, op] for op in range(3))
             )
-            # 方法2: 层级传播 C[i] ≤ L_UB / MIN_OUTER_PROD[i+1]
             from_hierarchy = math.ceil(self.ub_latency / max(MIN_OUTER_PROD[i + 1], 1))
-            UB_Critical[i] = min(UB_Critical[i], from_process, from_hierarchy)
+            UB_CriticalBase[i] = min(from_process, from_hierarchy)
+
+        def run_process_ub_dp(critical_cap):
+            process_ub = {}
+            for op in range(3):
+                process_ub[Num_Loops, op] = t_MAC
+            for start in range(Num_Loops - 1, -1, -1):
+                process_dp = {}
+                for op in range(3):
+                    for b in range(XMAX_TOTAL[op] + 1):
+                        process_dp[Num_Loops, op, b] = t_MAC
+                for i in range(Num_Loops - 1, start - 1, -1):
+                    F = f_desc[i - start]
+                    for op in range(3):
+                        for b in range(XMAX_TOTAL[op] + 1):
+                            stay_branch = process_dp[i + 1, op, b] + (F - 1) * critical_cap[i]
+                            hier_branch = 2 * process_dp[i + 1, op, b]
+                            best = max(stay_branch, hier_branch)
+                            if b > 0:
+                                trans_branch = 2 * UB_TransferRaw[i, op] + process_dp[i + 1, op, b - 1]
+                                if op < 2:
+                                    trans_branch += max(0, F - 2) * critical_cap[i]
+                                else:
+                                    trans_branch += (F - 1) * critical_cap[i]
+                                best = max(best, trans_branch)
+                            process_dp[i, op, b] = math.ceil(best)
+                hierarchy_p_ub = math.ceil(self.ub_latency / max(MIN_OUTER_PROD[start], 1))
+                for op in range(3):
+                    process_ub[start, op] = min(math.ceil(process_dp[start, op, XMAX_TOTAL[op]]), hierarchy_p_ub)
+            return process_ub
+
+        def tighten_active_transfer_and_critical(process_ub, critical_cap):
+            transfer_active = {}
+            critical_ub = {}
+            for i in range(Num_Loops):
+                critical_terms = []
+                for op in range(3):
+                    transfer_cap = UB_TransferRaw[i, op] + (1 if i == Num_Loops - 1 else 0)
+                    transfer_cap = min(transfer_cap, math.ceil(critical_cap[i] / c_coeff[op]))
+                    transfer_active[i, op] = max(LB_TransferActive[i, op], math.ceil(transfer_cap))
+                    critical_terms.append(c_coeff[op] * transfer_active[i, op] + process_ub[i + 1, op])
+                critical_ub[i] = min(math.ceil(max(critical_terms)),
+                                     math.ceil(self.ub_latency / max(MIN_OUTER_PROD[i + 1], 1)))
+            return transfer_active, critical_ub
+
+        UB_Process = run_process_ub_dp(UB_CriticalBase)
+        UB_TransferActive, UB_CriticalMid = tighten_active_transfer_and_critical(UB_Process, UB_CriticalBase)
+
+        UB_Process = run_process_ub_dp(UB_CriticalMid)
+        UB_TransferActive, UB_Critical = tighten_active_transfer_and_critical(UB_Process, UB_CriticalMid)
+
+        computed_ub = max(UB_Process[0, op] + offchip_max[op] for op in range(3))
+        if CONST.FLAG_OPT == "Latency" and self.metric_ub < computed_ub:
+            self.ub_latency = self.metric_ub
+        else:
+            self.ub_latency = min(self.ub_latency, computed_ub)
+
+        for i in range(Num_Loops):
+            hierarchy_p_ub = math.ceil(self.ub_latency / max(MIN_OUTER_PROD[i], 1))
+            hierarchy_c_ub = math.ceil(self.ub_latency / max(MIN_OUTER_PROD[i + 1], 1))
+            for op in range(3):
+                UB_Process[i, op] = min(UB_Process[i, op], hierarchy_p_ub)
+            UB_Critical[i] = min(UB_Critical[i], hierarchy_c_ub)
+            for op in range(3):
+                transfer_cap = UB_TransferRaw[i, op] + (1 if i == Num_Loops - 1 else 0)
+                transfer_cap = min(transfer_cap, math.ceil(UB_Critical[i] / c_coeff[op]))
+                UB_TransferActive[i, op] = max(LB_TransferActive[i, op], math.ceil(transfer_cap))
+
+        for op in range(3):
+            LB_Process[Num_Loops, op] = t_MAC
+        for i in range(Num_Loops):
+            for op in range(3):
+                LB_Process[i, op] = MIN_INNER_PROD[i] * t_MAC
+            LB_Critical[i] = MIN_INNER_PROD[i + 1] * t_MAC
+        if Num_Loops > 0:
+            LB_Critical[Num_Loops - 1] = max(LB_Critical[Num_Loops - 1],
+                                             max(c_coeff[op] * LB_TransferRaw[op] for op in range(3)))
+
+        for op in range(3):
+            assert LB_TransferRaw[op] <= min(UB_TransferRaw[i, op] for i in range(Num_Loops)), f"Transfer raw bound inversion on op {op}"
+        for i in range(Num_Loops):
+            assert LB_Critical[i] <= UB_Critical[i], f"Critical bound inversion at loop {i}"
+            for op in range(3):
+                assert LB_Process[i, op] <= UB_Process[i, op], f"Process bound inversion at loop {i}, op {op}"
+                assert LB_TransferActive[i, op] <= UB_TransferActive[i, op], f"Active transfer bound inversion at loop {i}, op {op}"
         
         #######################################################################################################################################
 
@@ -222,7 +295,7 @@ class Solver():
         #     print(f"loop {i}: Critical LB-[ {min_inner_prod[i+1] * acc.t_MAC} ] UB-[ {LB_Critical[i]}-{UB_Critical[i]} ]")
         #     pstr = "Latency in "
         #     for op, op_name in enumerate(['I','W','O']):
-        #         pstr += f"{op_name}: Process-[{LB_Process[i,op]}-{UB_Process[i,op]}] ,Trans-[{UB_Transfer[i,op]}] "
+        #         pstr += f"{op_name}: Process-[{LB_Process[i,op]}-{UB_Process[i,op]}] ,TransRaw-[{LB_TransferRaw[op]}-{UB_TransferRaw[i,op]}] "
         #     print(pstr)
         # exit()
 
@@ -290,11 +363,6 @@ class Solver():
                         model.addConstr(quicksum(i * indic_factor2Loop[d,f,i] for i in range(Num_Loops)) <= 
                                         quicksum(i * indic_factor2Loop[d,f1,i] for i in range(Num_Loops)),
                                                 name=f"C_SymmetryBreaking_Factor2Loop_({ops.dim2Dict[d]},{f},{f1})") 
-                        for op, op_name in enumerate(['I','W','O']):
-                            model.addConstr(quicksum(m * indic_factor2Mem[d,f,op,m] for m in range(1,acc.Num_mem)) <= 
-                                            quicksum(m * indic_factor2Mem[d,f1,op,m] for m in range(1,acc.Num_mem)),
-                                            name=f"C_SymmetryBreaking_Factor2Mem_({ops.dim2Dict[d]},{f},{f1},{op_name})")
-
 
         # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -# 
 
@@ -323,11 +391,13 @@ class Solver():
                     if acc.mappingArray[op][m] == 1:
                         indic_loop2Mem[i,op,m] = model.addVar(vtype=GRB.BINARY, name=f"Indic_loop2Mem_({i},{op_name},{acc.mem2dict(m)})")
                         for d in range(1, ops.Num_dim):
-                            if factors[d] == [1]:     # DimSize == 1
+                            if factors[d] == [1]:
                                 continue
                             for f in range(len(factors[d])):
-                                model.addConstr(indic_loop2Mem[i,op,m]>=indic_factor2Mem[d,f,op,m] + indic_factor2Loop[d,f,i]-1, 
+                                model.addConstr(indic_loop2Mem[i,op,m] >= indic_factor2Mem[d,f,op,m] + indic_factor2Loop[d,f,i]-1,
                                                 name=f"C_Indic_loop2Mem_({i},{op_name},{acc.mem2dict(m)},{ops.dim2Dict[d]},{f})")
+                                model.addConstr(indic_loop2Mem[i,op,m] <= 1 - indic_factor2Loop[d,f,i] + indic_factor2Mem[d,f,op,m],
+                                                name=f"C_Indic_loop2Mem_Disagg_({i},{op_name},{acc.mem2dict(m)},{ops.dim2Dict[d]},{f})")
                     else:
                         indic_loop2Mem[i,op,m] = 0
 
@@ -342,6 +412,12 @@ class Solver():
                                 quicksum(m*indic_loop2Mem[i+1,op,m] for m in range(1,acc.Num_mem)),
                                   name=f"C_Sequence_loop2Mem_({i},{op_name})")
 
+        for m in range(1,acc.Num_mem):
+            for op, op_name in enumerate(['I','W','O']):
+                if acc.mappingArray[op][m] == 1:
+                    model.addConstr(indic_usedMem[m,op] <= quicksum(indic_loop2Mem[i,op,m] for i in range(Num_Loops)),
+                                    name=f"C_UsedMem_FromLoop2Mem_({acc.mem2dict(m)},{op_name})")
+
         # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -# 
         
         indic_loop2Factor = gp.tupledict()
@@ -349,10 +425,10 @@ class Solver():
             for p in range(len(UNIQUE_FACTOR)):
                 indic_loop2Factor[i,p] = model.addVar(vtype=GRB.BINARY, name=f"Indic_loop2Factor_({i},{p})")
             model.addConstr(quicksum(indic_loop2Factor[i,p] for p in range(len(UNIQUE_FACTOR))) == 1, name=f"C_Uniqueness_Indic_loop2Factor_({i})")
-            model.addConstr(quicksum(UNIQUE_FACTOR[p] * indic_loop2Factor[i,p] for p in range(len(UNIQUE_FACTOR))) 
-                                    == 
+            model.addConstr(quicksum(UNIQUE_FACTOR[p] * indic_loop2Factor[i,p] for p in range(len(UNIQUE_FACTOR)))
+                            ==
                             quicksum(indic_factor2Loop[d,f,i] * factors[d][f] for d in range(1, ops.Num_dim) for f in range(len(factors[d]))),
-                              name=f"C_loop2Factor_definition_({i})")
+                             name=f"C_loop2Factor_definition_({i})")
         # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -# 
 
         for op in range(3):
@@ -485,15 +561,6 @@ class Solver():
                                                     name=f"C_sum_lgdimOfTile_({acc.mem2dict(m)},{op_name},{ops.dim2Dict[d]})")
         # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -#          
 
-        spur = {}
-        for m in range(1,acc.Num_mem):
-            for d in range(1, ops.Num_dim):
-                for op, op_name in enumerate(['I','W','O']):
-                    spur[m,op,d] = 1
-                    for u in range(acc.Num_SpUr):
-                        if m <= acc.SpUr2Mem[u,op]:
-                            spur[m,op,d] *= self.su[u][d]
-
         exp_dataVolume = gp.tupledict()     # exp_dataVolume[m,op]
         lg_dataVolume = gp.tupledict()     # lg_dataVolume[m,op]
         for op, op_name in enumerate(['I','W','O']):
@@ -541,34 +608,34 @@ class Solver():
                 model.addConstr(sum_s == lg_dimExistMem[m,op,ops.dict2Dim('S')], name=f"C_Uniqueness_IndicSumS_({acc.mem2dict(m)},{op_name})")
                 model.addConstr(sum_q == lg_dimExistMem[m,op,ops.dict2Dim('Q')], name=f"C_Uniqueness_IndicSumQ_({acc.mem2dict(m)},{op_name})")
 
-                lg_dataVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=math.log(min(acc.memSize[m]//acc.precision[m,op], MAX_SIZE[op])),
+                lg_dataVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=LB_lg_dataVolume[m,op], ub=UB_lg_dataVolume[m,op],
                                                     name=f"lg_dataVolume_({acc.mem2dict(m)},{op_name})")
                 model.addConstr(lg_dataVolume[m,op] == sum_dim_h + sum_dim_w + lg_dimExistMem[m,op,ops.dict2Dim('C')],
                                     name=f"C_lg_dataVolume_({acc.mem2dict(m)},{op_name})")
                 if acc.shareMemory[m] == True:
-                    exp_dataVolume[m,op] = model.addVar(lb=0, ub=min(acc.memSize[m]//acc.precision[m,op], MAX_SIZE[op]), vtype=GRB.CONTINUOUS,
+                    exp_dataVolume[m,op] = model.addVar(lb=LB_dataVolume[m,op], ub=UB_dataVolume[m,op], vtype=GRB.CONTINUOUS,
                                                          name=f"exp_dataVolume_({acc.mem2dict(m)},{op_name})")
                     model.addGenConstrExp(xvar=lg_dataVolume[m,op], yvar=exp_dataVolume[m,op], options=self.ExpOption, name=f"C_exp_dataVolume_({acc.mem2dict(m)},{op_name})")
                         
             op, op_name = 1,'W'     # Weight
             if acc.mappingArray[op][m] == True:
-                lg_dataVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=math.log(min(acc.memSize[m]//acc.precision[m,op], MAX_SIZE[op])),
+                lg_dataVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=LB_lg_dataVolume[m,op], ub=UB_lg_dataVolume[m,op],
                                                 name=f"lg_dataVolume_({acc.mem2dict(m)},{op_name})")
                 model.addConstr(lg_dataVolume[m,op] == quicksum(lg_dimExistMem[m,op,ops.dict2Dim(dChar)] for dChar in ['R','S','C','K']),
                                 name=f"C_lg_dataVolume_({acc.mem2dict(m)},{op_name})")
                 if acc.shareMemory[m] == True:
-                    exp_dataVolume[m,op] = model.addVar(lb=0, ub=min(acc.memSize[m]//acc.precision[m,op], MAX_SIZE[op]), vtype=GRB.CONTINUOUS,
+                    exp_dataVolume[m,op] = model.addVar(lb=LB_dataVolume[m,op], ub=UB_dataVolume[m,op], vtype=GRB.CONTINUOUS,
                                                         name=f"exp_dataVolume_({acc.mem2dict(m)},{op_name})")
                     model.addGenConstrExp(xvar=lg_dataVolume[m,op], yvar=exp_dataVolume[m,op], options=self.ExpOption, name=f"C_exp_dataVolume_({acc.mem2dict(m)},{op_name})")
 
             op, op_name = 2,'O'     # Output
             if acc.mappingArray[op][m] == True:
-                lg_dataVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=math.log(min(acc.memSize[m]//acc.precision[m,op], MAX_SIZE[op])),
+                lg_dataVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=LB_lg_dataVolume[m,op], ub=UB_lg_dataVolume[m,op],
                                                     name=f"lg_dataVolume_({acc.mem2dict(m)},{op_name})")
                 model.addConstr(lg_dataVolume[m,op] == quicksum(lg_dimExistMem[m,op,ops.dict2Dim(dChar)] for dChar in ['P','Q','K']),
                                     name=f"C_lg_dataVolume_({acc.mem2dict(m)},{op_name})")
                 if acc.shareMemory[m] == True:
-                    exp_dataVolume[m,op] = model.addVar(lb=0, ub=min(acc.memSize[m]//acc.precision[m,op], MAX_SIZE[op]), vtype=GRB.CONTINUOUS,
+                    exp_dataVolume[m,op] = model.addVar(lb=LB_dataVolume[m,op], ub=UB_dataVolume[m,op], vtype=GRB.CONTINUOUS,
                                                         name=f"exp_dataVolume_({acc.mem2dict(m)},{op_name})")
                     model.addGenConstrExp(xvar=lg_dataVolume[m,op], yvar=exp_dataVolume[m,op], options=self.ExpOption, name=f"C_exp_dataVolume_({acc.mem2dict(m)},{op_name})")
 
@@ -617,21 +684,21 @@ class Solver():
                 model.addConstr(sum_s == lg_dimOfTile[m,op,ops.dict2Dim('S')], name=f"C_Uniqueness_IndicTileS_({acc.mem2dict(m)},{op_name})")
                 model.addConstr(sum_q == lg_dimOfTile[m,op,ops.dict2Dim('Q')], name=f"C_Uniqueness_IndicTileQ_({acc.mem2dict(m)},{op_name})")
 
-                lg_transVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=math.log(min(acc.memSize[m]//acc.precision[m,op], MAX_SIZE[op])),
+                lg_transVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=LB_lg_dataVolume[m,op], ub=UB_lg_dataVolume[m,op],
                                                      name=f"lg_transVolume_({acc.mem2dict(m)},{op_name})")
                 model.addConstr(lg_transVolume[m,op] == sum_dim_h + sum_dim_w + lg_dimOfTile[m,op,ops.dict2Dim('C')],
                                     name=f"C_lg_transVolume_({acc.mem2dict(m)},{op_name})")
 
             op, op_name = 1,'W'     # Weight
             if acc.mappingArray[op][m]:
-                lg_transVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=math.log(min(acc.memSize[m]//acc.precision[m,op], MAX_SIZE[op])),
+                lg_transVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=LB_lg_dataVolume[m,op], ub=UB_lg_dataVolume[m,op],
                                                      name=f"lg_transVolume_({acc.mem2dict(m)},{op_name})")
                 model.addConstr(lg_transVolume[m,op] == quicksum(lg_dimOfTile[m,op,ops.dict2Dim(dChar)] for dChar in ['R','S','C','K']),
                                      name=f"C_lg_transVolume_({acc.mem2dict(m)},{op_name})")
 
             op, op_name = 2,'O'     # Output
             if acc.mappingArray[op][m]:
-                lg_transVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=math.log(min(acc.memSize[m]//acc.precision[m,op], MAX_SIZE[op])),
+                lg_transVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=LB_lg_dataVolume[m,op], ub=UB_lg_dataVolume[m,op],
                                                      name=f"lg_transVolume_({acc.mem2dict(m)},{op_name})")
                 model.addConstr(lg_transVolume[m,op] == quicksum(lg_dimOfTile[m,op,ops.dict2Dim(dChar)] for dChar in ['P','Q','K']),
                                      name=f"C_lg_transVolume_({acc.mem2dict(m)},{op_name})")
@@ -678,21 +745,22 @@ class Solver():
         
         # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -#          
         transfer = gp.tupledict()                           # transfer[i,op]
+        transLatency = gp.tupledict()                       # transLatency[m,op]
         for op, op_name in enumerate(['I','W','O']):
-            transLatency = gp.tupledict()                   # transLatency[m,op]
             for m in range(1, acc.Num_mem):
                 if acc.mappingArray[op][m]:
-                    lg_transLatency = model.addVar(lb=0, ub=math.log(min(MAX_SIZE[op]*acc.precision[m,op], acc.memSize[m])/acc.bw[m]), vtype=GRB.CONTINUOUS,
+                    lg_transLatency = model.addVar(lb=LB_lg_transLatency[m,op], ub=UB_lg_transLatency[m,op], vtype=GRB.CONTINUOUS,
                                                     name=f"tmp_lg_transLatency_({acc.mem2dict(m)},{op_name})")
                     model.addConstr(lg_transLatency == lg_transVolume[m,op] + math.log(acc.precision[m,op]) - math.log(acc.bw[m]),
                                      name=f"C_lg_transLatency_({acc.mem2dict(m)},{op_name})")
                 
-                    transLatency[m,op] = model.addVar(lb=0, ub=min(MAX_SIZE[op]*acc.precision[m,op], acc.memSize[m])/acc.bw[m], vtype=GRB.CONTINUOUS, 
-                                                      name=f"transLatency_({acc.mem2dict(m)},{op_name})")
+                    transLatency[m,op] = model.addVar(lb=LB_transLatency[m,op], ub=UB_transLatency[m,op], vtype=GRB.CONTINUOUS, 
+                                                       name=f"transLatency_({acc.mem2dict(m)},{op_name})")
                     model.addGenConstrExp(xvar=lg_transLatency, yvar=transLatency[m,op], options=self.ExpOption, name=f"C_transLatency_({acc.mem2dict(m)},{op_name})")
             for i in range(Num_Loops):
-                transfer[i,op] = model.addVar(lb=0, ub=UB_Transfer[i,op], vtype=GRB.CONTINUOUS, name=f"transfer_({i},{op_name})")  
-                model.addConstr(transfer[i,op]==quicksum(var_mul01(model, indic_loop2Mem[i,op,m], transLatency[m,op], name=f"tmp_transfer_({i},{op_name})_{acc.mem2dict(m)}")
+                transfer[i,op] = model.addVar(lb=LB_TransferRaw[op], ub=UB_TransferRaw[i,op], vtype=GRB.CONTINUOUS, name=f"transfer_({i},{op_name})")
+                model.addConstr(transfer[i,op]==quicksum(var_mul01(model, indic_loop2Mem[i,op,m], transLatency[m,op],
+                                                                    name=f"tmp_transfer_({i},{op_name})_{acc.mem2dict(m)}")
                                                          for m in range(1, acc.Num_mem) if acc.mappingArray[op][m]),
                                  name=f"C_transfer_({i},{op_name})")
                 
@@ -701,18 +769,26 @@ class Solver():
         latency_Process = gp.tupledict()            # latency_Process[i,op] 
         latency_Transfer = gp.tupledict()           # latency_Transfer[i,op]
         for i in range(Num_Loops):
-            latency_Critical[i] = model.addVar(lb=MIN_INNER_PROD[i+1] * acc.t_MAC, ub=UB_Critical[i],
-                                                vtype=GRB.CONTINUOUS, name=f"latency_Critical_({i})")
+            latency_Critical[i] = model.addVar(lb=LB_Critical[i], ub=UB_Critical[i], vtype=GRB.CONTINUOUS, name=f"latency_Critical_({i})")
             for op, op_name in enumerate(['I','W','O']):
-                latency_Process[i,op] = model.addVar(lb=MIN_INNER_PROD[i] * acc.t_MAC, ub=UB_Process[i,op],
-                                                      vtype=GRB.CONTINUOUS, name=f"latency_Process_({i},{op_name})")
+                latency_Process[i,op] = model.addVar(lb=LB_Process[i,op], ub=UB_Process[i,op], vtype=GRB.CONTINUOUS, name=f"latency_Process_({i},{op_name})")
                 
                 if i < Num_Loops-1:
-                    latency_Transfer[i,op] = var_mul01(model, indic_xMem[i, op], transfer[i, op], name=f"latency_Transfer_({i},{op_name})")
+                    latency_Transfer[i,op] = var_mul01(model, indic_xMem[i, op], transfer[i, op], var_ub=UB_TransferActive[i,op],
+                                                        name=f"latency_Transfer_({i},{op_name})")
                 else:
-                    latency_Transfer[i,op] = model.addVar(lb=0, ub=self.MAX_TRANS[op] * 2, vtype=GRB.CONTINUOUS, name=f"latency_Transfer_({i},{op_name})")
+                    latency_Transfer[i,op] = model.addVar(lb=LB_TransferActive[i,op], ub=UB_TransferActive[i,op], vtype=GRB.CONTINUOUS,
+                                                           name=f"latency_Transfer_({i},{op_name})")
                     model.addConstr(latency_Transfer[i,op] == transfer[Num_Loops-1, op] + 1 - indic_usedMem[acc.lastMem[op],op] , name=f"C_RegTrans_({op_name})")
                     latency_Process[Num_Loops,op] = acc.t_MAC
+
+        for op, op_name in enumerate(['I','W','O']):
+            sum_latency_transfer = quicksum(latency_Transfer[i,op] for i in range(Num_Loops))
+            for m in range(1, acc.Num_mem):
+                if acc.mappingArray[op][m]:
+                    model.addConstr(sum_latency_transfer >= var_mul01(model, indic_usedMem[m,op], transLatency[m,op],
+                                                                     name=f"tmp_sum_latencyTransfer_({acc.mem2dict(m)},{op_name})"),
+                                    name=f"Cut_sum_latencyTransfer_({acc.mem2dict(m)},{op_name})")
 
         for i in range(Num_Loops):
             for op, op_name in enumerate(['I','W','O']):
@@ -746,11 +822,16 @@ class Solver():
                                      name=f"C_latency_process_({i},{op_name})")
                     
                 model.addConstr(latency_Process[i,op] >= 2 * latency_Process[i+1,op], name=f"Cut_Hierarchical_Decay_({i},{op_name})")
+
+        model.addConstr(latency_Process[0,2] >= MIN_INNER_PROD[0] * acc.t_MAC +
+                        quicksum(2 * MIN_OUTER_PROD[i] * latency_Transfer[i,2] for i in range(Num_Loops)),
+                        name="Cut_Output_Transfer_Cascade")
                     
 # - - - - - - - - - - - - - - - - - - - - - - - - Dataflow Evaluation Results - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -#          
         for op, op_name in enumerate(['I','W','O']):
             tmp_coeff = 2 if op_name == 'O' else 1
-            model.addConstr(res_latency >= latency_Process[0,op] + indic_usedMem[acc.Dram2mem,op] * tmp_coeff * MAX_SIZE[op] * acc.precision[acc.Dram2mem,op] / acc.bw[acc.Dram2mem],
+            offchip_bootstrap = tmp_coeff * MAX_SIZE[op] * acc.precision[acc.Dram2mem,op] / acc.bw[acc.Dram2mem]
+            model.addConstr(res_latency >= latency_Process[0,op] + offchip_bootstrap * (1 - indic_loop2Mem[0,op,acc.Dram2mem]),
                              name=f"C_Res_Latency_OffChip_({op})")
 
         # model.addConstr(res_energy >= energy_expr_rw + energy_expr_comp + energy_expr_leakage, name="C_Res_Energy_Summation")
@@ -787,6 +868,9 @@ class Solver():
 
         ####################################################################  Set Constraint Flag ###################################################################
         model.discardMultiobjEnvs()
+
+        model.setParam('TimeLimit', CONST.TIMELIMIT)
+        model.setParam('MIPFocus', CONST.MIPFOCUS)
 
         match CONST.FLAG_OPT:
             case "Latency":
@@ -898,8 +982,7 @@ class Solver():
             else:
                 debug_str += f"未找到约束 {constraintname}\n"
             Logger.debug(debug_str)
-        
-        
+
                 # model.Params.TimeLimit = 10  # 设置 10 秒硬性限制
 
         if model.status == GRB.OPTIMAL or model.status == GRB.SUBOPTIMAL:
@@ -925,4 +1008,3 @@ class Solver():
             model.write(os.path.join(self.outputdir, "model.mps"))
             Logger.error(f'Model infeasible !!!')
             exit()
-
