@@ -29,7 +29,7 @@ class _const_num_config():
 
         self.SCALINGFACTOR = 1e-6
 
-        # self.SCALE_LATENCY = 1000       # latency 以千周期为单位
+        self.SCALE_LATENCY = 1e3    # latency 以千周期为单位
         
         # self.SCALE_BW = 1024            # bandwidth 以 KB/cycle 为单位
 

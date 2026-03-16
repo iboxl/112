@@ -1,0 +1,6 @@
+[submodule "utils/Cacti-wrapper"]
+	path = utils/Cacti-wrapper
+	url = git@github.com:iboxl/Cacti-wrapper.git
+[submodule "utils/Cacti_wrapper"]
+	path = utils/Cacti_wrapper
+	url = git@github.com:iboxl/Cacti_wrapper.git

@@ -17,6 +17,7 @@ dependencies:
   - cycler=0.12.1=pyhcf101f3_2
   - cyrus-sasl=2.1.28=h1110e0f_3
   - dbus=1.16.2=h24cb091_1
+  - dill=0.4.1=pyhcf101f3_0
   - font-ttf-dejavu-sans-mono=2.37=hd3eb1b0_0
   - font-ttf-inconsolata=3.000=h77eed37_0
   - font-ttf-source-code-pro=2.038=h77eed37_0
@@ -118,6 +119,7 @@ dependencies:
   - mpfr=4.2.1=h90cbb55_3
   - mpg123=1.32.9=hc50e24c_0
   - mpmath=1.4.0=pyhd8ed1ab_0
+  - multiprocessing_on_dill=3.5.0a4=pyhd8ed1ab_0
   - munkres=1.1.4=pyhd8ed1ab_1
   - ncurses=6.5=h2d0b736_3
   - networkx=3.4=pyhd8ed1ab_0
@@ -156,6 +158,7 @@ dependencies:
   - toml=0.10.2=pyhcf101f3_3
   - tomli=2.4.0=pyhcf101f3_0
   - tornado=6.5.4=py310h47b2149_0
+  - tqdm=4.67.3=py310h7040dfc_1
   - typing-extensions=4.15.0=py310h06a4308_0
   - typing_extensions=4.15.0=py310h06a4308_0
   - tzdata=2025c=hc9c84f9_1

@@ -43,6 +43,8 @@ def get_Args():
                         type=str, default='112.log', help = 'Log file Name')
     parser.add_argument('-opt', '--flag_opt', dest='opt', choices=["Latency", "Energy", "EDP"], required=False, 
                         type=str, default="Feasible", help = 'kind of model optimization: 0=Feasible solution, 1=MIN_latency  2=MIN_energy  3=MIN_EDP')
+    parser.add_argument('-f', '--mipFocus', dest='mipFocus', choices=[0,1,2,3], required=False, 
+                        type=int, default=1, help = '0=balanced, 1=feasibility, 2=optimality, 3=best bound')
     parser.add_argument('-class', '--num_classes', dest='classes', choices=[10, 1000], required=False, 
                         type=int, default=1000, help = '10=CIFAR 1000=ImageNet')
     parser.add_argument('-t', '--time', dest='time_limit', required=False, 
@@ -68,6 +70,7 @@ def __main__(**kwargs):
 
     CONST.FLAG_OPT              = args.opt
     CONST.TIMELIMIT             = args.time_limit
+    CONST.MIPFOCUS              = args.mipFocus
     FLAG.WEIGHT_STATIONARY      = args.WS
     FLAG.INPUT_STATIONARY       = args.IS and (not args.RS)
     FLAG.DEBUG_SIMU             = args.SIMU
@@ -166,7 +169,6 @@ def __main__(**kwargs):
                 continue
             PD_Z = simu.PD
 
-            l_zz_modeling = simu.LModeling()
             # simu.idealExec()
             
         # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -#   
@@ -203,9 +205,10 @@ def __main__(**kwargs):
             pstr += f"On-chip Power: {round(PD_M.dynamic_power_onChip/PD_Z.dynamic_power_onChip*100,2):>8}%   ({PD_M.dynamic_power_onChip:.2e} / {PD_Z.dynamic_power_onChip:.2e}) pJ" + '\n'
 
         pstr += '\n'
-        pstr += f"* * * Zigzag-Running  * * *  Latency:{round(l_zz,3):<15}, Energy:{round(e_zz,3):<20}, EDP:{round(l_zz *e_zz,3):.5e}, LModeling:{round(l_zz_modeling,3):<15}" + '\n'
+        pstr += f"* * * Zigzag-Running  * * *  Latency:{round(l_zz,3):<15}, Energy:{round(e_zz,3):<20}, EDP:{round(l_zz *e_zz,3):.5e}" + '\n'
         pstr += f"* * * MIREDO-Running  * * *  Latency:{round(l_simu,3):<15}, Energy:{round(e_simu,3):<20}, EDP:{round(l_simu*e_simu,3):.5e}" + '\n'
-        pstr += f"MIP Solver Accuracy of Layer: {round(l_simu/l_solver*100,2)}%    (S){round(l_simu,3):<15} (M){round(l_solver,3):<15} " + '\n'
+        pstr += f"MIP Solver Latency Accuracy of Layer: {round(l_simu/l_solver*100,2)}%    (Simu){round(l_simu,3):<15} (Solver){round(l_solver,3):<15} " + '\n'
+        pstr += f"MIP Solver Energy  Accuracy of Layer: {round(e_simu/e_solver*100,2)}%    (Simu){round(e_simu,3):<15} (Solver){round(e_solver,3):<15} " + '\n'
 
         rstr = f"Optimization Of Layer-{i}: Latency-({round(l_simu/l_zz*100,2)}%), Energy-({round(e_simu/e_zz*100,2)}%), EDP-({round((l_simu*e_simu)/(l_zz * e_zz)*100,2)}%)"
         

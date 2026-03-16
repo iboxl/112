@@ -35,18 +35,19 @@ def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str, singl
     result = [CONST.MAX_POS] * 5 + [None]
 
     for scheme in generator:
+        count += 1
+
         if singleIter == True:
             Spatial_unrolling = kwargs['Spatial_unrolling']
             assert Spatial_unrolling is not None, "Single Iteration Mode Requires Spatial Unrolling Input as Scheme."
             scheme = Spatial_unrolling
-
-        count += 1
+            outputdir_scheme = outputdir
+        else:
+            outputdir_scheme = os.path.join(os.path.join(outputdir, 'SolPool'), str(count))
+        prepare_save_dir(outputdir_scheme)
 
         spatial_unrolling = [math.prod(col) for col in zip(*scheme)]
         temporal_unrolling= [math.ceil(x / y) for x, y in zip(ops.dim2bound, spatial_unrolling)]
-        
-        outputdir_scheme = os.path.join(os.path.join(outputdir, 'SolPool'), str(count))
-        prepare_save_dir(outputdir_scheme)
 
         Logger.info('\n' + f"Scheme {count:<3} Beginning: SpUr-{spatial_unrolling}, TpUr-{temporal_unrolling}")
         
@@ -54,7 +55,7 @@ def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str, singl
 
         solver.run()
 
-        if (solver.model.status == GRB.OPTIMAL or solver.model.status == GRB.SUBOPTIMAL or (solver.model.status == GRB.Status.TIME_LIMIT and solver.model.SolCount)) and FLAG.SIMU:
+        if solver.model.SolCount > 0 and FLAG.SIMU:
 
             simu = tranSimulator(acc=acc, ops=ops, dataflow=solver.dataflow)
             # Logger.debug(simu.debugLog())
@@ -123,20 +124,56 @@ if __name__ == "__main__":
     Logger.debug("Running SolveMapping for debugging and testing Solver (MIP model), only one iteration with given scheme")
 
     CONST.FLAG_OPT="Latency"
+    # CONST.FLAG_OPT="Energy"
     # CONST.FLAG_OPT="EDP"
     
     CONST.MIPFOCUS = 1
+    # CONST.MIPFOCUS = 2
+    # CONST.MIPFOCUS = 3
+    
+    CONST.TIMELIMIT = 77
+    # CONST.TIMELIMIT = 600
 
+    # # # # # layer-0
+    # ops = WorkLoad(loopDim={'R': 7, 'S': 7, 'C': 3, 'K':64, 'P': 112, 'Q': 112, 'G': 1, 'B': 1, 'H': 224, 'W': 224, 'Stride': 2, 'Padding': 3})
+    # Spatial_unrolling = [[1,1,1,2,1,1,4,1],
+    #                  #   [-,R,S,P,Q,C,K,G],
+    #                      [1,1,7,1,1,3,1,1],
+    #                      [1,1,1,1,1,1,16,1]]
+
+    # # # # # layer-1
     ops = WorkLoad(loopDim={'R': 3, 'S': 3, 'C': 64, 'K':64, 'P': 56, 'Q': 56, 'G': 1, 'B': 1, 'H': 56, 'W': 56, 'Stride': 1, 'Padding': 1})
     Spatial_unrolling =    [[1,1,1,2,1,1,4,1],
                         #   [-,R,S,P,Q,C,K,G],
                             [1,1,1,1,1,32,1,1],
                             [1,1,1,1,1,1,16,1]]
 
-    # ops = WorkLoad(loopDim={'R': 7, 'S': 7, 'C': 3, 'K':64, 'P': 112, 'Q': 112, 'G': 1, 'B': 1, 'H': 224, 'W': 224, 'Stride': 2, 'Padding': 3})
-    # Spatial_unrolling = [[1,1,1,2,1,1,4,1],
+    # # # # # layer-12
+    # ops = WorkLoad(loopDim={'R': 1, 'S': 1, 'C': 128, 'K':256, 'P': 14, 'Q': 14, 'G': 1, 'B': 1, 'H': 28, 'W': 28, 'Stride': 2, 'Padding': 0})
+    # Spatial_unrolling = [[1,1,1,2,2,1,2,1],
     #                  #   [-,R,S,P,Q,C,K,G],
-    #                      [1,1,7,1,1,3,1,1],
+    #                      [1,1,1,1,1,32,1,1],
+    #                      [1,1,1,1,1,1,16,1]]
+
+    # # # # # layer-15
+    # ops = WorkLoad(loopDim={'R': 3, 'S': 3, 'C': 256, 'K':512, 'P': 7, 'Q': 7, 'G': 1, 'B': 1, 'H': 14, 'W': 14, 'Stride': 2, 'Padding': 1})
+    # Spatial_unrolling = [[1,1,1,1,1,1,8,1],
+    #                  #   [-,R,S,P,Q,C,K,G],
+    #                      [1,1,1,1,1,32,1,1],
+    #                      [1,1,1,1,1,1,16,1]]
+
+    # # # # # layer-16
+    # ops = WorkLoad(loopDim={'R': 3, 'S': 3, 'C': 512, 'K':512, 'P': 7, 'Q': 7, 'G': 1, 'B': 1, 'H': 7, 'W': 7, 'Stride': 1, 'Padding': 1})
+    # Spatial_unrolling = [[1,1,1,1,1,1,8,1],
+    #                  #   [-,R,S,P,Q,C,K,G],
+    #                      [1,1,1,1,1,32,1,1],
+    #                      [1,1,1,1,1,1,16,1]]
+
+    # # # # # layer-17
+    # ops = WorkLoad(loopDim={'R': 1, 'S': 1, 'C': 256, 'K':512, 'P': 7, 'Q': 7, 'G': 1, 'B': 1, 'H': 14, 'W': 14, 'Stride': 2, 'Padding': 0})
+    # Spatial_unrolling = [[1,1,1,1,1,1,8,1],
+    #                  #   [-,R,S,P,Q,C,K,G],
+    #                      [1,1,1,1,1,32,1,1],
     #                      [1,1,1,1,1,1,16,1]]
 
     lat, eng, edp, c_lat, c_eng, ds = SolveMapping(acc=accelerator, ops=ops, bestMetric=1e10, outputdir=outFolder, singleIter=True, Spatial_unrolling=Spatial_unrolling)

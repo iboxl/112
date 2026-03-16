@@ -181,7 +181,7 @@ def var_AandB(model, A, B, name):
     elif not isinstance(B, gp.Var):
         return A if B==True else 0.0
     else:
-        var = model.addVar(lb=0.0, ub=1.0, vtype=GRB.CONTINUOUS, name=f'indic_{name}') 
+        var = model.addVar(vtype=GRB.BINARY, name=f'indic_{name}') 
         model.addConstr( var <= A, name=f'C_AandB_{name}_1')
         model.addConstr( var <= B, name=f'C_AandB_{name}_2')
         model.addConstr( var >= A + B - 1, name=f'C_AandB_{name}_3')
@@ -245,7 +245,7 @@ def var_mul01(model:gp.Model, indic, A, name, A_ub = None, A_lb = None, var_ub =
             return A
         else:
             return 0
-
+    model.update()
     assert indic.VType == GRB.BINARY
     if A_ub is not None:
         ub = A_ub

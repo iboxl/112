@@ -7,7 +7,7 @@ from zigzag.classes.hardware.architecture.memory_instance import MemoryInstance
 from zigzag.classes.hardware.architecture.memory_level import MemoryLevel
 from zigzag.classes.hardware.architecture.operational_array import OperationalArray
 import math
-from utils.cacti.EvalCacti import cacti_power, dram_static
+from utils.Cacti_wrapper.EvalCacti import cacti_power, dram_static
 from utils.GlobalUT import Logger as Logger
 
 def convert_mapping_to_next(matrix):

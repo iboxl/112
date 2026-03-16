@@ -401,97 +401,6 @@ class tranSimulator():
 
         return res_Latency, res_Energy
 
-        
-    def LModeling(self):
-        acc = self.acc
-        ops = self.ops
-        tm = self.dataflow.tm
-        uppmem = self.dataflow.uppermem
-        nxtmem = self.dataflow.nxtmem
-        xMem   = self.dataflow.xMem
-        Lcp = {}
-        Lcons = {}
-        cp_term = {}
-        debugStrTrans = {}
-        for op, op_name in enumerate(['I','W','O']):
-            Lcons[len(tm),op] = acc.t_MAC
-        cp_term[len(tm)] = max(Lcons[len(tm),op] for op, op_name in enumerate(['I','W','O']))
-        for loopidx in range(len(tm)-1,-1,-1):
-            mem_cur = [self.dataflow.tm[loopidx].mem[op] for op in range(3)]
-            mem_nxt = [nxtmem[mem_cur[op],op] for op in range(3)]
-            tileSize = [self.tileSize[mem_cur[op],op] for op in range(3)]
-            trans = [math.ceil(tileSize[op]*self.acc.precision[mem_cur[op],op]/self.acc.bw[mem_cur[op]]) for op in range(3)]
-
-            if loopidx == len(tm)-1:
-                for op, op_name in enumerate(['I','W','O']):
-                    if mem_cur[op] != acc.lastMem[op]:
-                        trans[op] += 1
-
-            Trans = [(trans[op] if xMem[loopidx,op]==1 else 0) for op in range(3)]
-            Trans[2] *= 2       # for output operands
-            dflag = [self.dataflow.usr_defined_double_flag[mem_nxt[op]][op] for op in range(3)]
-
-            # if loopidx == len(tm)-1:
-            #     Lcp[loopidx] = Lcp[loopidx+1]*1
-            # else:
-            #     Lcp[loopidx] = Lcp[loopidx+1]*tm[loopidx+1].dimSize
-            Lcp[loopidx] = cp_term[loopidx+1]
-
-            for op, op_name in enumerate(['I','W','O']):
-                Lcp[loopidx] = max(Lcp[loopidx], (Trans[op]+Lcons[loopidx+1,op])*(1-dflag[op])+max(Trans[op],Lcons[loopidx+1,op])*dflag[op])
-            
-            for op, op_name in enumerate(['I','W','O']):
-                if xMem[loopidx,op]==0:
-                    Lcons[loopidx,op] = Lcp[loopidx]*(tm[loopidx].dimSize-1) + Lcons[loopidx+1,op]
-                else:
-                    if dflag[op]==0:
-                        if op < 2:  # I,W
-                            Lcons[loopidx,op] = Lcp[loopidx]*(tm[loopidx].dimSize-2) + 2*Trans[op] + Lcons[loopidx+1,op] 
-                        else:
-                            Lcons[loopidx,op] = Lcp[loopidx]*(tm[loopidx].dimSize-1) + Trans[op] + Lcons[loopidx+1,op]
-                    else:
-                        if op < 2:  # I,W
-                            Lcons[loopidx,op] = max(Lcp[loopidx]*max(0,tm[loopidx].dimSize-3) + 2*Trans[op] + max(Trans[op],Lcons[loopidx+1,op]), Trans[op]*tm[loopidx].dimSize)
-                        else:
-                            Lcons[loopidx,op] = Lcp[loopidx]*(tm[loopidx].dimSize-2) + Trans[op] + max(math.ceil(Trans[op]/2),Lcons[loopidx+1,op]) + max(math.ceil(Trans[op]/2),Lcp[loopidx]) 
-            
-            cp_term[loopidx] = Lcp[loopidx]*tm[loopidx].dimSize
-                
-            pstr = ""
-            for op, op_name in enumerate(['I','W','O']):
-                pstr += f"{round(dflag[op])}|{Trans[op]:<10}   "
-            pstr += f"Lcp:{round(Lcp[loopidx])}"
-            debugStrTrans[loopidx] = pstr
-            
-        res_Latency = max(cp_term[0], max(Lcons[0,op] for op in range(3)))
-        Logger.info(f"* * SimuLax-Latency-Modeling * *  Latency:{res_Latency}")
-
-        print("\nDebug in Latency Modeling")
-        print("doubleFlag | tileSize(bit)")
-        # self.dataflow.usr_defined_double_flag[mem_nxt[op]][op]
-        dflag = self.dataflow.usr_defined_double_flag
-        for m in range(1,acc.Num_mem):
-            print(f"{acc.mem2dict(m):<15}: ",end="")
-            for op, op_name in enumerate(['I','W','O']):
-                print(f"{round(dflag[m][op])}|{self.tileSize[m,op]*acc.precision[m,op]:<10} ", end="")
-            print("")
-
-        print("dFlag | TransTime")
-        for loopidx in range(len(tm)):
-            print(f"loop {loopidx}({tm[loopidx].dimSize}): ",end="")
-            print(debugStrTrans[loopidx])
-        # print(f"doubleBuffer flag: {self.dataflow.usr_defined_double_flag}")
-        
-        print("Latency")
-        for loopidx in range(len(tm)):
-            # print(f"loop {loopidx}({tm[loopidx].dimSize}): Lcp={Lcp[loopidx]}, ",end="")
-            print(f"loop {loopidx}({tm[loopidx].dimSize}):",end="   ")
-            for op, op_name in enumerate(['I','W','O']):
-                print(f"{Lcons[loopidx,op]:<12}  ", end="")
-            print(f"critical_term={cp_term[loopidx]}")
-
-        return res_Latency
-
     def debugLog(self):
         acc = self.acc
         ops = self.ops
@@ -532,7 +441,3 @@ class tranSimulator():
 
 
         return pstr
-
-
-
-        
