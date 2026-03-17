@@ -13,8 +13,8 @@
 model/*
 !model/*.py
 
-zzz_outputs/*
-!zzz_outputs/.gitkeep
+Evaluation/Zigzag_imc/output/*
+!Evaluation/Zigzag_imc/output/.gitkeep
 
 **cache**
 

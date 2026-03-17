@@ -104,7 +104,7 @@ Important support files around this flow:
 - `Architecture/ZigzagAcc.py`: default hardware definition used by `run.py`
 - `Architecture/ArchSpec.py`: converts ZigZag hardware objects into MIREDO's `CIM_Acc`
 - `Simulator/Simulax.py`: simulator used to validate solver output
-- `utils/CompatibleZigzag.py`: ZigZag-to-MIREDO conversion utilities
+- `Evaluation/Zigzag_imc/CompatibleZigzag.py`: ZigZag-to-MIREDO conversion utilities
 - `utils/UtilsFunction/OnnxParser.py`: extracts convolution loop dimensions from ONNX
 - `Config/zigzag_mapping.py`: ZigZag mapping hints
 
@@ -122,7 +122,7 @@ conda activate MIREDO
 Required notes:
 
 - `gurobipy` is required and needs a working Gurobi license
-- the repository includes ZigZag and CACTI-related code used by the main flow
+- the main flow uses the ZigZag IMC submodule under `Evaluation/Zigzag_imc/zigzag-imc` together with the CACTI wrappers in this repo
 - the default working directory should be the repository root
 
 ## How To Run Experiments
@@ -206,7 +206,7 @@ Typical contents:
 - `Evaluation-Layer.log` for each layer
 - `Dataflow.pkl` for the selected layer mapping
 
-ZigZag baseline caches are stored in `zzz_outputs/`.
+ZigZag baseline caches are stored in `Evaluation/Zigzag_imc/output/`.
 These are useful for reruns but are not the place to start reading the codebase.
 
 ## Suggested Developer Workflow
@@ -226,7 +226,7 @@ Unless your task explicitly targets them, do not start with:
 - `tools/*.py`
 - notebooks or ad hoc reports
 - files under `output/`
-- files under `zzz_outputs/`
+- files under `Evaluation/Zigzag_imc/output/`
 - one-off debug utilities
 
 Those files are useful for experiments and analysis, but they are not the core path new developers should learn first.

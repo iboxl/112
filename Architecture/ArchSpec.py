@@ -1,7 +1,9 @@
 # this file is prepared for project 511
 # Created by iboxl
 
+from utils.ZigzagUtils import ensure_zigzag_submodule_on_path
 
+ensure_zigzag_submodule_on_path()
 from zigzag.classes.hardware.architecture.core import Core as core_zz
 from zigzag.classes.hardware.architecture.memory_instance import MemoryInstance
 from zigzag.classes.hardware.architecture.memory_level import MemoryLevel

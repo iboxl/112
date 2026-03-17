@@ -11,8 +11,8 @@ import pickle
 import uuid
 from utils.UtilsFunction.OnnxParser import extract_loopdims
 from utils.UtilsFunction.ToolFunction import prepare_save_dir
-from utils.CompatibleZigzag import convert_zz_to_miredo, compare_ops_cme
 from Simulator.Simulax import tranSimulator
+from utils.ZigzagUtils import zigzag_cache_prefix, get_hardware_performance_zigzag, convert_Zigzag_to_MIREDO, compare_ops_cme
 import time, copy
 from importlib import import_module
 
@@ -96,22 +96,23 @@ def __main__(**kwargs):
         case _:
             opt_flag = "latency"            # flagOPT = infeasible
     
-    compare_filePrefix = f"zzz_outputs/{opt_flag}_{args.model}_{args.architecture}"
-    if os.path.isfile(f"{compare_filePrefix}.pickle") == False:     # Zigzag-CME is not exist, running ZZ-opt
+    compare_filePrefix = zigzag_cache_prefix(opt_flag, args.model, args.architecture)
+    compare_pickle = compare_filePrefix.with_suffix(".pickle")
+    compare_json = compare_filePrefix.with_suffix(".json")
+    if compare_pickle.is_file() == False:     # Zigzag-CME is not exist, running ZZ-opt
         Logger.info("Running Zigzag to generate CME-compared")
         start_time_zz = time.time()
-        from zigzag.api import get_hardware_performance_zigzag
         energy, latency, cmeAll = get_hardware_performance_zigzag(
             workload = model,
             accelerator = f"Architecture.{args.architecture}",
             mapping = "Config.zigzag_mapping",
             opt=opt_flag,
-            dump_filename_pattern=f"{compare_filePrefix}.json",
-            pickle_filename=f"{compare_filePrefix}.pickle"
+            dump_filename_pattern=str(compare_json),
+            pickle_filename=str(compare_pickle)
         )
         end_time_zz = time.time()
         Logger.critical(f"Zigzag solve cost time: {end_time_zz - start_time_zz}")     
-    with open(f"{compare_filePrefix}.pickle", 'rb') as fp:
+    with open(compare_pickle, 'rb') as fp:
         cmes= pickle.load(fp)
 
     assert len(convs) == len(loopdims)
@@ -155,7 +156,7 @@ def __main__(**kwargs):
             accelerator = copy.deepcopy(accelerator_eval)
 
             loops = LoopNest(acc=accelerator,ops=ops)
-            loops = convert_zz_to_miredo(loops=loops, cme=cme_compare)
+            loops = convert_Zigzag_to_MIREDO(loops=loops, cme=cme_compare)
             loops.usr_defined_double_flag[accelerator.Macro2mem][1] = accelerator.double_Macro
 
             try:
@@ -242,7 +243,5 @@ def __main__(**kwargs):
     Logger.critical(f"Solving The Whole Model Cost: {round(end_time - start_time,1)}s")
 
     Logger.recover_stdout()
-    if os.path.isfile("pcacti_report.txt"):
-        os.remove("pcacti_report.txt")                                  # remove cacti output file
 
 __main__()

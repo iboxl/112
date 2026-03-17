@@ -120,7 +120,7 @@ def extract_loopdims(path: str):
 
 # ---------- 示例调用 ---------- #
 if __name__ == "__main__":
-    p1 = "zigzag/inputs/examples/workload/resnet18.onnx"     # 任意单文件
+    p1 = "Evaluation/Zigzag_imc/zigzag-imc/zigzag/inputs/examples/workload/resnet18.onnx"     # 任意单文件
     p2 = "model/Resnet18"         # 目录
 
     names1, dims1 = extract_loopdims(p1)
@@ -134,6 +134,5 @@ if __name__ == "__main__":
     for n, d in zip(names2, dims2):
         print(n)
         print(d)
-
 
 

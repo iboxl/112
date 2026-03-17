@@ -1,5 +1,9 @@
 import os
 import random
+from contextlib import contextmanager
+from utils.ZigzagUtils import ensure_zigzag_submodule_on_path, zigzag_cacti_root, zigzag_submodule_root
+
+ensure_zigzag_submodule_on_path()
 from zigzag.classes.hardware.architecture.memory_hierarchy import MemoryHierarchy
 from zigzag.classes.hardware.architecture.memory_instance import MemoryInstance
 from zigzag.classes.hardware.architecture.accelerator import Accelerator
@@ -8,9 +12,19 @@ from zigzag.classes.hardware.architecture.ImcArray import ImcArray
 from zigzag.classes.hardware.architecture.get_cacti_cost import get_w_cost_per_weight_from_cacti
 from zigzag.classes.hardware.architecture.get_cacti_cost import get_cacti_cost
 
+
+@contextmanager
+def zigzag_runtime_cwd():
+    prev_cwd = os.getcwd()
+    os.chdir(zigzag_submodule_root())
+    try:
+        yield
+    finally:
+        os.chdir(prev_cwd)
+
 def memory_hierarchy_dut(imc_array, visualize=False):
     """ [OPTIONAL] Get w_cost of imc cell group from CACTI if required """
-    cacti_path = "zigzag/classes/cacti/cacti_master"
+    cacti_path = str(zigzag_cacti_root())
     tech_param = imc_array.unit.logic_unit.tech_param
     hd_param = imc_array.unit.hd_param
     dimensions = imc_array.unit.dimensions
@@ -277,9 +291,10 @@ def imc_array_dut():
         "D3": 8    # nb_macros (nb_arrays)
     }  # e.g. {"D1": ("K", 4), "D2": ("C", 32),}
 
-    imc_array = ImcArray(
-        tech_param, hd_param, dimensions
-    )
+    with zigzag_runtime_cwd():
+        imc_array = ImcArray(
+            tech_param, hd_param, dimensions
+        )
 
     return imc_array
 
