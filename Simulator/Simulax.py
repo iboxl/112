@@ -35,8 +35,6 @@ class tranSimulator():
         self.dataflow = dataflow
         self.DEBUG_SIMU = DEBUG_SIMU
 
-        # from utils.CompatibleZigzag import fix_all_memHierarchy
-        # self.dataflow.tm = fix_all_memHierarchy(acc=acc, tm=dataflow.tm)
         self.dataflow.preprogress()
         # print(self.dataflow)
         Logger.info(self.dataflow)
@@ -330,6 +328,9 @@ class tranSimulator():
             self.lastMappingMem[op] = self.dataflow.tm[-1].mem[op]
             self.lastMemReg[op] = True if self.lastMappingMem[op] == self.acc.lastMem[op] else False
 
+
+        # # # # # # # # # # # # # # # # # # # # # # # # # # # # Start Running Simulator  # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+
         for op, op_name in enumerate(['I','W','O']):
             if self.firstMemDram[op] is False:
                 self.timer[self.acc.Dram2mem, op]        += self.ops.size[op] * self.acc.precision[self.acc.Dram2mem,op] / self.acc.bw[self.acc.Dram2mem]
@@ -344,8 +345,6 @@ class tranSimulator():
 
         res_Latency = max(self.timer[mem, op] for op in range(3) for mem in range(self.acc.Num_mem))
 
-        # ['PLACEHOLD'0, 'Dram'1, 'Global_buffer'2, 'Output_buffer'3, 'Input_buffer'4, 'OReg'5, 'IReg'6, 'Macro'7] acc.Num_mem = 8
-        
         for op, op_name in enumerate(['I','W','O']):
             if self.firstMemDram[op] is False:
                 self.memCost[self.acc.Dram2mem].r += self.dataSize[self.firstMappingMem[op],op] * \
