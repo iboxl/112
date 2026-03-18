@@ -181,7 +181,11 @@ def _calc_explicit_mem_usage(loops: LoopNest):
         for op in range(3):
             if acc.mappingArray[op][mem] == 0:
                 continue
-            raw_bits[mem][op] = int(data_size[mem, op] * acc.precision[mem, op])
+            if hasattr(loops, "get_precision"):
+                precision = loops.get_precision(mem, op)
+            else:
+                precision = acc.precision[mem, op]
+            raw_bits[mem][op] = int(data_size[mem, op] * precision)
             used_bits[mem][op] = raw_bits[mem][op] * (1 + int(loops.usr_defined_double_flag[mem][op]))
     return raw_bits, used_bits
 

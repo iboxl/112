@@ -116,6 +116,7 @@ class LoopNest():
         self.sm:list[Mapping] = [] # yin
 
         self.usr_defined_double_flag = None
+        self.psum_flag = None
         
     
     def preprogress(self):
@@ -185,6 +186,24 @@ class LoopNest():
                 xMem[i,1] = 0
         self.xMem = xMem
 
+        output_mems = [m for m in range(1, self.acc.Num_mem) if self.acc.mappingArray[2][m] == 1]
+        if self.psum_flag is None:
+            ir_at_mem = {}
+            for mapping in tm:
+                if self.ops.relevance[2][mapping.dim] == 0 and mapping.dimSize > 1:
+                    ir_at_mem[mapping.mem[2]] = True
+
+            psum_flag = {}
+            has_ir_outer = False
+            for m in output_mems:
+                if ir_at_mem.get(m, False):
+                    has_ir_outer = True
+                psum_flag[m] = has_ir_outer
+            self.psum_flag = psum_flag
+
+        for m in output_mems:
+            self.psum_flag.setdefault(m, False)
+
         for i,_ in enumerate(self.ops.dim2Dict):
             if abs(unrollingSize[i]-self.ops.dim2bound[i]) > 1:
                 Logger.warning(f"Dataflow LoopNest used greedy mapping ({unrollingSize[i]}) for dimension {self.ops.dim2Dict[i]}({self.ops.dim2bound[i]})")  
@@ -210,6 +229,16 @@ class LoopNest():
             pstr += '\n'
             pstr += "- "*50 + '\n'
         return pstr
+
+    def get_output_precision(self, mem):
+        if self.psum_flag is not None and self.psum_flag.get(mem, False):
+            return self.acc.precision_psum
+        return self.acc.precision_final
+
+    def get_precision(self, mem, op):
+        if op == 2:
+            return self.get_output_precision(mem)
+        return self.acc.precision[mem, op]
 
 
 

@@ -5,6 +5,7 @@ import os
 import configparser
 import utils.UtilsFunction.ToolFunction as _tool_func
 import math
+import psutil
 from utils.GlobalUT import *
 
 
@@ -33,3 +34,34 @@ def debug_get_im2col_info(FLAG_DEBUG):
             print(f"  num_mul: {info['num_mul']}")
             print(f"  module: {info['module']}")
             print(f"  input shape: {info['input_shape']}, weight shape: {info['weight_shape']}")
+
+def append_scheme_summary(outputdir:str, message:str):
+    summary_file = os.path.join(outputdir, "Scheme-Summary.log")
+    with open(summary_file, "a", encoding="utf-8") as file:
+        file.write(message.rstrip() + "\n")
+
+
+def detect_parallel_config():
+    logical_cores = psutil.cpu_count() or 1
+    physical_cores = psutil.cpu_count(logical=False) or logical_cores
+    memory_info = psutil.virtual_memory()
+    available_mem_gb = memory_info.available / (1024 ** 3)
+
+    try:
+        load_avg = os.getloadavg()[0]
+        busy_cores = min(physical_cores - 1, math.floor(load_avg))
+    except (AttributeError, OSError):
+        busy_cores = 0
+
+    usable_cores = max(1, physical_cores - busy_cores)
+    threads_per_worker = max(1, int(math.sqrt(usable_cores)))
+    max_workers = max(1, usable_cores // threads_per_worker)
+
+    return {
+        "physical_cores": physical_cores,
+        "logical_cores": logical_cores,
+        "usable_cores": usable_cores,
+        "available_mem_gb": available_mem_gb,
+        "threads_per_worker": threads_per_worker,
+        "max_workers": max_workers,
+    }

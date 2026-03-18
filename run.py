@@ -144,7 +144,7 @@ def __main__(**kwargs):
         except KeyError:              
             outputdir_layer = os.path.join(outFolder,Conv)
             prepare_save_dir(outputdir_layer)
-            Logger.changeFile(new_file = os.path.join(outputdir_layer,"Evaluation-Layer.log"))
+            Logger.changeFile(new_file = os.path.join(outputdir_layer,"Evaluation-Layer.log"), mode="w")
             Logger.info(ops)
             Logger.info('\n' + '* '*30 + '\n')
 
@@ -189,7 +189,7 @@ def __main__(**kwargs):
                 case _:
                     bestMetric = 1e9            # flagOPT = infeasible
 
-            l_solver, e_solver, edp_solver, l_simu, e_simu, PD_M = SolveMapping(acc=accelerator, ops=WorkLoad(loopDim=newdim), bestMetric=bestMetric * 1.5, outputdir=outputdir_layer)
+            l_solver, e_solver, edp_solver, l_simu, e_simu, PD_M = SolveMapping(acc=accelerator, ops=WorkLoad(loopDim=newdim), bestMetric=bestMetric*2, outputdir=outputdir_layer)
             cache[key] = (l_solver, e_solver, l_simu, e_simu, l_zz, e_zz)
             
             pstr += "\n-------- MemHierarchy ----- DB_M -- DB_Z --- PowerRate --- Power_M - Power_E -----\n"
@@ -211,7 +211,7 @@ def __main__(**kwargs):
         pstr += f"MIP Solver Latency Accuracy of Layer: {round(l_simu/l_solver*100,2)}%    (Simu){round(l_simu,3):<15} (Solver){round(l_solver,3):<15} " + '\n'
         pstr += f"MIP Solver Energy  Accuracy of Layer: {round(e_simu/e_solver*100,2)}%    (Simu){round(e_simu,3):<15} (Solver){round(e_solver,3):<15} " + '\n'
 
-        rstr = f"Optimization Of Layer-{i}: Latency-({round(l_simu/l_zz*100,2)}%), Energy-({round(e_simu/e_zz*100,2)}%), EDP-({round((l_simu*e_simu)/(l_zz * e_zz)*100,2)}%)"
+        rstr = f"Optimization Rate Of Layer-{i}: Latency-({round(l_simu/l_zz*100,2)}%), Energy-({round(e_simu/e_zz*100,2)}%), EDP-({round((l_simu*e_simu)/(l_zz * e_zz)*100,2)}%)"
         
         if cache_flag == False:
             Logger.info(pstr)
@@ -244,4 +244,5 @@ def __main__(**kwargs):
 
     Logger.recover_stdout()
 
-__main__()
+if __name__ == "__main__":
+    __main__()

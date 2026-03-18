@@ -137,8 +137,10 @@ class CIM_Acc():                         # WTD. init CIM_Acc from zigzag | Yaml 
             for t, t_name in enumerate(['I','W','O']):
                 self.precision[mem,t] = precision_op[t_name]
 
-        self.precision[self.OReg2mem, 2] = MacroSpec.hd_param["input_precision"] + MacroSpec.hd_param["weight_precision"] 
-        # self.precision[find_lastMem_index(self.mappingArray[2], 2) , 2] = MacroSpec.hd_param["input_precision"] + MacroSpec.hd_param["weight_precision"] 
+        self.precision[self.OReg2mem, 2] = MacroSpec.hd_param["input_precision"] + MacroSpec.hd_param["weight_precision"]
+        # self.precision[find_lastMem_index(self.mappingArray[2], 2) , 2] = MacroSpec.hd_param["input_precision"] + MacroSpec.hd_param["weight_precision"]
+        self.precision_final = precision_op['O']
+        self.precision_psum = MacroSpec.hd_param["input_precision"] + MacroSpec.hd_param["weight_precision"]
                
         
 

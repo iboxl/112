@@ -88,12 +88,23 @@ class _Logger():
 
         self.logger.changeFile = self.changeFile
         self._file_handler = None
+        self._console_handler = None
 
     def get_Logger(self):
         return self.logger
     
     def recover_stdout(self):
         sys.stdout = self.original_stdout
+
+    def _remove_all_handlers(self):
+        for handler in self.logger.handlers[:]:
+            self.logger.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:
+                pass
+        self._file_handler = None
+        self._console_handler = None
     
     def changeFile(self, new_file: str, mode: str = "a") -> None:
         """
@@ -126,6 +137,8 @@ class _Logger():
         if STD:
             sys.stdout = io.StringIO()    
 
+        self._remove_all_handlers()
+
         root_logger = logging.getLogger()
         # 移除所有已经存在的处理器
         for handler in root_logger.handlers[:]:
@@ -147,14 +160,7 @@ class _Logger():
         if self.levelFilter is not None:
             console_handler.addFilter(_levelFilter(self.levelFilter))
         self.logger.addHandler(console_handler)
-
-        file_handler = logging.FileHandler(file, mode='w')
-        file_handler.setFormatter(CustomFormatterFile())
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(CustomFormatterConsole())
-        if self.levelFilter is not None:
-            file_handler.addFilter(_levelFilter(self.levelFilter))
-            console_handler.addFilter(_levelFilter(self.levelFilter))
+        self._console_handler = console_handler
         
         if setcritical:
             self.logger.setLevel(logging.CRITICAL)
@@ -169,4 +175,3 @@ class _Logger():
         # if nofile is False:
         #     self.logger.addHandler(file_handler)  # 文件输出
         # self.logger.addHandler(console_handler)  # 控制台输出
-

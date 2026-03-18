@@ -17,21 +17,36 @@ from utils.UtilsFunction.ToolFunction import getDivisors, getUniqueFactors
 import copy
 
 class Solver():
-    def __init__(self, acc:CIM_Acc, ops:WorkLoad, tu, su, metric_ub, outputdir=None):
+    def __init__(self, acc:CIM_Acc, ops:WorkLoad, tu, su, metric_ub, outputdir=None,
+                 threads=None, soft_mem_limit_gb=None):
         self.acc = copy.deepcopy(acc)
         self.ops = copy.deepcopy(ops)
         self.tu = tu
         self.su = su
         self.metric_ub = metric_ub
         self.outputdir = outputdir
+        self.threads = threads
+        self.soft_mem_limit_gb = soft_mem_limit_gb
+        self.gurobi_output = FLAG.GUROBI_OUTPUT
+        self._owns_env = True
 
-        self.model = gp.Model(name="MIREDO")
-        self.model.setParam('OutputFlag', FLAG.GUROBI_OUTPUT)
+        self.env = gp.Env(empty=True)
+        self.env.setParam('OutputFlag', self.gurobi_output)
+        if self.threads is not None:
+            self.env.setParam('ThreadLimit', max(1, int(self.threads)))
+        self.env.start()
+
+        self.model = gp.Model(name="MIREDO", env=self.env)
+        self.model.setParam('OutputFlag', self.gurobi_output)
         self.model.setParam('Seed', 112)                               # 随机种子
         self.model.setParam('LogFile',os.path.join(self.outputdir, "Solver.log"))
         
-        self.model.setParam('Threads', psutil.cpu_count(logical=False))
-        # self.model.setParam('Threads', psutil.cpu_count())
+        if self.threads is None:
+            self.model.setParam('Threads', psutil.cpu_count(logical=False))
+        else:
+            self.model.setParam('Threads', max(1, int(self.threads)))
+        if self.soft_mem_limit_gb is not None:
+            self.model.setParam('SoftMemLimit', float(self.soft_mem_limit_gb))
 
         # self.model.setParam('NonConvex', 2)
         # self.model.setParam('PreQLinearize', 2)
@@ -54,7 +69,7 @@ class Solver():
 
         self.FACTORS = [flexible_factorization(_) for _ in self.tu]
         self.spatial_unrolling = [math.prod(col) for col in zip(*su)]
-        self.MAX_TRANS = [ max([math.ceil(min(ops.size[op] * acc.precision[m,op], acc.memSize[m]) / acc.bw[m]) / CONST.SCALE_LATENCY
+        self.MAX_TRANS = [ max([math.ceil(min(ops.size[op] * (acc.precision_psum if op == 2 else acc.precision[m,op]), acc.memSize[m]) / acc.bw[m]) / CONST.SCALE_LATENCY
                                 for m in range(1, acc.Num_mem) if acc.mappingArray[op][m]] 
                             + [0]) for op in range(3) ]                             # maxTrans[op] = max transfer time for op in {I,W,O}
         
@@ -74,6 +89,16 @@ class Solver():
         MAX_SIZE = self.ops.size
 
         UNIQUE_FACTOR = getUniqueFactors(factors)
+
+        def best_prec(mem, op):
+            if op != 2: # op_name != 'O'
+                return acc.precision[mem, op]
+            return acc.precision_final
+
+        def worst_prec(mem, op):
+            if op != 2: # op_name != 'O'
+                return acc.precision[mem, op]
+            return acc.precision_psum
 
         logF = {(d, f): math.log(factors[d][f]) 
                         for d in range(1, ops.Num_dim) 
@@ -98,7 +123,7 @@ class Solver():
         TOTAL_TEMPORAL_ITERS = max(MIN_INNER_PROD[0], 1)
         MAX_STAGE_TRANSFER = max((2 if op == 2 else 1) * self.MAX_TRANS[op] for op in range(3))
         UB_offchipBootstrap = max(
-            (2 if op == 2 else 1) * MAX_SIZE[op] * acc.precision[acc.Dram2mem, op] / acc.bw[acc.Dram2mem] / CONST.SCALE_LATENCY
+            (2 if op == 2 else 1) * MAX_SIZE[op] * worst_prec(acc.Dram2mem, op) / acc.bw[acc.Dram2mem] / CONST.SCALE_LATENCY
             for op in range(3)
         )
         UB_latencySimple = max(
@@ -127,19 +152,19 @@ class Solver():
                             spur[m, op, d] *= self.su[u][d]
 
             for op in range(3):
-                UB_dataVolumeCap = max(1, min(acc.memSize[m] // acc.precision[m, op], MAX_SIZE[op]))
+                UB_dataVolumeCap = max(1, min(acc.memSize[m] // best_prec(m, op), MAX_SIZE[op]))
                 UB_dataVolume[m, op] = UB_dataVolumeCap
                 UB_lg_dataVolume[m, op] = math.log(UB_dataVolumeCap)
                 UB_lg_transVolume[m, op] = UB_lg_dataVolume[m, op]
 
                 UB_transLatencyCap = max(
                     LAT_UNIT,
-                    UB_dataVolumeCap * acc.precision[m, op] / acc.bw[m] / CONST.SCALE_LATENCY,
+                    UB_dataVolumeCap * worst_prec(m, op) / acc.bw[m] / CONST.SCALE_LATENCY,
                 )
                 UB_transLatency[m, op] = UB_transLatencyCap
                 UB_lg_transLatency[m, op] = math.log(UB_transLatencyCap)
                 LB_lg_transLatency[m, op] = math.log(
-                    max(acc.precision[m, op] / acc.bw[m] / CONST.SCALE_LATENCY, 1 / CONST.MAX_POS)
+                    max(best_prec(m, op) / acc.bw[m] / CONST.SCALE_LATENCY, 1 / CONST.MAX_POS)
                 )
 
         ###########################################################  Variable & Constant & Constraints  ##################################################################
@@ -280,8 +305,51 @@ class Solver():
                                  name=f"C_relevantLoop_({i},{op_name})")
 
         # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -# 
+        
+        KEEP_temp_Output_irDim = any(factors[d] != [1] and ops.relevance[2][d] == 0 for d in range(1, ops.Num_dim))
 
-        for op in range(3):
+        indic_irDim_ExistIN = gp.tupledict()                # indic_irDim_ExistIN[m] = {0,1}
+        for m in range(1, acc.Num_mem):
+            op, op_name = 2, 'O'
+            if acc.mappingArray[op][m] == 0 or (not KEEP_temp_Output_irDim):
+                indic_irDim_ExistIN[m] = 0
+                continue
+            else:
+                indic_irDim_ExistIN[m] = model.addVar(vtype=GRB.BINARY, name=f"indic_irDim_ExistIN_({acc.mem2dict(m)})")
+
+                sum_ir_terms = 0
+                for d in range(1, ops.Num_dim):
+                    if factors[d] == [1] or ops.relevance[op][d] == 1:
+                        continue
+                    for f in range(len(factors[d])):
+                        sum_ir_terms += indic_factor2Mem[d, f, op, m]
+                        model.addConstr(indic_irDim_ExistIN[m] >= indic_factor2Mem[d, f, op, m],
+                                        name=f"C_has_ir_lb_({acc.mem2dict(m)},{ops.dim2Dict[d]},{f})")
+                model.addConstr(indic_irDim_ExistIN[m] <= sum_ir_terms, name=f"C_has_ir_ub_({acc.mem2dict(m)})")
+
+        indic_holdPsum = gp.tupledict()                     # indic_holdPsum[m] = {0,1}
+        for m in range(1, acc.Num_mem):
+            op, op_name = 2, 'O'
+            if acc.mappingArray[op][m] == 0 or (not KEEP_temp_Output_irDim):
+                indic_holdPsum[m] = 0
+                continue
+            else:
+                indic_holdPsum[m] = model.addVar(vtype=GRB.BINARY, name=f"indic_holdPsum_({acc.mem2dict(m)})")
+
+                model.addConstr( m*indic_holdPsum[m] >= quicksum(indic_irDim_ExistIN[m1] for m1 in range(1,m+1)),
+                                name=f"C_indic_holdPsum_({acc.mem2dict(m)})_1")
+                model.addConstr( indic_holdPsum[m] <= quicksum(indic_irDim_ExistIN[m1] for m1 in range(1,m+1)),
+                                name=f"C_indic_holdPsum_({acc.mem2dict(m)})_2")
+
+        def lg_prec_O(mem):
+            state = indic_holdPsum[mem]
+            if isinstance(state, gp.Var):
+                return math.log(acc.precision_final) + (math.log(acc.precision_psum) - math.log(acc.precision_final)) * state
+            return math.log(acc.precision_psum) if state else math.log(acc.precision_final)
+
+        # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -# 
+
+        for op, op_name in enumerate(['I','W','O']):
             acc.mappingArray[op].append(1)
             indic_usedMem[acc.Num_mem,op] = 1
         indic_nxtMem = gp.tupledict()
@@ -615,14 +683,37 @@ class Solver():
             if acc.shareMemory[m] == True:
                 tmp_datavolume = 0
                 for op, op_name in enumerate(['I','W','O']):
-                    if acc.mappingArray[op][m] == 1:
-                        tmp_datavolume += (var_mul01(model, indic_usedMem[m,op], exp_dataVolume[m,op], f"dataVolume_({acc.mem2dict(m)},{op_name})") + 
-                                           var_mul01(model, indic_doubleMem[m,op], exp_dataVolume[m,op], f"V_mul_{m}_{op}")) * acc.precision[m,op]
+                    if acc.mappingArray[op][m] == 0:
+                        continue
+
+                    tmp_volume = var_mul01(model, indic_usedMem[m,op], exp_dataVolume[m,op], f"dataVolume_used_({acc.mem2dict(m)},{op_name})")
+                    tmp_volume += var_mul01(model, indic_doubleMem[m,op], exp_dataVolume[m,op], f"dataVolume_double_{m}_{op}")
+
+                    if op_name != 'O':
+                        tmp_datavolume += tmp_volume * acc.precision[m,op]
+                    else:
+                        vol_total_o = model.addVar(lb=0, ub=2 * UB_dataVolume[m, op], vtype=GRB.CONTINUOUS,
+                                                name=f"vol_total_({acc.mem2dict(m)},{op_name})")
+                        model.addConstr(vol_total_o == tmp_volume,
+                                        name=f"C_vol_total_({acc.mem2dict(m)},{op_name})")
+
+                        vol_psum_o = var_mul01(model, indic_holdPsum[m], vol_total_o,
+                                            name=f"vol_psum_({acc.mem2dict(m)},{op_name})",
+                                            A_ub=2 * UB_dataVolume[m, op],
+                                            var_ub=2 * UB_dataVolume[m, op])
+                        tmp_datavolume += vol_total_o * acc.precision_final
+                        tmp_datavolume += vol_psum_o * (acc.precision_psum - acc.precision_final)
                 model.addConstr( tmp_datavolume <= acc.memSize[m], name=f"C_dataVolume_({acc.mem2dict(m)})" )
             else:
                 for op, op_name in enumerate(['I','W','O']):
-                    if acc.mappingArray[op][m] == 1:
-                        model.addConstr(lg_dataVolume[m,op] + math.log(2)*indic_doubleMem[m,op] <= math.log(acc.memSize[m])-math.log(acc.precision[m,op]))
+                    if acc.mappingArray[op][m] == 0:
+                        continue
+                    if op_name == 'O':
+                        model.addConstr(lg_dataVolume[m,op] + math.log(2)*indic_doubleMem[m,op] <= math.log(acc.memSize[m]) - lg_prec_O(m),
+                                        name=f"C_dataVolume_({acc.mem2dict(m)},{op_name})")
+                    else:
+                        model.addConstr(lg_dataVolume[m,op] + math.log(2)*indic_doubleMem[m,op] <= math.log(acc.memSize[m])-math.log(acc.precision[m,op]),
+                                        name=f"C_dataVolume_({acc.mem2dict(m)},{op_name})")
 
         ####################################################################  Execution Performance   #######################################################################
 
@@ -739,8 +830,8 @@ class Solver():
                 # 1) Base read-out energy of this memory level.
                 if can_read:
                     lg_transEnergy_r2L[m,op] = model.addVar(lb=0, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name=f"lg_transEnergy_r2L_({acc.mem2dict(m)},{op_name})")
-
-                    model.addConstr(lg_transEnergy_r2L[m,op] == math.log(acc.cost_r[m]) + math.log(acc.precision[m,op]) + count_expr_readOut + lg_transVolume[m,op],
+                    prec_term_r2l = lg_prec_O(m) if op_name == 'O' else math.log(acc.precision[m,op])
+                    model.addConstr(lg_transEnergy_r2L[m,op] == math.log(acc.cost_r[m]) + prec_term_r2l + count_expr_readOut + lg_transVolume[m,op],
                                     name=f"C_lg_transEnergy_r2L_({acc.mem2dict(m)},{op_name})")
                     
                     tmp_energy_expr += var_exp(model=model, lg_term=lg_transEnergy_r2L[m,op], lb=0, ub=GRB.INFINITY, name=f"transEnergy_r2L_({acc.mem2dict(m)},{op_name})")
@@ -748,8 +839,8 @@ class Solver():
                 # 2) Base write-in energy of this memory level.
                 if can_write:
                     lg_transEnergy_w2L[m,op] = model.addVar(lb=0, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name=f"lg_transEnergy_w2L_({acc.mem2dict(m)},{op_name})")
-                    
-                    model.addConstr(lg_transEnergy_w2L[m,op] == math.log(acc.cost_w[m]) + math.log(acc.precision[m,op]) + count_expr_writeIn + lg_dataVolume[m,op],
+                    prec_term_w2l = lg_prec_O(m) if op_name == 'O' else math.log(acc.precision[m,op])
+                    model.addConstr(lg_transEnergy_w2L[m,op] == math.log(acc.cost_w[m]) + prec_term_w2l + count_expr_writeIn + lg_dataVolume[m,op],
                                      name=f"C_lg_transEnergy_w2L_({acc.mem2dict(m)},{op_name})")
                     
                     tmp_energy_expr += var_exp(model=model, lg_term=lg_transEnergy_w2L[m,op], lb=0, ub=GRB.INFINITY, name=f"transEnergy_w2L_({acc.mem2dict(m)},{op_name})")
@@ -758,16 +849,15 @@ class Solver():
                 # output往里面写多少次就要读多少次写回 ⬆
                 if op_name == 'O' and can_read and m > acc.Dram2mem:
                     lg_transEnergy_r2H[m,op] = model.addVar(lb=0, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name=f"lg_transEnergy_r2H_({acc.mem2dict(m)},{op_name})")
-                    model.addConstr(lg_transEnergy_r2H[m,op] == math.log(acc.cost_r[m]) + math.log(acc.precision[m,op]) + count_expr_writeIn + lg_dataVolume[m,op],
+                    model.addConstr(lg_transEnergy_r2H[m,op] == math.log(acc.cost_r[m]) + lg_prec_O(m) + count_expr_writeIn + lg_dataVolume[m,op],
                                      name=f"C_lg_transEnergy_r2H_({acc.mem2dict(m)},{op_name})")
                     
                     tmp_energy_expr += var_exp(model=model, lg_term=lg_transEnergy_r2H[m,op], lb=0, ub=GRB.INFINITY, name=f"transEnergy_r2H_({acc.mem2dict(m)},{op_name})")
 
-                # 4) Output write-back energy when this level sends psum upward.
+                # 4) Output write-back energy when this level sends output upward.
                 if op_name == 'O':
                     lg_transEnergy_w2H[m,op] = model.addVar(lb=0, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name=f"lg_transEnergy_w2H_({acc.mem2dict(m)},{op_name})")
-
-                    model.addConstr(lg_transEnergy_w2H[m,op] == math.log(acc.cost_w[m]) + math.log(acc.precision[m,op]) + count_expr_readOut + lg_transVolume[m,op],
+                    model.addConstr(lg_transEnergy_w2H[m,op] == math.log(acc.cost_w[m]) + lg_prec_O(m) + count_expr_readOut + lg_transVolume[m,op],
                                      name=f"C_lg_transEnergy_w2H_({acc.mem2dict(m)},{op_name})")
                     
                     tmp_energy_expr += var_exp(model=model, lg_term=lg_transEnergy_w2H[m,op], lb=0, ub=GRB.INFINITY, name=f"transEnergy_w2H_({acc.mem2dict(m)},{op_name})")
@@ -806,7 +896,8 @@ class Solver():
                 if acc.mappingArray[op][m]:
                     lg_transLatency = model.addVar(lb=LB_lg_transLatency[m,op], ub=UB_lg_transLatency[m,op], vtype=GRB.CONTINUOUS,
                                                     name=f"tmp_lg_transLatency_({acc.mem2dict(m)},{op_name})")
-                    model.addConstr(lg_transLatency == lg_transVolume[m,op] + math.log(acc.precision[m,op]) - math.log(acc.bw[m]) - math.log(CONST.SCALE_LATENCY),
+                    prec_term_lat = lg_prec_O(m) if op_name == 'O' else math.log(acc.precision[m,op])
+                    model.addConstr(lg_transLatency == lg_transVolume[m,op] + prec_term_lat - math.log(acc.bw[m]) - math.log(CONST.SCALE_LATENCY),
                                      name=f"C_lg_transLatency_({acc.mem2dict(m)},{op_name})")
                 
                     transLatency[m,op] = model.addVar(lb=0, ub=UB_transLatency[m,op], vtype=GRB.CONTINUOUS, 
@@ -886,7 +977,7 @@ class Solver():
 # - - - - - - - - - - - - - - - - - - - - - - - - Dataflow Evaluation Results - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -#          
         for op, op_name in enumerate(['I','W','O']):
             tmp_coeff = 2 if op_name == 'O' else 1
-            offchip_bootstrap = tmp_coeff * MAX_SIZE[op] * acc.precision[acc.Dram2mem,op] / acc.bw[acc.Dram2mem] / CONST.SCALE_LATENCY
+            offchip_bootstrap = tmp_coeff * MAX_SIZE[op] * worst_prec(acc.Dram2mem, op) / acc.bw[acc.Dram2mem] / CONST.SCALE_LATENCY
             model.addConstr(res_latency >= latency_Process[0,op] + offchip_bootstrap * (1 - indic_loop2Mem[0,op,acc.Dram2mem]),
                              name=f"C_Res_Latency_OffChip_({op})")
 
@@ -1020,6 +1111,14 @@ class Solver():
                         double_tag[m][op] = 0
             loops.usr_defined_double_flag = double_tag
 
+            loops.psum_flag = {}
+            for m in range(1, acc.Num_mem):
+                state = indic_holdPsum[m]
+                if isinstance(state, gp.Var):
+                    loops.psum_flag[m] = bool(round(state.x))
+                else:
+                    loops.psum_flag[m] = bool(state)
+
             self.dataflow = loops
             
         def get_constr_debug(constraintname='test'):
@@ -1069,3 +1168,11 @@ class Solver():
             model.write(os.path.join(self.outputdir, "model.mps"))
             Logger.error(f'Model infeasible !!!')
             exit()
+
+    def close(self):
+        if self.model is not None:
+            self.model.dispose()
+            self.model = None
+        if self._owns_env and self.env is not None:
+            self.env.dispose()
+            self.env = None

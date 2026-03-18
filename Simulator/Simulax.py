@@ -104,12 +104,12 @@ class tranSimulator():
             sum_mem = 0
             for op, op_name in enumerate(['I','W','O']):
                 if acc.mappingArray[op][mem]:
-                    sum_mem += (dataSize[mem,op] + dataSize[mem,op] * dataflow.usr_defined_double_flag[mem][op]) * acc.precision[mem,op]
+                    sum_mem += (dataSize[mem,op] + dataSize[mem,op] * dataflow.usr_defined_double_flag[mem][op]) * self._prec(mem, op)
             if sum_mem > acc.memSize[mem]:
                 Logger.error(f"OverSize Error:\n{acc.mem2dict(mem)}:{acc.memSize[mem]}(Size) less than {sum_mem}(Used):"
-                                + f"I-{dataSize[mem,0]*acc.precision[mem,0]}({dataflow.usr_defined_double_flag[mem][op]}) "
-                                + f"W-{dataSize[mem,1]*acc.precision[mem,1]}({dataflow.usr_defined_double_flag[mem][op]}) "
-                                + f"O-{dataSize[mem,2]*acc.precision[mem,2]}({dataflow.usr_defined_double_flag[mem][op]})")
+                                + f"I-{dataSize[mem,0]*self._prec(mem,0)}({dataflow.usr_defined_double_flag[mem][0]}) "
+                                + f"W-{dataSize[mem,1]*self._prec(mem,1)}({dataflow.usr_defined_double_flag[mem][1]}) "
+                                + f"O-{dataSize[mem,2]*self._prec(mem,2)}({dataflow.usr_defined_double_flag[mem][2]})")
                 raise ValueError("Dataflow Over MemSize Error")
             else:
                 Logger.info('-'*4 + f" {acc.mem2dict(mem)}({round(sum_mem/acc.memSize[mem]*100,2):>3}%): {sum_mem}/{acc.memSize[mem]} - {acc.bw[mem]} bit/cc")
@@ -206,6 +206,11 @@ class tranSimulator():
                     tmp_list.append(round(self.dataflow.usr_defined_double_flag[mem][op]))
             self.PD.doubleFlag.append(tmp_list)
 
+    def _prec(self, mem, op):
+        if hasattr(self.dataflow, "get_precision"):
+            return self.dataflow.get_precision(mem, op)
+        return self.acc.precision[mem, op]
+
 
     def ptimer(self, idx, n):
         if self.DEBUG_SIMU == False:
@@ -252,7 +257,7 @@ class tranSimulator():
             nxtSize = [self.dataSize[mem_nxt[op],op] if xMem[loopidx,op]==1 else 0 for op in range(3)]
             tileSize = [self.tileSize[mem_cur[op],op] if xMem[loopidx,op]==1 else 0 for op in range(3)]
 
-            trans = [math.ceil(tileSize[op]*self.acc.precision[mem_cur[op],op]/self.acc.bw[mem_cur[op]]) for op in range(3)]
+            trans = [math.ceil(tileSize[op]*self._prec(mem_cur[op], op)/self.acc.bw[mem_cur[op]]) for op in range(3)]
             for op, op_name in enumerate(['I','W','O']):     
                 if mem_cur[op] == self.lastMappingMem[op] and self.lastMemReg[op] is False:
                     trans[op] += 1                      # Not only 1, consider others
@@ -279,18 +284,18 @@ class tranSimulator():
                     self.memCost[mem_cur[op]].t += stall
 
                     if mem_cur[op] == self.lastMappingMem[op] and self.lastMemReg[op] is False:
-                        self.memCost[self.lastMappingMem[op]].r += self.acc.cost_r[self.lastMappingMem[op]] * tileSize[op] * self.acc.precision[self.lastMappingMem[op],op]
-                        self.memCost[self.acc.lastMem[op]].w += self.acc.cost_w[self.acc.lastMem[op]] * nxtSize[op]  * self.acc.precision[self.acc.lastMem[op],op]
+                        self.memCost[self.lastMappingMem[op]].r += self.acc.cost_r[self.lastMappingMem[op]] * tileSize[op] * self._prec(self.lastMappingMem[op], op)
+                        self.memCost[self.acc.lastMem[op]].w += self.acc.cost_w[self.acc.lastMem[op]] * nxtSize[op]  * self._prec(self.acc.lastMem[op], op)
 
-                        self.memCost[self.acc.lastMem[op]].r += self.acc.cost_r[self.acc.lastMem[op]] * nxtSize[op]  * self.acc.precision[self.acc.lastMem[op],op] 
-                        self.memCost[mem_nxt[op]].w += self.acc.cost_w[mem_nxt[op]] * nxtSize[op]  * self.acc.precision[mem_nxt[op],op]
+                        self.memCost[self.acc.lastMem[op]].r += self.acc.cost_r[self.acc.lastMem[op]] * nxtSize[op]  * self._prec(self.acc.lastMem[op], op)
+                        self.memCost[mem_nxt[op]].w += self.acc.cost_w[mem_nxt[op]] * nxtSize[op]  * self._prec(mem_nxt[op], op)
                     else:
-                        self.memCost[mem_cur[op]].r += self.acc.cost_r[mem_cur[op]] * tileSize[op] * self.acc.precision[mem_cur[op],op] 
-                        self.memCost[mem_nxt[op]].w += self.acc.cost_w[mem_nxt[op]] * nxtSize[op]  * self.acc.precision[mem_nxt[op],op]
+                        self.memCost[mem_cur[op]].r += self.acc.cost_r[mem_cur[op]] * tileSize[op] * self._prec(mem_cur[op], op)
+                        self.memCost[mem_nxt[op]].w += self.acc.cost_w[mem_nxt[op]] * nxtSize[op]  * self._prec(mem_nxt[op], op)
 
                 self.loopExecution(loopidx=loopidx+1)
 
-                # Psum needs to be restored
+                # Output state needs to be restored after the recursive inner execution.
                 for op, op_name in enumerate(['I','W','O']):
                     if op_name == 'O':
                         if dflag[op] == 1: 
@@ -303,14 +308,14 @@ class tranSimulator():
                             stall = Cons[op]
 
                         if mem_cur[op] == self.lastMappingMem[op] and self.lastMemReg[op] is False:
-                            self.memCost[mem_nxt[op]].r += self.acc.cost_r[mem_nxt[op]] * nxtSize[op]  * self.acc.precision[mem_nxt[op],op]
-                            self.memCost[self.acc.lastMem[op]].w += self.acc.cost_w[self.acc.lastMem[op]] * nxtSize[op] * self.acc.precision[self.acc.lastMem[op],op]
+                            self.memCost[mem_nxt[op]].r += self.acc.cost_r[mem_nxt[op]] * nxtSize[op]  * self._prec(mem_nxt[op], op)
+                            self.memCost[self.acc.lastMem[op]].w += self.acc.cost_w[self.acc.lastMem[op]] * nxtSize[op] * self._prec(self.acc.lastMem[op], op)
 
-                            self.memCost[self.acc.lastMem[op]].r += self.acc.cost_r[self.acc.lastMem[op]] * nxtSize[op]  * self.acc.precision[self.acc.lastMem[op],op] 
-                            self.memCost[mem_cur[op]].w += self.acc.cost_w[mem_cur[op]] * tileSize[op] * self.acc.precision[mem_cur[op],op] 
+                            self.memCost[self.acc.lastMem[op]].r += self.acc.cost_r[self.acc.lastMem[op]] * nxtSize[op]  * self._prec(self.acc.lastMem[op], op)
+                            self.memCost[mem_cur[op]].w += self.acc.cost_w[mem_cur[op]] * tileSize[op] * self._prec(mem_cur[op], op)
                         else:
-                            self.memCost[mem_nxt[op]].r += self.acc.cost_r[mem_nxt[op]] * nxtSize[op]  * self.acc.precision[mem_nxt[op],op]
-                            self.memCost[mem_cur[op]].w += self.acc.cost_w[mem_cur[op]] * tileSize[op] * self.acc.precision[mem_cur[op],op]
+                            self.memCost[mem_nxt[op]].r += self.acc.cost_r[mem_nxt[op]] * nxtSize[op]  * self._prec(mem_nxt[op], op)
+                            self.memCost[mem_cur[op]].w += self.acc.cost_w[mem_cur[op]] * tileSize[op] * self._prec(mem_cur[op], op)
                 
                         self.memCost[mem_cur[op]].t += stall 
                 self.ptimer(loopidx, i+1)
@@ -333,24 +338,26 @@ class tranSimulator():
 
         for op, op_name in enumerate(['I','W','O']):
             if self.firstMemDram[op] is False:
-                self.timer[self.acc.Dram2mem, op]        += self.ops.size[op] * self.acc.precision[self.acc.Dram2mem,op] / self.acc.bw[self.acc.Dram2mem]
-                self.timer[self.firstMappingMem[op], op] += self.ops.size[op] * self.acc.precision[self.acc.Dram2mem,op] / self.acc.bw[self.acc.Dram2mem]
+                dram_prec = self._prec(self.acc.Dram2mem, op)
+                self.timer[self.acc.Dram2mem, op]        += self.ops.size[op] * dram_prec / self.acc.bw[self.acc.Dram2mem]
+                self.timer[self.firstMappingMem[op], op] += self.ops.size[op] * dram_prec / self.acc.bw[self.acc.Dram2mem]
 
         self.loopExecution(0)
 
         for op, op_name in enumerate(['I','W','O']):
             if op_name == 'O' and self.firstMemDram[op] is False:
-                self.timer[self.acc.Dram2mem, op]        += self.ops.size[op] * self.acc.precision[self.acc.Dram2mem,op] / self.acc.bw[self.acc.Dram2mem]
-                self.timer[self.firstMappingMem[op], op] += self.ops.size[op] * self.acc.precision[self.acc.Dram2mem,op] / self.acc.bw[self.acc.Dram2mem]
+                dram_prec = self._prec(self.acc.Dram2mem, op)
+                self.timer[self.acc.Dram2mem, op]        += self.ops.size[op] * dram_prec / self.acc.bw[self.acc.Dram2mem]
+                self.timer[self.firstMappingMem[op], op] += self.ops.size[op] * dram_prec / self.acc.bw[self.acc.Dram2mem]
 
         res_Latency = max(self.timer[mem, op] for op in range(3) for mem in range(self.acc.Num_mem))
 
         for op, op_name in enumerate(['I','W','O']):
             if self.firstMemDram[op] is False:
                 self.memCost[self.acc.Dram2mem].r += self.dataSize[self.firstMappingMem[op],op] * \
-                                                    self.acc.cost_r[self.acc.Dram2mem] * self.acc.precision[self.acc.Dram2mem,op]
+                                                    self.acc.cost_r[self.acc.Dram2mem] * self._prec(self.acc.Dram2mem, op)
                 self.memCost[self.firstMappingMem[op]].w += self.dataSize[self.firstMappingMem[op],op] * \
-                                                       self.acc.cost_w[self.firstMappingMem[op]] * self.acc.precision[self.firstMappingMem[op],op]
+                                                       self.acc.cost_w[self.firstMappingMem[op]] * self._prec(self.firstMappingMem[op], op)
         
         for m in range(1, self.acc.Num_mem):
             for op, op_name in enumerate(['I','W','O']):

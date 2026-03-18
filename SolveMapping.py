@@ -2,31 +2,143 @@
 # Created by iboxl
 
 from utils.Workload import WorkLoad
-from utils.Tools import *
-import gurobipy as gp
-from gurobipy import GRB, quicksum
+from utils.Tools import get_ConfigFile, append_scheme_summary, detect_parallel_config
 from utils.SolverTSS import Solver
 from Simulator.Simulax import tranSimulator
 from utils.GlobalUT import *
 from Architecture.ArchSpec import CIM_Acc
 import pickle
-from utils.UtilsFunction.ToolFunction import get_Spatial_Unrolling, prepare_save_dir
+from utils.UtilsFunction.ToolFunction import prepare_save_dir, get_Spatial_Unrolling
 import shutil
-import time
+import time, math, os
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
+
+def score_scheme(acc:CIM_Acc, ops:WorkLoad, scheme):
+    axis_products = [math.prod(axis_scheme) for axis_scheme in scheme]
+    axis_utils = [x / y if y > 0 else 1.0 for x, y in zip(axis_products, acc.SpUnrolling)]
+
+    spatial_unrolling = [math.prod(col) for col in zip(*scheme)]
+    temporal_unrolling = [math.ceil(x / y) for x, y in zip(ops.dim2bound, spatial_unrolling)]
+
+    util_product = math.prod(axis_utils) if axis_utils else 1.0
+    util_min = min(axis_utils) if axis_utils else 1.0
+    util_avg = sum(axis_utils) / len(axis_utils) if axis_utils else 1.0
+    temporal_logsum = sum(math.log(max(1, tu)) for tu in temporal_unrolling)
+
+    return {
+        "spatial_unrolling": spatial_unrolling,
+        "temporal_unrolling": temporal_unrolling,
+        "util_product": util_product,
+        "util_min": util_min,
+        "util_avg": util_avg,
+        "sort_key": (util_product, util_min, util_avg, -temporal_logsum),
+    }
+
+
+def solve_scheme_worker(count:int, origin_index:int, scheme, acc:CIM_Acc, ops:WorkLoad, metric_ub:float, outputdir_root:str, outputdir_scheme:str, threads_per_worker:int, soft_mem_limit_gb:float, runtime_config=None):
+    if runtime_config is not None:
+        for key, value in runtime_config["CONST"].items():
+            setattr(CONST, key, value)
+        for key, value in runtime_config["FLAG"].items():
+            setattr(FLAG, key, value)
+
+    prepare_save_dir(outputdir_scheme)
+
+    spatial_unrolling = [math.prod(col) for col in zip(*scheme)]
+    temporal_unrolling = [math.ceil(x / y) for x, y in zip(ops.dim2bound, spatial_unrolling)]
+
+    solver = Solver(
+        acc=acc,
+        ops=ops,
+        tu=temporal_unrolling,
+        su=scheme,
+        metric_ub=metric_ub,
+        outputdir=outputdir_scheme,
+        threads=threads_per_worker,
+        soft_mem_limit_gb=soft_mem_limit_gb
+    )
+
+    sim_l, sim_e, profile = CONST.MAX_POS, CONST.MAX_POS, None
+    try:
+        solver.run()
+
+        has_solution = solver.model is not None and solver.model.SolCount > 0
+        if has_solution:
+            if FLAG.SIMU:
+                simu = tranSimulator(acc=acc, ops=ops, dataflow=solver.dataflow)
+                sim_l, sim_e = simu.run()
+                profile = simu.PD
+            else:
+                sim_l, sim_e = solver.result[0], solver.result[1]
+        elif os.path.exists(outputdir_scheme):
+            shutil.rmtree(outputdir_scheme)
+
+        return {
+            "count": count,
+            "origin_index": origin_index,
+            "solver_result": solver.result,
+            "sim_l": sim_l,
+            "sim_e": sim_e,
+            "profile": profile,
+            "dataflow": solver.dataflow if has_solution else None,
+            "has_solution": has_solution,
+            "outputdir_root": outputdir_root,
+        }
+    finally:
+        solver.close()
+
+
+def update_best(result_pack:dict, best_metric:float, result, best_count:int, best_dataflow, solCount:int):
+    count = result_pack["count"]
+    solver_result = result_pack["solver_result"]
+    sim_l = result_pack["sim_l"]
+    sim_e = result_pack["sim_e"]
+    profile = result_pack["profile"]
+    has_solution = result_pack["has_solution"]
+
+    if has_solution:
+        solCount += 1
+        result_msg = (
+            f"Scheme {count:<3} End: Latency-{round(sim_l,3):<15}, Energy-{round(sim_e,3):<15}, "
+            f"EDP-{round(sim_l * sim_e,3):<15}"
+        )
+        lat_msg = (
+            f"      |--- Latency Accuracy: {round(100-abs(solver_result[0]-sim_l)/sim_l*100,2)}%, "
+            f"Solver-{round(solver_result[0]):<10} and Simu-{round(sim_l,3):<10}"
+        )
+        eng_msg = (
+            f"      |--- Energy  Accuracy: {round(100-abs(solver_result[1]-sim_e)/sim_e*100,2)}%, "
+            f"Solver-{round(solver_result[1]):<10} and Simu-{round(sim_e,3):<10}"
+        )
+
+        append_scheme_summary(result_pack["outputdir_root"], result_msg)
+        append_scheme_summary(result_pack["outputdir_root"], lat_msg)
+        append_scheme_summary(result_pack["outputdir_root"], eng_msg)
+
+        Logger.info(result_msg)
+        Logger.info(lat_msg)
+        Logger.info(eng_msg)
+    else:
+        result_msg = f"Scheme {count:<3} [raw={result_pack['origin_index']:<3}] End: NO BETTER SOLUTION"
+        append_scheme_summary(result_pack["outputdir_root"], result_msg)
+        Logger.info(result_msg)
+
+    assert CONST.FLAG_OPT in ["Latency", "Energy", "EDP"], "No Such Metric for Optimization, Please Check CONST.FLAG_OPT"
+    metric_index = {"Latency": 0, "Energy": 1, "EDP": 2}[CONST.FLAG_OPT]
+    if solver_result[metric_index] <= best_metric:
+        result = solver_result + [sim_l, sim_e] + [profile]
+        best_metric = solver_result[metric_index]
+        best_count = count
+        best_dataflow = result_pack["dataflow"]
+
+    return best_metric, result, best_count, best_dataflow, solCount
 
 def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str, singleIter=False, **kwargs):
     time_begin = time.time()
 
     if FLAG.INPUT_STATIONARY and (acc.core.size_input_buffer * acc.num_core >= ops.dim_M * ops.dim_K * ops.input.bitwidth):
         Logger.debug("Sufficient Buffer Resources for Input")
-        Latency = 0
-        Energy = 0
-        EDP = 0
-
-    '''
-    Generator for spliting temporal/spatial mapping
-    '''
-    generator = get_Spatial_Unrolling(ops.dim2bound, acc.mappingRule, acc.SpUnrolling, 0.5)
 
     count, solCount = 0, 0
     best_metric = bestMetric
@@ -34,71 +146,154 @@ def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str, singl
     best_dataflow = None
     result = [CONST.MAX_POS] * 5 + [None]
 
-    for scheme in generator:
-        count += 1
+    parallel_config = detect_parallel_config()
+    requested_threads = kwargs.get("threads_per_worker")
+    requested_workers = kwargs.get("max_workers")
 
-        if singleIter == True:
-            Spatial_unrolling = kwargs['Spatial_unrolling']
-            assert Spatial_unrolling is not None, "Single Iteration Mode Requires Spatial Unrolling Input as Scheme."
-            scheme = Spatial_unrolling
-            outputdir_scheme = outputdir
-        else:
-            outputdir_scheme = os.path.join(os.path.join(outputdir, 'SolPool'), str(count))
-        prepare_save_dir(outputdir_scheme)
+    if requested_threads is None and requested_workers is None:
+        threads_per_worker = parallel_config["threads_per_worker"]
+        max_workers = parallel_config["max_workers"]
+    elif requested_threads is None:
+        max_workers = max(1, int(requested_workers))
+        threads_per_worker = max(1, parallel_config["usable_cores"] // max_workers)
+    elif requested_workers is None:
+        threads_per_worker = max(1, int(requested_threads))
+        max_workers = max(1, parallel_config["usable_cores"] // threads_per_worker)
+    else:
+        threads_per_worker = max(1, int(requested_threads))
+        max_workers = max(1, int(requested_workers))
 
-        spatial_unrolling = [math.prod(col) for col in zip(*scheme)]
-        temporal_unrolling= [math.ceil(x / y) for x, y in zip(ops.dim2bound, spatial_unrolling)]
+    if singleIter:
+        scheme = kwargs["Spatial_unrolling"]
+        assert scheme is not None, "Single Iteration Mode Requires Spatial Unrolling Input as Scheme."
+        scheme_records = [{
+            "origin_index": 1,
+            "scheme": scheme,
+            "meta": score_scheme(acc=acc, ops=ops, scheme=scheme),
+        }]
+    else:
+        scheme_records = []
+        for origin_index, scheme in enumerate(get_Spatial_Unrolling(ops.dim2bound, acc.mappingRule, acc.SpUnrolling, 0.5), start=1):
+            scheme_records.append({
+                "origin_index": origin_index,
+                "scheme": scheme,
+                "meta": score_scheme(acc=acc, ops=ops, scheme=scheme),
+            })
+        scheme_records.sort(key=lambda item: item["meta"]["sort_key"], reverse=True)
 
-        Logger.info('\n' + f"Scheme {count:<3} Beginning: SpUr-{spatial_unrolling}, TpUr-{temporal_unrolling}")
-        
-        solver = Solver(acc=acc, ops=ops, tu=temporal_unrolling, su=scheme, metric_ub=best_metric, outputdir=outputdir_scheme)
+    for count, scheme_record in enumerate(scheme_records, start=1):
+        scheme_record["count"] = count
+        scheme_record["outputdir_scheme"] = outputdir if singleIter else os.path.join(outputdir, "SolPool", str(count))
 
-        solver.run()
+    scheme_iter = iter(scheme_records)
+    use_parallel = (not singleIter) and max_workers > 1
+    runtime_config = None
+    if use_parallel:
+        runtime_config = {"CONST": dict(vars(CONST)), "FLAG": dict(vars(FLAG))}
+    if not use_parallel and requested_threads is None:
+        max_workers = 1
+        threads_per_worker = parallel_config["usable_cores"]
 
-        if solver.model.SolCount > 0 and FLAG.SIMU:
+    max_inflight = kwargs.get("max_inflight", max_workers * 2)
+    soft_mem_limit_gb = kwargs.get(
+        "soft_mem_limit_gb",
+        max(1.0, parallel_config["available_mem_gb"] * 0.8 / max_workers),
+    )
 
-            simu = tranSimulator(acc=acc, ops=ops, dataflow=solver.dataflow)
-            # Logger.debug(simu.debugLog())
-            sim_l, sim_e = simu.run()
-            
-            solCount += 1
-            Logger.critical(f"Solver Result: Latency-{solver.result[0]}, Energy-{solver.result[1]}")
-            Logger.info(f"Scheme {count:<3} End: Latency-{round(sim_l,3):<15}, Energy-{round(sim_e,3):<15}, EDP-{round(sim_l * sim_e,3):<15}")
-            Logger.info(f"* * *Latency Accuracy: {round(100-abs(solver.result[0]-sim_l)/sim_l*100,2)}%, Solver-{round(solver.result[0]):<10} and Simu-{round(sim_l,3):<10}")
-            Logger.info(f"* * * Energy Accuracy: {round(100-abs(solver.result[1]-sim_e)/sim_e*100,2)}%, Solver-{round(solver.result[1]):<10} and Simu-{round(sim_e,3):<10}")
+    Logger.critical(
+        f"Auto Parallel Config: physical={parallel_config['physical_cores']}, logical={parallel_config['logical_cores']}, "
+        f"usable={parallel_config['usable_cores']}, workers={max_workers}, threads/worker={threads_per_worker}, "
+        f"soft_mem_limit={round(soft_mem_limit_gb,2)} GB"
+    )
 
-        else:
-            sim_l, sim_e = CONST.MAX_POS, CONST.MAX_POS
-            Logger.info(f"Scheme {count:<3} End: NO BETTER SOLUTION")
+    if not use_parallel:
+        for scheme_record in scheme_iter:
+            count = scheme_record["count"]
+            meta = scheme_record["meta"]
+            append_scheme_summary(
+                outputdir,
+                f"Scheme {count:<3} : "
+                f"util_prod={meta['util_product']:.4f}, min_util={meta['util_min']:.3f}, "
+                f"avg_util={meta['util_avg']:.3f}] "
+                f"Beginning: SpUr-{meta['spatial_unrolling']}, TpUr-{meta['temporal_unrolling']}"
+            )
+            worker_args = (
+                count,
+                scheme_record["origin_index"],
+                scheme_record["scheme"],
+                acc,
+                ops,
+                best_metric,
+                outputdir,
+                scheme_record["outputdir_scheme"],
+                threads_per_worker,
+                soft_mem_limit_gb,
+            )
+            result_pack = solve_scheme_worker(*worker_args)
+            best_metric, result, best_count, best_dataflow, solCount = update_best(
+                result_pack, best_metric, result, best_count, best_dataflow, solCount
+            )
+    else:
+        def submit_next(executor, pending):
+            nonlocal count, best_metric
+            try:
+                scheme_record = next(scheme_iter)
+            except StopIteration:
+                return False
 
+            scheme_count = scheme_record["count"]
+            meta = scheme_record["meta"]
+            append_scheme_summary(
+                outputdir,
+                f"Scheme {scheme_count:<3} : "
+                f"util_prod={meta['util_product']:.4f}, min_util={meta['util_min']:.3f}, "
+                f"avg_util={meta['util_avg']:.3f}] "
+                f"Beginning: SpUr-{meta['spatial_unrolling']}, TpUr-{meta['temporal_unrolling']}"
+            )
+            worker_args = (
+                scheme_count,
+                scheme_record["origin_index"],
+                scheme_record["scheme"],
+                acc,
+                ops,
+                best_metric,
+                outputdir,
+                scheme_record["outputdir_scheme"],
+                threads_per_worker,
+                soft_mem_limit_gb,
+                runtime_config,
+            )
+            future = executor.submit(solve_scheme_worker, *worker_args)
+            pending[future] = scheme_count
+            count = scheme_count
+            return True
 
-            # 删除目录及其所有内容
-            if os.path.exists(outputdir_scheme):
-                shutil.rmtree(outputdir_scheme)
-        
-        assert CONST.FLAG_OPT in ["Latency", "Energy", "EDP"], "No Such Metric for Optimization, Please Check CONST.FLAG_OPT"
-        for f_i, f in enumerate(["Latency", "Energy", "EDP"]):
-            if f == CONST.FLAG_OPT:
-                if solver.result[f_i] <= best_metric:
-                    result = solver.result + [sim_l, sim_e] + [simu.PD]
-                    best_metric = solver.result[f_i]
-                    best_count = count
-                    best_dataflow = solver.dataflow
+        pending = {}
+        mp_context = mp.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=max_workers, mp_context=mp_context) as executor:
+            while len(pending) < max_inflight and submit_next(executor, pending):
+                pass
 
-        solver.model.dispose()
-
-        if singleIter == True:
-            exit()
+            while pending:
+                done, _ = wait(tuple(pending.keys()), return_when=FIRST_COMPLETED)
+                for future in done:
+                    pending.pop(future)
+                    result_pack = future.result()
+                    best_metric, result, best_count, best_dataflow, solCount = update_best(
+                        result_pack, best_metric, result, best_count, best_dataflow, solCount
+                    )
+                while len(pending) < max_inflight and submit_next(executor, pending):
+                    pass
     
     if count == 0:
         raise ValueError("No Feasible Sol Found, Need to reset MIN_UTIL_COEFFICIENT")
     if solCount == 0:
         raise ValueError("SOLVER IIS")
-            
-    Logger.info(f"\nTotal valid loop nest found: {count}, best_count: {best_count}")
 
     time_end = time.time()
-    Logger.info(f"Solving Time within layer: {round(time_end - time_begin,1)}s")
+    if not singleIter:
+        Logger.info(f"Total valid loop nest found: {count}, best_count: {best_count}")
+        Logger.info(f"Solving Time within whole layer: {round(time_end - time_begin,1)}s")
 
     file_name = os.path.join(outputdir, "Dataflow.pkl")
     with open(file_name, 'wb') as file:
@@ -177,9 +372,6 @@ if __name__ == "__main__":
     #                      [1,1,1,1,1,1,16,1]]
 
     lat, eng, edp, c_lat, c_eng, ds = SolveMapping(acc=accelerator, ops=ops, bestMetric=1e10, outputdir=outFolder, singleIter=True, Spatial_unrolling=Spatial_unrolling)
-    Logger.critical(f"* * MIREDO-Running  * *   Latency:{lat}")
-    # Logger.critical(f"S_latency={round(lat)}, S_Energy={round(eng,2)}, S_EDP={edp}")
-    # Logger.critical(f"C_latency={round(c_lat)}, C_Energy={round(c_eng,2)}")
 
     end_time = time.time()
-    Logger.critical(f"Running SolveMapping Cost: {round(end_time - start_time,1)}s")
+    Logger.critical(f"SingleIter-Running SolveMapping Cost: {round(end_time - start_time,1)}s")
