@@ -37,6 +37,8 @@ class _const_num_config():
 
         self.EPS = 1e-5
 
+        self.ExpOption = "FuncPieces=-2 FuncPieceError=0.01"
+
 class _constraint_flag_config():
     def __init__(self):
         self.DOUBLE_BUFFER = False                          # 和 FLAG_PIPELINE_LOAD_AND_COMPUTATION 的联系、相关性

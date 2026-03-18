@@ -45,8 +45,6 @@ class Solver():
         self.model.setParam("NumericFocus", 1)
         # self.model.setParam('MIPGap', 0.03)
 
-        self.ExpOption = "FuncPieces=-2 FuncPieceError=0.01"
-
         self.model.setParam('FeasibilityTol', 1e-6)
         self.model.setParam('IntFeasTol', 1e-6)
         self.model.setParam('OptimalityTol', 1e-6)
@@ -280,6 +278,7 @@ class Solver():
                 model.addConstr(indic_relevantLoop[i,op] == quicksum(ops.relevance[op][d] * indic_factor2Loop[d,f,i] 
                                                                      for d in range(1, ops.Num_dim) for f in range(len(factors[d]))),
                                  name=f"C_relevantLoop_({i},{op_name})")
+
         # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -# 
 
         for op in range(3):
@@ -522,7 +521,7 @@ class Solver():
                 if acc.shareMemory[m] == True:
                     exp_dataVolume[m,op] = model.addVar(lb=0, ub=UB_dataVolume[m,op], vtype=GRB.CONTINUOUS,
                                                          name=f"exp_dataVolume_({acc.mem2dict(m)},{op_name})")
-                    model.addGenConstrExp(xvar=lg_dataVolume[m,op], yvar=exp_dataVolume[m,op], options=self.ExpOption, name=f"C_exp_dataVolume_({acc.mem2dict(m)},{op_name})")
+                    model.addGenConstrExp(xvar=lg_dataVolume[m,op], yvar=exp_dataVolume[m,op], options=CONST.ExpOption, name=f"C_exp_dataVolume_({acc.mem2dict(m)},{op_name})")
                         
             op, op_name = 1,'W'     # Weight
             if acc.mappingArray[op][m] == True:
@@ -533,7 +532,7 @@ class Solver():
                 if acc.shareMemory[m] == True:
                     exp_dataVolume[m,op] = model.addVar(lb=0, ub=UB_dataVolume[m,op], vtype=GRB.CONTINUOUS,
                                                         name=f"exp_dataVolume_({acc.mem2dict(m)},{op_name})")
-                    model.addGenConstrExp(xvar=lg_dataVolume[m,op], yvar=exp_dataVolume[m,op], options=self.ExpOption, name=f"C_exp_dataVolume_({acc.mem2dict(m)},{op_name})")
+                    model.addGenConstrExp(xvar=lg_dataVolume[m,op], yvar=exp_dataVolume[m,op], options=CONST.ExpOption, name=f"C_exp_dataVolume_({acc.mem2dict(m)},{op_name})")
 
             op, op_name = 2,'O'     # Output
             if acc.mappingArray[op][m] == True:
@@ -544,7 +543,7 @@ class Solver():
                 if acc.shareMemory[m] == True:
                     exp_dataVolume[m,op] = model.addVar(lb=0, ub=UB_dataVolume[m,op], vtype=GRB.CONTINUOUS,
                                                         name=f"exp_dataVolume_({acc.mem2dict(m)},{op_name})")
-                    model.addGenConstrExp(xvar=lg_dataVolume[m,op], yvar=exp_dataVolume[m,op], options=self.ExpOption, name=f"C_exp_dataVolume_({acc.mem2dict(m)},{op_name})")
+                    model.addGenConstrExp(xvar=lg_dataVolume[m,op], yvar=exp_dataVolume[m,op], options=CONST.ExpOption, name=f"C_exp_dataVolume_({acc.mem2dict(m)},{op_name})")
 
         lg_transVolume = gp.tupledict()     # lg_transVolume[m,op]
         for m in range(1,acc.Num_mem):      
@@ -639,47 +638,49 @@ class Solver():
 
         # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -#   
 
-        '''
-        考虑bottle-ir的情况
-        '''
-        indic_NotBottleIR = gp.tupledict()                         # indic_NotBottleIR[d,f,op] = {0,1}
-        indic_factor2Mem_NotBottleIR = gp.tupledict()              # indic_factor2Mem_NotBottleIR[d,f,op,m] = {0,1}
+        # A loop can be irrelevant to the operand yet still trigger a real transfer.
+        # Only the stationary irrelevant suffix inside a memory block should be filtered.
+        indic_stationaryIR = gp.tupledict()        # irrelevant carry loop that is not an actual xMem transfer
+        for i in range(Num_Loops):
+            for op, op_name in enumerate(['I','W','O']):
+                indic_stationaryIR[i,op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_stationaryIR_({i},{op_name})")
+                model.addConstr(indic_stationaryIR[i,op] <= indic_xMemCarry[i,op], name=f"C_stationaryIR_carry_({i},{op_name})")
+                model.addConstr(indic_stationaryIR[i,op] <= 1 - indic_relevantLoop[i,op], name=f"C_stationaryIR_irrel_({i},{op_name})")
+                model.addConstr(indic_stationaryIR[i,op] <= 1 - indic_xMem[i,op], name=f"C_stationaryIR_noX_({i},{op_name})")
+                model.addConstr(indic_stationaryIR[i,op] >= indic_xMemCarry[i,op] - indic_relevantLoop[i,op] - indic_xMem[i,op],
+                                name=f"C_stationaryIR_lb_({i},{op_name})")
+                '''
+                indic_stationaryIR[i, op] = xMemCarry AND NOT(relevantLoop OR xMem)
+                '''
+
+        indic_factor2Mem_NotBottleIR = gp.tupledict()
+        indic_NotBottleIR = gp.tupledict()
         for op, op_name in enumerate(['I','W','O']):
             for d in range(1, ops.Num_dim):
-                if factors[d] != [1]:
-                    for f in range(len(factors[d])):
-                        if ops.relevance[op][d] == 1:
-                            indic_NotBottleIR[d,f,op] = 1
-                            for m in range(1, acc.Num_mem):
-                                if acc.mappingArray[op][m] == 0:
-                                    continue
-                                indic_factor2Mem_NotBottleIR[d,f,op,m] = indic_factor2Mem[d,f,op,m]
-                        else:
-                            indic_NotBottleIR[d,f,op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_NotBottleIR_({ops.dim2Dict[d]},{f},{op_name})")
-                            model.addConstr(indic_NotBottleIR[d,f,op] == 1 - quicksum(var_AandB(model, indic_factor2Loop[d,f,i], indic_xMemCarry[i,op],
-                                                                                                name=f"Indic_NotBottleIR_src_({ops.dim2Dict[d]},{f},{i},{op_name})")
-                                                                                    for i in range(Num_Loops)),
-                                            name=f"C_Indic_NotBottleIR_({ops.dim2Dict[d]},{f},{op_name})")
-                            for m in range(1, acc.Num_mem):
-                                if acc.mappingArray[op][m] == 0:
-                                    continue
-                                indic_factor2Mem_NotBottleIR[d,f,op,m] = var_AandB(model, indic_factor2Mem[d,f,op,m], indic_NotBottleIR[d,f,op],
-                                                                            name=f"Indic_factor2Mem_NotBottleIR_({ops.dim2Dict[d]},{f},{op_name},{acc.mem2dict(m)})")
+                if factors[d] == [1]:
+                    continue
+                for f in range(len(factors[d])):
+                    if ops.relevance[op][d] == 1:
+                        indic_NotBottleIR[d,f,op] = 1
+                        for m in range(1, acc.Num_mem):
+                            if acc.mappingArray[op][m] == 0:
+                                continue
+                            indic_factor2Mem_NotBottleIR[d,f,op,m] = indic_factor2Mem[d,f,op,m]
+                    else:
+                        indic_NotBottleIR[d,f,op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_NotBottleIR_({ops.dim2Dict[d]},{f},{op_name})")
+                        model.addConstr(
+                            indic_NotBottleIR[d,f,op] == 1 - quicksum(var_AandB(model, indic_factor2Loop[d,f,i], indic_stationaryIR[i,op],
+                                                                                 name=f"Indic_NotBottleIR_src_({ops.dim2Dict[d]},{f},{i},{op_name})")
+                                                                       for i in range(Num_Loops)), name=f"C_Indic_NotBottleIR_({ops.dim2Dict[d]},{f},{op_name})")
 
-
-        def getExpVar(lg_term, lb, ub, name):
-            var = model.addVar(lb=lb, ub=ub, vtype=GRB.CONTINUOUS, name=name)
-            model.addGenConstrExp(xvar=lg_term, yvar=var, options=self.ExpOption, name=f"C_{name}")
-            return var
-
-        lg_transEnergy_r2L = gp.tupledict()
-        lg_transEnergy_w2L = gp.tupledict()
-        lg_transEnergy_r2H = gp.tupledict()
-        lg_transEnergy_w2H = gp.tupledict()
-        energy_perMem, energy_usedMem = gp.tupledict(), gp.tupledict()
-
-        count_ReadOut, count_WriteIn = {}, {}
+                        for m in range(1, acc.Num_mem):
+                            if acc.mappingArray[op][m] == 0:
+                                continue
+                            indic_factor2Mem_NotBottleIR[d,f,op,m] = var_AandB(model, indic_factor2Mem[d,f,op,m], indic_NotBottleIR[d,f,op],
+                                                                                name=f"Indic_factor2Mem_NotBottleIR_({ops.dim2Dict[d]},{f},{op_name},{acc.mem2dict(m)})")
+        
         indic_factor2Mem_WriteIn = gp.tupledict()
+        count_ReadOut, count_WriteIn = gp.tupledict(), gp.tupledict()
         for op, op_name in enumerate(['I','W','O']):
             for m in range(1, acc.Num_mem):
                 if acc.mappingArray[op][m] == 0:
@@ -690,31 +691,30 @@ class Solver():
                 for d in range(1, ops.Num_dim):
                     if factors[d] != [1]:
                         for f in range(len(factors[d])):
-                            for m1 in range(1,m+1):     # [ 1 ~ m ]             # 本层及以上层级的Loop都会影响 ReadOut 次数
+                            for m1 in range(1,m+1):
                                 if m1 == m:
                                     count_expr_readOut += logF[d,f] * indic_factor2Mem_NotBottleIR[d,f,op,m1]
                                 else:
                                     count_expr_readOut += logF[d,f] * indic_factor2Mem[d,f,op,m1]
-                            for m1 in range(1,m):       # [ 1 ~ m-1 ]           # 更上层级的Loop才会影响 WriteIn 次数
+                            for m1 in range(1,m):
                                 if acc.mappingArray[op][m1] == 0 or (m1, m, op) not in indic_nxtMem:
                                     count_expr_writeIn += logF[d,f] * indic_factor2Mem[d,f,op,m1]
-                                    continue
-                                
-                                cname = f"Indic_factor2Mem_WriteIn_({ops.dim2Dict[d]},{f},{op_name},{acc.mem2dict(m1)},{acc.mem2dict(m)})"
-                                indic_factor2Mem_WriteIn[d,f,op,m1,m] = model.addVar(vtype=GRB.BINARY, name=cname)
-                                model.addConstr(indic_factor2Mem_WriteIn[d,f,op,m1,m] <= indic_factor2Mem[d,f,op,m1],
-                                                name=f"C_{cname}_base_ub")
-                                model.addConstr(indic_factor2Mem_WriteIn[d,f,op,m1,m] >= indic_factor2Mem_NotBottleIR[d,f,op,m1],
-                                                name=f"C_{cname}_nb_lb")
-                                model.addConstr(indic_factor2Mem_WriteIn[d,f,op,m1,m] <= indic_factor2Mem_NotBottleIR[d,f,op,m1] + 1 - indic_nxtMem[m1,m,op],
-                                                name=f"C_{cname}_nb_ub")
-                                model.addConstr(indic_factor2Mem_WriteIn[d,f,op,m1,m] >= indic_factor2Mem[d,f,op,m1] - indic_nxtMem[m1,m,op],
-                                                name=f"C_{cname}_base_lb")
-                                '''
-                                W = A AND ((NOT G) OR N)
-                                indic_factor2Mem_WriteIn = indic_factor2Mem AND ((NOT indic_nxtMem) OR indic_NotBottleIR)
-                                '''
-                                count_expr_writeIn += logF[d,f] * indic_factor2Mem_WriteIn[d,f,op,m1,m]
+                                else:
+                                    cname = f"Indic_factor2Mem_WriteIn_({ops.dim2Dict[d]},{f},{op_name},{acc.mem2dict(m1)},{acc.mem2dict(m)})"
+                                    indic_factor2Mem_WriteIn[d,f,op,m1,m] = model.addVar(vtype=GRB.BINARY, name=cname)
+                                    model.addConstr(indic_factor2Mem_WriteIn[d,f,op,m1,m] <= indic_factor2Mem[d,f,op,m1],
+                                                    name=f"C_{cname}_base_ub")
+                                    model.addConstr(indic_factor2Mem_WriteIn[d,f,op,m1,m] >= indic_factor2Mem_NotBottleIR[d,f,op,m1],
+                                                    name=f"C_{cname}_nb_lb")
+                                    model.addConstr(indic_factor2Mem_WriteIn[d,f,op,m1,m] <= indic_factor2Mem_NotBottleIR[d,f,op,m1] + 1 - indic_nxtMem[m1,m,op],
+                                                    name=f"C_{cname}_nb_ub")
+                                    model.addConstr(indic_factor2Mem_WriteIn[d,f,op,m1,m] >= indic_factor2Mem[d,f,op,m1] - indic_nxtMem[m1,m,op],
+                                                    name=f"C_{cname}_base_lb")
+                                    '''
+                                    W = A AND ((NOT G) OR N)
+                                    indic_factor2Mem_WriteIn = indic_factor2Mem AND ((NOT indic_nxtMem) OR indic_NotBottleIR)
+                                    '''
+                                    count_expr_writeIn += logF[d,f] * indic_factor2Mem_WriteIn[d,f,op,m1,m]
 
                     for u in range(acc.Num_SpUr):
                         if m > acc.SpUr2Mem[u,op]:
@@ -723,7 +723,9 @@ class Solver():
                 count_ReadOut[m,op] = count_expr_readOut
                 count_WriteIn[m,op] = count_expr_writeIn
        
-
+        energy_perMem = gp.tupledict()
+        lg_transEnergy_r2L, lg_transEnergy_w2L = gp.tupledict(), gp.tupledict()
+        lg_transEnergy_r2H, lg_transEnergy_w2H = gp.tupledict(), gp.tupledict()
         for op, op_name in enumerate(['I','W','O']):
             for m in range(1, acc.Num_mem):
                 if acc.mappingArray[op][m] == 0:
@@ -741,7 +743,7 @@ class Solver():
                     model.addConstr(lg_transEnergy_r2L[m,op] == math.log(acc.cost_r[m]) + math.log(acc.precision[m,op]) + count_expr_readOut + lg_transVolume[m,op],
                                     name=f"C_lg_transEnergy_r2L_({acc.mem2dict(m)},{op_name})")
                     
-                    tmp_energy_expr += getExpVar(lg_term=lg_transEnergy_r2L[m,op], lb=0, ub=GRB.INFINITY, name=f"transEnergy_r_({acc.mem2dict(m)},{op_name})")
+                    tmp_energy_expr += var_exp(model=model, lg_term=lg_transEnergy_r2L[m,op], lb=0, ub=GRB.INFINITY, name=f"transEnergy_r2L_({acc.mem2dict(m)},{op_name})")
 
                 # 2) Base write-in energy of this memory level.
                 if can_write:
@@ -750,7 +752,7 @@ class Solver():
                     model.addConstr(lg_transEnergy_w2L[m,op] == math.log(acc.cost_w[m]) + math.log(acc.precision[m,op]) + count_expr_writeIn + lg_dataVolume[m,op],
                                      name=f"C_lg_transEnergy_w2L_({acc.mem2dict(m)},{op_name})")
                     
-                    tmp_energy_expr += getExpVar(lg_term=lg_transEnergy_w2L[m,op], lb=0, ub=GRB.INFINITY, name=f"transEnergy_w_({acc.mem2dict(m)},{op_name})")
+                    tmp_energy_expr += var_exp(model=model, lg_term=lg_transEnergy_w2L[m,op], lb=0, ub=GRB.INFINITY, name=f"transEnergy_w2L_({acc.mem2dict(m)},{op_name})")
 
                 # 3) Output readout for sending upstream memory hierarchy.
                 # output往里面写多少次就要读多少次写回 ⬆
@@ -759,7 +761,7 @@ class Solver():
                     model.addConstr(lg_transEnergy_r2H[m,op] == math.log(acc.cost_r[m]) + math.log(acc.precision[m,op]) + count_expr_writeIn + lg_dataVolume[m,op],
                                      name=f"C_lg_transEnergy_r2H_({acc.mem2dict(m)},{op_name})")
                     
-                    tmp_energy_expr += getExpVar(lg_term=lg_transEnergy_r2H[m,op], lb=0, ub=GRB.INFINITY, name=f"transEnergy_r_b_({acc.mem2dict(m)},{op_name})")
+                    tmp_energy_expr += var_exp(model=model, lg_term=lg_transEnergy_r2H[m,op], lb=0, ub=GRB.INFINITY, name=f"transEnergy_r2H_({acc.mem2dict(m)},{op_name})")
 
                 # 4) Output write-back energy when this level sends psum upward.
                 if op_name == 'O':
@@ -768,12 +770,12 @@ class Solver():
                     model.addConstr(lg_transEnergy_w2H[m,op] == math.log(acc.cost_w[m]) + math.log(acc.precision[m,op]) + count_expr_readOut + lg_transVolume[m,op],
                                      name=f"C_lg_transEnergy_w2H_({acc.mem2dict(m)},{op_name})")
                     
-                    tmp_energy_expr += getExpVar(lg_term=lg_transEnergy_w2H[m,op], lb=0, ub=GRB.INFINITY, name=f"transEnergy_w_b_({acc.mem2dict(m)},{op_name})")
+                    tmp_energy_expr += var_exp(model=model, lg_term=lg_transEnergy_w2H[m,op], lb=0, ub=GRB.INFINITY, name=f"transEnergy_w2H_({acc.mem2dict(m)},{op_name})")
 
                 energy_perMem[m,op] = model.addVar(lb=0, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name=f"energy_perMem_({acc.mem2dict(m)},{op_name})")
                 model.addConstr(energy_perMem[m,op] == tmp_energy_expr, name=f"C_energy_perMem_({acc.mem2dict(m)},{op_name})")
 
-        energy_expr_rw = 0
+        energy_expr_rw, energy_usedMem = 0, gp.tupledict()
         for m in range(1, acc.Num_mem):
             for op, op_name in enumerate(['I','W','O']):
                 if acc.mappingArray[op][m] == 0:
@@ -809,7 +811,7 @@ class Solver():
                 
                     transLatency[m,op] = model.addVar(lb=0, ub=UB_transLatency[m,op], vtype=GRB.CONTINUOUS, 
                                                        name=f"transLatency_({acc.mem2dict(m)},{op_name})")
-                    model.addGenConstrExp(xvar=lg_transLatency, yvar=transLatency[m,op], options=self.ExpOption, name=f"C_transLatency_({acc.mem2dict(m)},{op_name})")
+                    model.addGenConstrExp(xvar=lg_transLatency, yvar=transLatency[m,op], options=CONST.ExpOption, name=f"C_transLatency_({acc.mem2dict(m)},{op_name})")
             for i in range(Num_Loops):
                 transfer[i,op] = model.addVar(lb=0, ub=self.MAX_TRANS[op], vtype=GRB.CONTINUOUS, name=f"transfer_({i},{op_name})")
                 model.addConstr(transfer[i,op]==quicksum(var_mul01(model, indic_loop2Mem[i,op,m], transLatency[m,op],

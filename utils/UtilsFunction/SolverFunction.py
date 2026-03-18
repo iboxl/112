@@ -264,3 +264,8 @@ def var_mul01(model:gp.Model, indic, A, name, A_ub = None, A_lb = None, var_ub =
     model.addConstr(var >= lb * indic, name=f"C_{name}_3")
     model.addConstr(var <= A - lb * (1 - indic), name=f"C_{name}_4")
     return var
+
+def var_exp(model:gp.Model, lg_term, lb, ub, name):
+    var = model.addVar(lb=lb, ub=ub, vtype=GRB.CONTINUOUS, name=name)
+    model.addGenConstrExp(xvar=lg_term, yvar=var, options=CONST.ExpOption, name=f"C_{name}")
+    return var
