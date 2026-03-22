@@ -73,12 +73,7 @@ class WorkLoad():
 
         self.Divisors = [getDivisors(d) for d in self.dim2bound]
 
-        self.size = [_ for _ in range(3)]
-        # self.size[0] = (self.P + self.R - 1) * (self.Q + self.S - 1) * self.C
-        # self.size[0] = ((self.P-1)*self.Stride+self.R) * ((self.Q-1)*self.Stride+self.S) * self.C      
-        self.size[0] = self.H * self.W * self.C                          # take padding into size
-        self.size[1] = self.R * self.S * self.C * self.K
-        self.size[2] = self.P * self.Q * self.K
+        self.size = [self.get_operand_size(self.dim2bound, op) for op, op_name in enumerate(['I','W','O'])]
 
         Num_MAC = 1
         for dim in range(1, self.Num_dim):
@@ -87,6 +82,42 @@ class WorkLoad():
         
         assert self.P == (self.H + 2 * self.Padding - self.R)//self.Stride + 1
         assert self.Q == (self.W + 2 * self.Padding - self.S)//self.Stride + 1 
+
+    def _get_input_extent(self, output_size, kernel_size, input_bound):
+        unique_extent = kernel_size + (output_size - 1) * min(self.Stride, kernel_size)
+        return min(unique_extent, input_bound)
+
+    def _get_input_hw(self, dim_size):
+        r_size = dim_size[self.dict2Dim('R')]
+        s_size = dim_size[self.dict2Dim('S')]
+        p_size = dim_size[self.dict2Dim('P')]
+        q_size = dim_size[self.dict2Dim('Q')]
+
+        tmp_h = self._get_input_extent(p_size, r_size, self.H)
+        tmp_w = self._get_input_extent(q_size, s_size, self.W)
+
+        return tmp_h, tmp_w
+
+    def get_operand_size(self, dim_size, op):
+        if op == 0:
+            h_size, w_size = self._get_input_hw(dim_size)
+            return h_size * w_size * dim_size[self.dict2Dim('C')] * dim_size[self.dict2Dim('G')]
+        if op == 1:
+            return (
+                dim_size[self.dict2Dim('R')] *
+                dim_size[self.dict2Dim('S')] *
+                dim_size[self.dict2Dim('C')] *
+                dim_size[self.dict2Dim('K')] *
+                dim_size[self.dict2Dim('G')]
+            )
+        if op == 2:
+            return (
+                dim_size[self.dict2Dim('P')] *
+                dim_size[self.dict2Dim('Q')] *
+                dim_size[self.dict2Dim('K')] *
+                dim_size[self.dict2Dim('G')]
+            )
+        raise ValueError(f"Unsupported operand index: {op}")
     
     def dict2Dim(self, dimChar):
         try:

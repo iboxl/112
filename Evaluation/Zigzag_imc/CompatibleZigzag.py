@@ -10,6 +10,21 @@ from typing import Dict, List, Tuple
 from collections import defaultdict
 
 
+def _pad_missing_inner_levels(levels, expected_len, fill_factory):
+    """
+    Zigzag may elide leading empty memory levels in exported metadata.
+    MIREDO's mappingArray keeps the full operand-visible hierarchy, so we
+    restore the omitted inner-most empty levels by left-padding.
+        --- RemoveUnusedMemoryStage,  # Remove unnecessary memory instances
+    """
+    if len(levels) > expected_len:
+        raise ValueError(f"Too many levels: expected <= {expected_len}, got {len(levels)}")
+    missing = expected_len - len(levels)
+    if missing == 0:
+        return copy.deepcopy(levels)
+    return [fill_factory() for _ in range(missing)] + copy.deepcopy(levels)
+
+
 def convert_ZZ_dflag_to_doubleflag(acc:CIM_Acc, ops:WorkLoad, cme_dflag):
     # 定义固定的操作数顺序
     fixed_order = ['I', 'W', 'O']
@@ -17,7 +32,9 @@ def convert_ZZ_dflag_to_doubleflag(acc:CIM_Acc, ops:WorkLoad, cme_dflag):
     
     dflag = {}
     for op in fixed_order:          # """ Zigzag start with False for each operand at the lowest arch level (MAC array level) """
-        dflag[op] = cme_dflag[op][1:]
+        op_index = fixed_order.index(op)
+        allowed_levels = sum(1 for level in range(acc.Num_mem) if acc.mappingArray[op_index][level] == 1)
+        dflag[op] = _pad_missing_inner_levels(cme_dflag[op][1:], allowed_levels, lambda: False)
     
     # 检查 dflag 和 mappingArray 的一致性
     for op_type in fixed_order:
@@ -133,15 +150,7 @@ def _calc_explicit_mem_usage(loops: LoopNest):
         for dim in range(1, ops.Num_dim):
             tmp_dim[dim] = dim_sp[mem][op][dim] * dim_tp[mem][op][dim]
         if acc.mappingArray[op][mem]:
-            if ops.Stride >= tmp_dim[ops.dict2Dim('R')]:
-                tmp_h = tmp_dim[ops.dict2Dim('P')] * tmp_dim[ops.dict2Dim('R')]
-            else:
-                tmp_h = (tmp_dim[ops.dict2Dim('P')] - 1) * ops.Stride + tmp_dim[ops.dict2Dim('R')]
-            if ops.Stride >= tmp_dim[ops.dict2Dim('S')]:
-                tmp_w = tmp_dim[ops.dict2Dim('Q')] * tmp_dim[ops.dict2Dim('S')]
-            else:
-                tmp_w = (tmp_dim[ops.dict2Dim('Q')] - 1) * ops.Stride + tmp_dim[ops.dict2Dim('S')]
-            data_size[mem, op] = min(tmp_h, ops.H) * min(tmp_w, ops.W) * tmp_dim[ops.dict2Dim('C')]
+            data_size[mem, op] = ops.get_operand_size(tmp_dim, op)
         else:
             data_size[mem, op] = 0
 
@@ -149,12 +158,7 @@ def _calc_explicit_mem_usage(loops: LoopNest):
         for dim in range(1, ops.Num_dim):
             tmp_dim[dim] = dim_sp[mem][op][dim] * dim_tp[mem][op][dim]
         if acc.mappingArray[op][mem]:
-            data_size[mem, op] = (
-                tmp_dim[ops.dict2Dim('R')] *
-                tmp_dim[ops.dict2Dim('S')] *
-                tmp_dim[ops.dict2Dim('C')] *
-                tmp_dim[ops.dict2Dim('K')]
-            )
+            data_size[mem, op] = ops.get_operand_size(tmp_dim, op)
         else:
             data_size[mem, op] = 0
 
@@ -162,11 +166,7 @@ def _calc_explicit_mem_usage(loops: LoopNest):
         for dim in range(1, ops.Num_dim):
             tmp_dim[dim] = dim_sp[mem][op][dim] * dim_tp[mem][op][dim]
         if acc.mappingArray[op][mem]:
-            data_size[mem, op] = (
-                tmp_dim[ops.dict2Dim('P')] *
-                tmp_dim[ops.dict2Dim('Q')] *
-                tmp_dim[ops.dict2Dim('K')]
-            )
+            data_size[mem, op] = ops.get_operand_size(tmp_dim, op)
         else:
             data_size[mem, op] = 0
 
@@ -264,11 +264,15 @@ def convert_ZZMP_to_loopMP(
     level_map: Dict[str, Dict[Tuple[str, int], deque[int]]] = {
         op: defaultdict(deque) for op in array_row_order
     }
+    aligned_mapping_dict = {}
 
     for row_idx, op in enumerate(array_row_order):
         layers = mapping_dict[op]                       # 外 → 内
         # 取出行中所有“1”出现的位置（跳过 -1）
         pos = [col for col, v in enumerate(mappingArray[row_idx]) if v == 1]
+
+        layers = _pad_missing_inner_levels(layers, len(pos), list)
+        aligned_mapping_dict[op] = layers
 
         if len(pos) != len(layers):
             raise ValueError(
@@ -285,8 +289,8 @@ def convert_ZZMP_to_loopMP(
 
     # ---------------- 2. 生成全局遍历次序 (基于 I)，内 → 外 -------
     order: List[Tuple[str, int]] = []
-    for layer_idx in reversed(range(len(mapping_dict["I"]))):        # 内 → 外
-        for tup in reversed(mapping_dict["I"][layer_idx]):           # 右 → 左
+    for layer_idx in reversed(range(len(aligned_mapping_dict["I"]))):        # 内 → 外
+        for tup in reversed(aligned_mapping_dict["I"][layer_idx]):           # 右 → 左
             order.append(tuple(tup))
 
     # ---------------- 3. 依次输出 Mapping ------------------------

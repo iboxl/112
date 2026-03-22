@@ -11,6 +11,7 @@ import pickle
 from utils.UtilsFunction.ToolFunction import prepare_save_dir, get_Spatial_Unrolling
 import shutil
 import time, math, os
+import heapq
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
 
@@ -120,7 +121,7 @@ def update_best(result_pack:dict, best_metric:float, result, best_count:int, bes
         Logger.info(lat_msg)
         Logger.info(eng_msg)
     else:
-        result_msg = f"Scheme {count:<3} [raw={result_pack['origin_index']:<3}] End: NO BETTER SOLUTION"
+        result_msg = f"Scheme {count:<3} End: NO BETTER SOLUTION"
         append_scheme_summary(result_pack["outputdir_root"], result_msg)
         Logger.info(result_msg)
 
@@ -172,14 +173,31 @@ def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str, singl
             "meta": score_scheme(acc=acc, ops=ops, scheme=scheme),
         }]
     else:
-        scheme_records = []
-        for origin_index, scheme in enumerate(get_Spatial_Unrolling(ops.dim2bound, acc.mappingRule, acc.SpUnrolling, 0.5), start=1):
-            scheme_records.append({
+        scheme_topk = CONST.SPATIAL_SCHEME_TOPK
+        topk_heap = []
+        total_candidates = 0
+
+        for origin_index, scheme in enumerate(
+            get_Spatial_Unrolling(ops.dim2bound, acc.mappingRule, acc.SpUnrolling),
+            start=1,
+        ):
+            total_candidates += 1
+            meta = score_scheme(acc=acc, ops=ops, scheme=scheme)
+            record = {
                 "origin_index": origin_index,
                 "scheme": scheme,
-                "meta": score_scheme(acc=acc, ops=ops, scheme=scheme),
-            })
-        scheme_records.sort(key=lambda item: item["meta"]["sort_key"], reverse=True)
+                "meta": meta,
+            }
+
+            rank = (meta["sort_key"], -origin_index)
+            if len(topk_heap) < scheme_topk:
+                heapq.heappush(topk_heap, (rank, record))
+            elif rank > topk_heap[0][0]:
+                heapq.heapreplace(topk_heap, (rank, record))
+
+        scheme_records = [item[1] for item in sorted(topk_heap, key=lambda item: item[0], reverse=True)]
+        if total_candidates > scheme_topk:
+            Logger.info(f"Spatial scheme top-k pruning: keep {scheme_topk}/{total_candidates} candidates by score_scheme.")
 
     for count, scheme_record in enumerate(scheme_records, start=1):
         scheme_record["count"] = count
@@ -286,7 +304,7 @@ def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str, singl
                     pass
     
     if count == 0:
-        raise ValueError("No Feasible Sol Found, Need to reset MIN_UTIL_COEFFICIENT")
+        raise ValueError("No feasible spatial scheme survived top-k screening")
     if solCount == 0:
         raise ValueError("SOLVER IIS")
 

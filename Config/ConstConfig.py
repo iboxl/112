@@ -33,7 +33,7 @@ class _const_num_config():
         
         # self.SCALE_BW = 1024            # bandwidth 以 KB/cycle 为单位
 
-        self.UTIL_COEFFICIENT = 0.5
+        self.SPATIAL_SCHEME_TOPK = self.MAX_POS      # To ensure optimality 128 -> MAX
 
         self.EPS = 1e-5
 

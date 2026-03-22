@@ -197,12 +197,11 @@ def prepare_save_dir(save_dir: str) -> pathlib.Path:
         p.mkdir(parents=True, exist_ok=False)  # 递归创建
     return p
 
-def get_Spatial_Unrolling(dim, mappingRule, SpUnrolling, MIN_UTIL_COEFFICIENT:float = 0):
+def get_Spatial_Unrolling(dim, mappingRule, SpUnrolling):
     """
     dim: 维度大小列表
     mappingRule: [轴][维度] 的映射矩阵
     SpUnrolling: 各轴最大展开限制
-    MIN_UTIL_COEFFICIENT: 最小资源占用量
 
     # generator = solve_unrolling(dim, mappingRule, SpUnrolling)
     # for scheme in generator:
@@ -263,11 +262,10 @@ def get_Spatial_Unrolling(dim, mappingRule, SpUnrolling, MIN_UTIL_COEFFICIENT:fl
         for u in range(num_axes):
             # 计算该轴上所有维度展开因子的乘积
             axis_total_prod = reduce(lambda x, y: x*y, scheme_by_axis[u], 1)
-            if axis_total_prod > SpUnrolling[u] or axis_total_prod < SpUnrolling[u] * MIN_UTIL_COEFFICIENT:
+            if axis_total_prod > SpUnrolling[u]:
                 valid_scheme = False
                 break
         
         if valid_scheme:
             # 转换回 list of lists 格式以便输出
             yield [list(col) for col in scheme_by_axis]
-

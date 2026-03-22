@@ -103,6 +103,11 @@ class Solver():
         logF = {(d, f): math.log(factors[d][f]) 
                         for d in range(1, ops.Num_dim) 
                         for f in range(len(factors[d]))}
+        INNERMOST_MEM = {
+            0: {acc.IReg2mem},
+            1: {acc.Macro2mem},
+            2: {acc.OReg2mem},
+        }
         
         factors_val = [f for fs in factors[1:ops.Num_dim] for f in fs if fs != [1]]
         f_asc = sorted(factors_val)
@@ -143,6 +148,7 @@ class Solver():
         UB_lg_transVolume = {}
         UB_transLatency, UB_lg_transLatency = {}, {}
         LB_lg_transLatency = {}
+        LB_lg_transEnergy = math.log(1 / CONST.MAX_POS)
         for m in range(1, acc.Num_mem):
             for d in range(1, ops.Num_dim):
                 for op in range(3):
@@ -211,7 +217,9 @@ class Solver():
             for f in range(len(factors[d])):
                 for op, op_name in enumerate(['I','W','O']):
                     for m in range(1,acc.Num_mem):
-                        if acc.mappingArray[op][m] == 1:
+                        if d == ops.dict2Dim('G') and m in INNERMOST_MEM[op]:
+                            indic_factor2Mem[d,f,op,m] = 0
+                        elif acc.mappingArray[op][m] == 1:
                             indic_factor2Mem[d,f,op,m] = model.addVar(vtype=GRB.BINARY, name=f"indic_factor2Mem_({ops.dim2Dict[d]},{f},{op_name},{acc.mem2dict(m)})")
                         else:
                             indic_factor2Mem[d,f,op,m] = 0
@@ -549,11 +557,7 @@ class Solver():
                     for i_p, pd in enumerate(TEMP_DIVISORS[ops.dict2Dim('P')]):
                         r = rd * spur[m,op,ops.dict2Dim('R')]
                         p = pd * spur[m,op,ops.dict2Dim('P')]
-                        if ops.Stride >= r:
-                            h = p * r
-                        else:
-                            h = (p-1) * ops.Stride + r
-                        h = min(h,ops.H)
+                        h = min(r + (p - 1) * min(ops.Stride, r), ops.H)
                         indic_dim = model.addVar(vtype=gp.GRB.BINARY, name=f"Indic_dim_Height_({acc.mem2dict(m)},{op_name},{i_r},{i_p})")
                         sum_dim_h += indic_dim * math.log(h)
                         sum_r += indic_dim * math.log(r)
@@ -568,11 +572,7 @@ class Solver():
                     for i_q, qd in enumerate(TEMP_DIVISORS[ops.dict2Dim('Q')]):
                         s = sd * spur[m,op,ops.dict2Dim('S')]
                         q = qd * spur[m,op,ops.dict2Dim('Q')]
-                        if ops.Stride >= s:
-                            w = q * s
-                        else:
-                            w = (q-1) * ops.Stride + s
-                        w = min(w,ops.W)
+                        w = min(s + (q - 1) * min(ops.Stride, s), ops.W)
                         indic_dim = model.addVar(vtype=gp.GRB.BINARY, name=f"Indic_dim_Width_({acc.mem2dict(m)},{op_name},{i_s},{i_q})")
                         sum_dim_w += indic_dim * math.log(w)
                         sum_s += indic_dim * math.log(s)
@@ -584,7 +584,7 @@ class Solver():
 
                 lg_dataVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=UB_lg_dataVolume[m,op],
                                                     name=f"lg_dataVolume_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(lg_dataVolume[m,op] == sum_dim_h + sum_dim_w + lg_dimExistMem[m,op,ops.dict2Dim('C')],
+                model.addConstr(lg_dataVolume[m,op] == sum_dim_h + sum_dim_w + lg_dimExistMem[m,op,ops.dict2Dim('C')] + lg_dimExistMem[m,op,ops.dict2Dim('G')],
                                     name=f"C_lg_dataVolume_({acc.mem2dict(m)},{op_name})")
                 if acc.shareMemory[m] == True:
                     exp_dataVolume[m,op] = model.addVar(lb=0, ub=UB_dataVolume[m,op], vtype=GRB.CONTINUOUS,
@@ -595,7 +595,7 @@ class Solver():
             if acc.mappingArray[op][m] == True:
                 lg_dataVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=UB_lg_dataVolume[m,op],
                                                 name=f"lg_dataVolume_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(lg_dataVolume[m,op] == quicksum(lg_dimExistMem[m,op,ops.dict2Dim(dChar)] for dChar in ['R','S','C','K']),
+                model.addConstr(lg_dataVolume[m,op] == quicksum(lg_dimExistMem[m,op,ops.dict2Dim(dChar)] for dChar in ['R','S','C','K','G']),
                                 name=f"C_lg_dataVolume_({acc.mem2dict(m)},{op_name})")
                 if acc.shareMemory[m] == True:
                     exp_dataVolume[m,op] = model.addVar(lb=0, ub=UB_dataVolume[m,op], vtype=GRB.CONTINUOUS,
@@ -606,7 +606,7 @@ class Solver():
             if acc.mappingArray[op][m] == True:
                 lg_dataVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=UB_lg_dataVolume[m,op],
                                                     name=f"lg_dataVolume_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(lg_dataVolume[m,op] == quicksum(lg_dimExistMem[m,op,ops.dict2Dim(dChar)] for dChar in ['P','Q','K']),
+                model.addConstr(lg_dataVolume[m,op] == quicksum(lg_dimExistMem[m,op,ops.dict2Dim(dChar)] for dChar in ['P','Q','K','G']),
                                     name=f"C_lg_dataVolume_({acc.mem2dict(m)},{op_name})")
                 if acc.shareMemory[m] == True:
                     exp_dataVolume[m,op] = model.addVar(lb=0, ub=UB_dataVolume[m,op], vtype=GRB.CONTINUOUS,
@@ -625,11 +625,7 @@ class Solver():
                     for i_p, pd in enumerate(TEMP_DIVISORS[ops.dict2Dim('P')]):
                         r = rd * spur[m,op,ops.dict2Dim('R')]
                         p = pd * spur[m,op,ops.dict2Dim('P')]
-                        if ops.Stride >= r:
-                            h = p * r
-                        else:
-                            h = (p-1) * ops.Stride + r
-                        h = min(h,ops.H)
+                        h = min(r + (p - 1) * min(ops.Stride, r), ops.H)
                         indic_dim = model.addVar(vtype=gp.GRB.BINARY, name=f"Indic_dim_TileHeight_({acc.mem2dict(m)},{op_name},{i_r},{i_p})")
                         sum_dim_h += indic_dim * math.log(h)
                         sum_r += indic_dim * math.log(r)
@@ -644,11 +640,7 @@ class Solver():
                     for i_q, qd in enumerate(TEMP_DIVISORS[ops.dict2Dim('Q')]):
                         s = sd * spur[m,op,ops.dict2Dim('S')]
                         q = qd * spur[m,op,ops.dict2Dim('Q')]
-                        if ops.Stride >= s:
-                            w = q * s
-                        else:
-                            w = (q-1) * ops.Stride + s
-                        w = min(w,ops.W)
+                        w = min(s + (q - 1) * min(ops.Stride, s), ops.W)
                         indic_dim = model.addVar(vtype=gp.GRB.BINARY, name=f"Indic_dim_TileWidth_({acc.mem2dict(m)},{op_name},{i_s},{i_q})")
                         sum_dim_w += indic_dim * math.log(w)
                         sum_s += indic_dim * math.log(s)
@@ -660,21 +652,21 @@ class Solver():
 
                 lg_transVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=UB_lg_transVolume[m,op],
                                                      name=f"lg_transVolume_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(lg_transVolume[m,op] == sum_dim_h + sum_dim_w + lg_dimOfTile[m,op,ops.dict2Dim('C')],
+                model.addConstr(lg_transVolume[m,op] == sum_dim_h + sum_dim_w + lg_dimOfTile[m,op,ops.dict2Dim('C')] + lg_dimOfTile[m,op,ops.dict2Dim('G')],
                                     name=f"C_lg_transVolume_({acc.mem2dict(m)},{op_name})")
 
             op, op_name = 1,'W'     # Weight
             if acc.mappingArray[op][m]:
                 lg_transVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=UB_lg_transVolume[m,op],
                                                      name=f"lg_transVolume_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(lg_transVolume[m,op] == quicksum(lg_dimOfTile[m,op,ops.dict2Dim(dChar)] for dChar in ['R','S','C','K']),
+                model.addConstr(lg_transVolume[m,op] == quicksum(lg_dimOfTile[m,op,ops.dict2Dim(dChar)] for dChar in ['R','S','C','K','G']),
                                      name=f"C_lg_transVolume_({acc.mem2dict(m)},{op_name})")
 
             op, op_name = 2,'O'     # Output
             if acc.mappingArray[op][m]:
                 lg_transVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=UB_lg_transVolume[m,op],
                                                      name=f"lg_transVolume_({acc.mem2dict(m)},{op_name})")
-                model.addConstr(lg_transVolume[m,op] == quicksum(lg_dimOfTile[m,op,ops.dict2Dim(dChar)] for dChar in ['P','Q','K']),
+                model.addConstr(lg_transVolume[m,op] == quicksum(lg_dimOfTile[m,op,ops.dict2Dim(dChar)] for dChar in ['P','Q','K','G']),
                                      name=f"C_lg_transVolume_({acc.mem2dict(m)},{op_name})")
 
         # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -#          
@@ -829,7 +821,7 @@ class Solver():
 
                 # 1) Base read-out energy of this memory level.
                 if can_read:
-                    lg_transEnergy_r2L[m,op] = model.addVar(lb=0, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name=f"lg_transEnergy_r2L_({acc.mem2dict(m)},{op_name})")
+                    lg_transEnergy_r2L[m,op] = model.addVar(lb=LB_lg_transEnergy, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name=f"lg_transEnergy_r2L_({acc.mem2dict(m)},{op_name})")
                     prec_term_r2l = lg_prec_O(m) if op_name == 'O' else math.log(acc.precision[m,op])
                     model.addConstr(lg_transEnergy_r2L[m,op] == math.log(acc.cost_r[m]) + prec_term_r2l + count_expr_readOut + lg_transVolume[m,op],
                                     name=f"C_lg_transEnergy_r2L_({acc.mem2dict(m)},{op_name})")
@@ -838,7 +830,7 @@ class Solver():
 
                 # 2) Base write-in energy of this memory level.
                 if can_write:
-                    lg_transEnergy_w2L[m,op] = model.addVar(lb=0, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name=f"lg_transEnergy_w2L_({acc.mem2dict(m)},{op_name})")
+                    lg_transEnergy_w2L[m,op] = model.addVar(lb=LB_lg_transEnergy, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name=f"lg_transEnergy_w2L_({acc.mem2dict(m)},{op_name})")
                     prec_term_w2l = lg_prec_O(m) if op_name == 'O' else math.log(acc.precision[m,op])
                     model.addConstr(lg_transEnergy_w2L[m,op] == math.log(acc.cost_w[m]) + prec_term_w2l + count_expr_writeIn + lg_dataVolume[m,op],
                                      name=f"C_lg_transEnergy_w2L_({acc.mem2dict(m)},{op_name})")
@@ -848,7 +840,7 @@ class Solver():
                 # 3) Output readout for sending upstream memory hierarchy.
                 # output往里面写多少次就要读多少次写回 ⬆
                 if op_name == 'O' and can_read and m > acc.Dram2mem:
-                    lg_transEnergy_r2H[m,op] = model.addVar(lb=0, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name=f"lg_transEnergy_r2H_({acc.mem2dict(m)},{op_name})")
+                    lg_transEnergy_r2H[m,op] = model.addVar(lb=LB_lg_transEnergy, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name=f"lg_transEnergy_r2H_({acc.mem2dict(m)},{op_name})")
                     model.addConstr(lg_transEnergy_r2H[m,op] == math.log(acc.cost_r[m]) + lg_prec_O(m) + count_expr_writeIn + lg_dataVolume[m,op],
                                      name=f"C_lg_transEnergy_r2H_({acc.mem2dict(m)},{op_name})")
                     
@@ -856,7 +848,7 @@ class Solver():
 
                 # 4) Output write-back energy when this level sends output upward.
                 if op_name == 'O':
-                    lg_transEnergy_w2H[m,op] = model.addVar(lb=0, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name=f"lg_transEnergy_w2H_({acc.mem2dict(m)},{op_name})")
+                    lg_transEnergy_w2H[m,op] = model.addVar(lb=LB_lg_transEnergy, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name=f"lg_transEnergy_w2H_({acc.mem2dict(m)},{op_name})")
                     model.addConstr(lg_transEnergy_w2H[m,op] == math.log(acc.cost_w[m]) + lg_prec_O(m) + count_expr_readOut + lg_transVolume[m,op],
                                      name=f"C_lg_transEnergy_w2H_({acc.mem2dict(m)},{op_name})")
                     

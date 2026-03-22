@@ -161,7 +161,7 @@ class CIM_Acc():                         # WTD. init CIM_Acc from zigzag | Yaml 
         '''
         self.mappingRule = [
             # self.dim2Dict = ['-','R', 'S', 'P', 'Q', 'C', 'K', 'G']
-            [0, 0, 0, 1, 1, 0, 1, 0],  # 轴0允许展开P, Q, K
+            [0, 0, 0, 1, 1, 0, 1, 1],  # 轴0允许展开P, Q, K, G
             [0, 1, 1, 0, 0, 1, 0, 0],  # 轴1允许展开R, S, C
             [0, 0, 0, 0, 0, 0, 1, 0]   # 轴2允许展开K
         ]

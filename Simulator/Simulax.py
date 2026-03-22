@@ -62,20 +62,7 @@ class tranSimulator():
             for dim in range(1,ops.Num_dim):
                 tmp_dim[dim] = dim_sp[mem][op][dim] * dim_tp[mem][op][dim]
             if acc.mappingArray[op][mem]:
-                # dataSize[mem,op] = (tmp_dim[ops.dict2Dim('P')]+tmp_dim[ops.dict2Dim('R')]-1) * (tmp_dim[ops.dict2Dim('Q')]+tmp_dim[ops.dict2Dim('S')]-1) * tmp_dim[ops.dict2Dim('C')]
-                # tmp_h = (tmp_dim[ops.dict2Dim('P')] - 1) * ops.Stride + tmp_dim[ops.dict2Dim('R')] # (- 2 * ops.pandding)
-                # tmp_w = (tmp_dim[ops.dict2Dim('Q')] - 1) * ops.Stride + tmp_dim[ops.dict2Dim('S')]
-
-                if ops.Stride >= tmp_dim[ops.dict2Dim('R')]:
-                    tmp_h = tmp_dim[ops.dict2Dim('P')] * tmp_dim[ops.dict2Dim('R')]
-                else:
-                    tmp_h = (tmp_dim[ops.dict2Dim('P')] - 1) * ops.Stride + tmp_dim[ops.dict2Dim('R')]
-                if ops.Stride >= tmp_dim[ops.dict2Dim('S')]:
-                    tmp_w = tmp_dim[ops.dict2Dim('Q')] * tmp_dim[ops.dict2Dim('S')]
-                else:
-                    tmp_w = (tmp_dim[ops.dict2Dim('Q')] - 1) * ops.Stride + tmp_dim[ops.dict2Dim('S')]
-
-                dataSize[mem,op] = min(tmp_h,ops.H) * min(tmp_w,ops.W) * tmp_dim[ops.dict2Dim('C')] 
+                dataSize[mem,op] = ops.get_operand_size(tmp_dim, op)
             else:
                 dataSize[mem,op] = 0
 
@@ -83,7 +70,7 @@ class tranSimulator():
             for dim in range(1,ops.Num_dim):
                 tmp_dim[dim] = dim_sp[mem][op][dim] * dim_tp[mem][op][dim]
             if acc.mappingArray[op][mem]:
-                dataSize[mem,op] = tmp_dim[ops.dict2Dim('R')] * tmp_dim[ops.dict2Dim('S')] * tmp_dim[ops.dict2Dim('C')] * tmp_dim[ops.dict2Dim('K')] 
+                dataSize[mem,op] = ops.get_operand_size(tmp_dim, op)
             else:
                 dataSize[mem,op] = 0
 
@@ -91,7 +78,7 @@ class tranSimulator():
             for dim in range(1,ops.Num_dim):
                 tmp_dim[dim] = dim_sp[mem][op][dim] * dim_tp[mem][op][dim]
             if acc.mappingArray[op][mem]:
-                dataSize[mem,op] = tmp_dim[ops.dict2Dim('P')] * tmp_dim[ops.dict2Dim('Q')] * tmp_dim[ops.dict2Dim('K')] 
+                dataSize[mem,op] = ops.get_operand_size(tmp_dim, op)
             else:
                 dataSize[mem,op] = 0
         for op, op_name in enumerate(['I','W','O']):
@@ -138,15 +125,7 @@ class tranSimulator():
             for dim in range(1,ops.Num_dim):
                 tmp_dim[dim] = trans_dim_sp[mem][op][dim] * trans_dim_tp[mem][op][dim]
             if acc.mappingArray[op][mem]:
-                if ops.Stride >= tmp_dim[ops.dict2Dim('R')]:
-                    tmp_h = tmp_dim[ops.dict2Dim('P')] * tmp_dim[ops.dict2Dim('R')]
-                else:
-                    tmp_h = (tmp_dim[ops.dict2Dim('P')] - 1) * ops.Stride + tmp_dim[ops.dict2Dim('R')]
-                if ops.Stride >= tmp_dim[ops.dict2Dim('S')]:
-                    tmp_w = tmp_dim[ops.dict2Dim('Q')] * tmp_dim[ops.dict2Dim('S')]
-                else:
-                    tmp_w = (tmp_dim[ops.dict2Dim('Q')] - 1) * ops.Stride + tmp_dim[ops.dict2Dim('S')]
-                tileSize[mem,op] = min(tmp_h,ops.H) * min(tmp_w,ops.W) * tmp_dim[ops.dict2Dim('C')] 
+                tileSize[mem,op] = ops.get_operand_size(tmp_dim, op)
             else:
                 tileSize[mem,op] = 0
 
@@ -154,7 +133,7 @@ class tranSimulator():
             for dim in range(1,ops.Num_dim):
                 tmp_dim[dim] = trans_dim_sp[mem][op][dim] * trans_dim_tp[mem][op][dim]
             if acc.mappingArray[op][mem]:
-                tileSize[mem,op] = tmp_dim[ops.dict2Dim('R')] * tmp_dim[ops.dict2Dim('S')] * tmp_dim[ops.dict2Dim('C')] * tmp_dim[ops.dict2Dim('K')] 
+                tileSize[mem,op] = ops.get_operand_size(tmp_dim, op)
             else:
                 tileSize[mem,op] = 0
 
@@ -162,7 +141,7 @@ class tranSimulator():
             for dim in range(1,ops.Num_dim):
                 tmp_dim[dim] = trans_dim_sp[mem][op][dim] * trans_dim_tp[mem][op][dim]
             if acc.mappingArray[op][mem]:
-                tileSize[mem,op] = tmp_dim[ops.dict2Dim('P')] * tmp_dim[ops.dict2Dim('Q')] * tmp_dim[ops.dict2Dim('K')] 
+                tileSize[mem,op] = ops.get_operand_size(tmp_dim, op)
             else:
                 tileSize[mem,op] = 0
         for op, op_name in enumerate(['I','W','O']):
