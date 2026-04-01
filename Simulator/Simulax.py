@@ -237,6 +237,9 @@ class tranSimulator():
             tileSize = [self.tileSize[mem_cur[op],op] if xMem[loopidx,op]==1 else 0 for op in range(3)]
 
             trans = [math.ceil(tileSize[op]*self._prec(mem_cur[op], op)/self.acc.bw[mem_cur[op]]) for op in range(3)]
+            '''
+            如果将来 r_bw ≠ w_bw 或内层 bw < 外层 bw 就会出错 但当前不需要修 MIP 模型用的同一个
+            '''
             for op, op_name in enumerate(['I','W','O']):     
                 if mem_cur[op] == self.lastMappingMem[op] and self.lastMemReg[op] is False:
                     trans[op] += 1                      # Not only 1, consider others
@@ -246,17 +249,18 @@ class tranSimulator():
             Cons = [(trans[op] if xMem[loopidx,op]==1 else 0) for op in range(3)]
 
             dflag = [self.dataflow.usr_defined_double_flag[mem_nxt[op]][op] for op in range(3)]
-            
+
             self.ptimer(loopidx, 0)
 
-            for i in range(self.dataflow.tm[loopidx].dimSize):
+            N = self.dataflow.tm[loopidx].dimSize
+            for i in range(N):
 
                 for op, op_name in enumerate(['I','W','O']):
-                    if dflag[op] == 1:      # next memory using double flag
+                    if dflag[op] == 1:      # double-buffer: start immediately
                         self.timer[mem_cur[op],op] = self.timer[mem_cur[op],op] + Cons[op]
                         stall = max(0,max(self.timer[mem_nxt[op],op], self.timer[mem_cur[op],op]) - self.timer[mem_nxt[op],op])
                         self.timer[mem_nxt[op],op] = max(self.timer[mem_nxt[op],op], self.timer[mem_cur[op],op])
-                    else:
+                    else:                   # single-buffer: wait for nxt
                         self.timer[mem_cur[op],op] = max(self.timer[mem_cur[op],op], self.timer[mem_nxt[op],op]) + Cons[op]
                         self.timer[mem_nxt[op],op] = self.timer[mem_cur[op],op]
                         stall = Cons[op]
@@ -272,32 +276,64 @@ class tranSimulator():
                         self.memCost[mem_cur[op]].r += self.acc.cost_r[mem_cur[op]] * tileSize[op] * self._prec(mem_cur[op], op)
                         self.memCost[mem_nxt[op]].w += self.acc.cost_w[mem_nxt[op]] * nxtSize[op]  * self._prec(mem_nxt[op], op)
 
+                # Double-buffer O write-back of previous iteration (delayed).
+                # Placed after pre-read so PR(k) and WB(k-1) are serial at mem_cur.
+                # max(cur, nxt) enforces data dependency on previous child.
+                # nxt NOT updated: WB at mem_cur port does not block child at mem_nxt.
+                op = 2  # O
+                if i > 0 and Cons[op] > 0 and dflag[op] == 1:
+                    self.timer[mem_cur[op],op] = max(self.timer[mem_cur[op],op], self.timer[mem_nxt[op],op]) + Cons[op]
+
+                    if mem_cur[op] == self.lastMappingMem[op] and self.lastMemReg[op] is False:
+                        self.memCost[mem_nxt[op]].r += self.acc.cost_r[mem_nxt[op]] * nxtSize[op]  * self._prec(mem_nxt[op], op)
+                        self.memCost[self.acc.lastMem[op]].w += self.acc.cost_w[self.acc.lastMem[op]] * nxtSize[op] * self._prec(self.acc.lastMem[op], op)
+
+                        self.memCost[self.acc.lastMem[op]].r += self.acc.cost_r[self.acc.lastMem[op]] * nxtSize[op]  * self._prec(self.acc.lastMem[op], op)
+                        self.memCost[mem_cur[op]].w += self.acc.cost_w[mem_cur[op]] * tileSize[op] * self._prec(mem_cur[op], op)
+                    else:
+                        self.memCost[mem_nxt[op]].r += self.acc.cost_r[mem_nxt[op]] * nxtSize[op]  * self._prec(mem_nxt[op], op)
+                        self.memCost[mem_cur[op]].w += self.acc.cost_w[mem_cur[op]] * tileSize[op] * self._prec(mem_cur[op], op)
+
+                    self.memCost[mem_cur[op]].t += Cons[op]
+
                 self.loopExecution(loopidx=loopidx+1)
 
-                # Output state needs to be restored after the recursive inner execution.
-                for op, op_name in enumerate(['I','W','O']):
-                    if op_name == 'O':
-                        if dflag[op] == 1: 
-                            self.timer[mem_cur[op], op] += Cons[op]
-                            self.timer[mem_nxt[op], op] = max(self.timer[mem_nxt[op], op], self.timer[mem_cur[op], op])
-                            stall = max(0, self.timer[mem_nxt[op], op] - self.timer[mem_nxt[op], op])
-                        else:
-                            self.timer[mem_nxt[op],op] = max(self.timer[mem_cur[op],op], self.timer[mem_nxt[op],op]) + Cons[op]
-                            self.timer[mem_cur[op],op] = self.timer[mem_nxt[op],op]
-                            stall = Cons[op]
+                # Single-buffer O write-back: after child (no pipeline benefit)
+                op = 2  # O
+                if dflag[op] != 1:
+                    self.timer[mem_nxt[op],op] = max(self.timer[mem_cur[op],op], self.timer[mem_nxt[op],op]) + Cons[op]
+                    self.timer[mem_cur[op],op] = self.timer[mem_nxt[op],op]
 
-                        if mem_cur[op] == self.lastMappingMem[op] and self.lastMemReg[op] is False:
-                            self.memCost[mem_nxt[op]].r += self.acc.cost_r[mem_nxt[op]] * nxtSize[op]  * self._prec(mem_nxt[op], op)
-                            self.memCost[self.acc.lastMem[op]].w += self.acc.cost_w[self.acc.lastMem[op]] * nxtSize[op] * self._prec(self.acc.lastMem[op], op)
+                    if mem_cur[op] == self.lastMappingMem[op] and self.lastMemReg[op] is False:
+                        self.memCost[mem_nxt[op]].r += self.acc.cost_r[mem_nxt[op]] * nxtSize[op]  * self._prec(mem_nxt[op], op)
+                        self.memCost[self.acc.lastMem[op]].w += self.acc.cost_w[self.acc.lastMem[op]] * nxtSize[op] * self._prec(self.acc.lastMem[op], op)
 
-                            self.memCost[self.acc.lastMem[op]].r += self.acc.cost_r[self.acc.lastMem[op]] * nxtSize[op]  * self._prec(self.acc.lastMem[op], op)
-                            self.memCost[mem_cur[op]].w += self.acc.cost_w[mem_cur[op]] * tileSize[op] * self._prec(mem_cur[op], op)
-                        else:
-                            self.memCost[mem_nxt[op]].r += self.acc.cost_r[mem_nxt[op]] * nxtSize[op]  * self._prec(mem_nxt[op], op)
-                            self.memCost[mem_cur[op]].w += self.acc.cost_w[mem_cur[op]] * tileSize[op] * self._prec(mem_cur[op], op)
-                
-                        self.memCost[mem_cur[op]].t += stall 
+                        self.memCost[self.acc.lastMem[op]].r += self.acc.cost_r[self.acc.lastMem[op]] * nxtSize[op]  * self._prec(self.acc.lastMem[op], op)
+                        self.memCost[mem_cur[op]].w += self.acc.cost_w[mem_cur[op]] * tileSize[op] * self._prec(mem_cur[op], op)
+                    else:
+                        self.memCost[mem_nxt[op]].r += self.acc.cost_r[mem_nxt[op]] * nxtSize[op]  * self._prec(mem_nxt[op], op)
+                        self.memCost[mem_cur[op]].w += self.acc.cost_w[mem_cur[op]] * tileSize[op] * self._prec(mem_cur[op], op)
+
+                    self.memCost[mem_cur[op]].t += Cons[op]
+
                 self.ptimer(loopidx, i+1)
+
+            # Flush: last double-buffer O write-back
+            op = 2  # O
+            if N > 0 and Cons[op] > 0 and dflag[op] == 1:
+                self.timer[mem_cur[op],op] = max(self.timer[mem_cur[op],op], self.timer[mem_nxt[op],op]) + Cons[op]
+
+                if mem_cur[op] == self.lastMappingMem[op] and self.lastMemReg[op] is False:
+                    self.memCost[mem_nxt[op]].r += self.acc.cost_r[mem_nxt[op]] * nxtSize[op]  * self._prec(mem_nxt[op], op)
+                    self.memCost[self.acc.lastMem[op]].w += self.acc.cost_w[self.acc.lastMem[op]] * nxtSize[op] * self._prec(self.acc.lastMem[op], op)
+
+                    self.memCost[self.acc.lastMem[op]].r += self.acc.cost_r[self.acc.lastMem[op]] * nxtSize[op]  * self._prec(self.acc.lastMem[op], op)
+                    self.memCost[mem_cur[op]].w += self.acc.cost_w[mem_cur[op]] * tileSize[op] * self._prec(mem_cur[op], op)
+                else:
+                    self.memCost[mem_nxt[op]].r += self.acc.cost_r[mem_nxt[op]] * nxtSize[op]  * self._prec(mem_nxt[op], op)
+                    self.memCost[mem_cur[op]].w += self.acc.cost_w[mem_cur[op]] * tileSize[op] * self._prec(mem_cur[op], op)
+
+                self.memCost[mem_cur[op]].t += Cons[op]
 
     def run(self):
         Logger.critical("Evaluation by running translation simulator") 

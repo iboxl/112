@@ -347,47 +347,75 @@ if __name__ == "__main__":
     CONST.TIMELIMIT = 77
     # CONST.TIMELIMIT = 600
 
-    # # # # # layer-0
+    # # # # # RestNet-layer-0
     # ops = WorkLoad(loopDim={'R': 7, 'S': 7, 'C': 3, 'K':64, 'P': 112, 'Q': 112, 'G': 1, 'B': 1, 'H': 224, 'W': 224, 'Stride': 2, 'Padding': 3})
     # Spatial_unrolling = [[1,1,1,2,1,1,4,1],
     #                  #   [-,R,S,P,Q,C,K,G],
     #                      [1,1,7,1,1,3,1,1],
     #                      [1,1,1,1,1,1,16,1]]
 
-    # # # # # layer-1
+    # # # # # RestNet-layer-1
     ops = WorkLoad(loopDim={'R': 3, 'S': 3, 'C': 64, 'K':64, 'P': 56, 'Q': 56, 'G': 1, 'B': 1, 'H': 56, 'W': 56, 'Stride': 1, 'Padding': 1})
     Spatial_unrolling =    [[1,1,1,2,1,1,4,1],
                         #   [-,R,S,P,Q,C,K,G],
                             [1,1,1,1,1,32,1,1],
                             [1,1,1,1,1,1,16,1]]
 
-    # # # # # layer-12
+    # # # # # RestNet-layer-12
     # ops = WorkLoad(loopDim={'R': 1, 'S': 1, 'C': 128, 'K':256, 'P': 14, 'Q': 14, 'G': 1, 'B': 1, 'H': 28, 'W': 28, 'Stride': 2, 'Padding': 0})
     # Spatial_unrolling = [[1,1,1,2,2,1,2,1],
     #                  #   [-,R,S,P,Q,C,K,G],
     #                      [1,1,1,1,1,32,1,1],
     #                      [1,1,1,1,1,1,16,1]]
 
-    # # # # # layer-15
+    # # # # # RestNet-layer-15
     # ops = WorkLoad(loopDim={'R': 3, 'S': 3, 'C': 256, 'K':512, 'P': 7, 'Q': 7, 'G': 1, 'B': 1, 'H': 14, 'W': 14, 'Stride': 2, 'Padding': 1})
     # Spatial_unrolling = [[1,1,1,1,1,1,8,1],
     #                  #   [-,R,S,P,Q,C,K,G],
     #                      [1,1,1,1,1,32,1,1],
     #                      [1,1,1,1,1,1,16,1]]
 
-    # # # # # layer-16
+    # # # # # RestNet-layer-16
     # ops = WorkLoad(loopDim={'R': 3, 'S': 3, 'C': 512, 'K':512, 'P': 7, 'Q': 7, 'G': 1, 'B': 1, 'H': 7, 'W': 7, 'Stride': 1, 'Padding': 1})
     # Spatial_unrolling = [[1,1,1,1,1,1,8,1],
     #                  #   [-,R,S,P,Q,C,K,G],
     #                      [1,1,1,1,1,32,1,1],
     #                      [1,1,1,1,1,1,16,1]]
 
-    # # # # # layer-17
+    # # # # # RestNet-layer-17
     # ops = WorkLoad(loopDim={'R': 1, 'S': 1, 'C': 256, 'K':512, 'P': 7, 'Q': 7, 'G': 1, 'B': 1, 'H': 14, 'W': 14, 'Stride': 2, 'Padding': 0})
     # Spatial_unrolling = [[1,1,1,1,1,1,8,1],
     #                  #   [-,R,S,P,Q,C,K,G],
     #                      [1,1,1,1,1,32,1,1],
     #                      [1,1,1,1,1,1,16,1]]
+
+    # # # # # MobileNetV2-depthwise Conv_1  (G=32,  P=Q=112, stride=1, SpUr from full-model Scheme4)
+    # ops = WorkLoad(loopDim={'R': 3, 'S': 3, 'C': 1, 'K': 1, 'P': 112, 'Q': 112, 'G': 32, 'B': 1, 'H': 112, 'W': 112, 'Stride': 1, 'Padding': 1})
+    # Spatial_unrolling = [[1,1,1,1,8,1,1,1],
+    #                  #   [-,R,S,P,Q,C,K,G],
+    #                      [1,3,3,1,1,1,1,1],
+    #                      [1,1,1,1,1,1,1,1]]
+
+    # # # # # MobileNetV2-depthwise Conv_10 (G=144, P=Q=28,  stride=2, SpUr from full-model Scheme2)
+    # ops = WorkLoad(loopDim={'R': 3, 'S': 3, 'C': 1, 'K': 1, 'P': 28, 'Q': 28, 'G': 144, 'B': 1, 'H': 56, 'W': 56, 'Stride': 2, 'Padding': 1})
+    # Spatial_unrolling = [[1,1,1,1,2,1,1,4],
+    #                  #   [-,R,S,P,Q,C,K,G],
+    #                      [1,3,3,1,1,1,1,1],
+    #                      [1,1,1,1,1,1,1,1]]
+
+    # # # # # MobileNetV2-depthwise Conv_40 (G=576, P=Q=7,   stride=2, SpUr from full-model Scheme1)
+    # ops = WorkLoad(loopDim={'R': 3, 'S': 3, 'C': 1, 'K': 1, 'P': 7, 'Q': 7, 'G': 576, 'B': 1, 'H': 14, 'W': 14, 'Stride': 2, 'Padding': 1})
+    # Spatial_unrolling = [[1,1,1,1,1,1,1,8],
+    #                  #   [-,R,S,P,Q,C,K,G],
+    #                      [1,3,3,1,1,1,1,1],
+    #                      [1,1,1,1,1,1,1,1]]
+
+    # # # # # MobileNetV2-depthwise Conv_43 (G=960, P=Q=7,   stride=1, SpUr from full-model Scheme1)
+    # ops = WorkLoad(loopDim={'R': 3, 'S': 3, 'C': 1, 'K': 1, 'P': 7, 'Q': 7, 'G': 960, 'B': 1, 'H': 7, 'W': 7, 'Stride': 1, 'Padding': 1})
+    # Spatial_unrolling = [[1,1,1,1,1,1,1,8],
+    #                  #   [-,R,S,P,Q,C,K,G],
+    #                      [1,3,3,1,1,1,1,1],
+    #                      [1,1,1,1,1,1,1,1]]
 
     lat, eng, edp, c_lat, c_eng, ds = SolveMapping(acc=accelerator, ops=ops, bestMetric=1e10, outputdir=outFolder, singleIter=True, Spatial_unrolling=Spatial_unrolling)
 
