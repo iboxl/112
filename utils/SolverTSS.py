@@ -879,10 +879,19 @@ class Solver():
 
         energy_expr_leakage = acc.leakage_per_cycle * CONST.SCALE_LATENCY * res_latency
 
-        # - - - - - - - - - - - - - - - - - - - - - - - - - - - - Latency - - - - - - - - - - - - - - - - - - - - - - - - - -- - - - - - - - - - - - - - - - - - - -#          
-              
-        transfer = gp.tupledict()                           # transfer[i,op]
-        transLatency = gp.tupledict()                       # transLatency[m,op]
+        # ═══════════════════════════════════════════ Latency Recursive Model ════════════════════════════════════════════#
+        #   L0  Trans(m,λ)     = max(tileVol×prec/bw, 1 cycle);  EffTrans = Trans + bypass×1cycle                  #
+        #   L1  Transfer(i,λ)  = xMem(i,λ) × EffTrans(mem(i,λ), λ)                                                #
+        #   L2  Body(i)   = max_λ { Process(i+1,λ) − dbl(i+1,λ)×Transfer(i+1,λ) }   [I/W dbl overlap]       #
+        #   L3  Critical(i)    = max { Body, c(λ)×T, c(λ)×T+Body|single-buf }   c(O)=2, c(I/W)=1       #
+        #   L4  Process(i,λ)   = c(λ)×Transfer + Process(i+1,λ) + (F(i)−1)×Critical(i);   Process(N)=t_MAC       #
+        #   L5  MaxStartup     = max_λ { BootstrapRead(λ) + Σ_i Transfer(i,λ) }                                    #
+        #   L6  Latency        ≥ MaxStartup − Σ_i Transfer(i,λ) + Process(0,λ) + BootstrapWrite(O)                 #
+        # ══════════════════════════════════════════════════════════════════════════════════════════════════════════════#
+
+        # ─── L0: Per-Memory 传输代价  Trans(m,λ) = max(rawTrans, 1 cycle) ───────────────────────────────────────────
+        transfer = gp.tupledict()                           # transfer[i,op]  — per-level 传输（xMem 门控前）
+        transLatency = gp.tupledict()                       # transLatency[m,op] — per-memory 传输延迟
         for op, op_name in enumerate(['I','W','O']):
             for m in range(1, acc.Num_mem):
                 if acc.mappingArray[op][m]:
@@ -892,22 +901,22 @@ class Solver():
                     model.addConstr(lg_transLatency == lg_transVolume[m,op] + prec_term_lat - math.log(acc.bw[m]) - math.log(CONST.SCALE_LATENCY),
                                      name=f"C_lg_transLatency_({acc.mem2dict(m)},{op_name})")
 
-                    transLatency[m,op] = model.addVar(lb=0, ub=UB_transLatency[m,op], vtype=GRB.CONTINUOUS,
+                    # ceil 语义：硬件不存在亚周期传输，非零搬移至少 1 cycle
+                    rawTransLatency = model.addVar(lb=0, ub=UB_transLatency[m,op], vtype=GRB.CONTINUOUS,
+                                                   name=f"tmp_rawTransLatency_({acc.mem2dict(m)},{op_name})")
+                    model.addGenConstrExp(xvar=lg_transLatency, yvar=rawTransLatency, options=CONST.ExpOption,
+                                          name=f"C_rawTransLatency_({acc.mem2dict(m)},{op_name})")
+                    transLatency[m,op] = model.addVar(lb=LAT_UNIT, ub=max(UB_transLatency[m,op], LAT_UNIT), vtype=GRB.CONTINUOUS,
                                                        name=f"transLatency_({acc.mem2dict(m)},{op_name})")
-                    model.addGenConstrExp(xvar=lg_transLatency, yvar=transLatency[m,op], options=CONST.ExpOption, name=f"C_transLatency_({acc.mem2dict(m)},{op_name})")
-                    # Issue 2: minimum 1-cycle transfer (ceil floor for sub-cycle tiles)
-                    # model.addConstr(transLatency[m,op] >= LAT_UNIT, name=f"Cut_minTrans_({acc.mem2dict(m)},{op_name})")
+                    model.addGenConstrMax(transLatency[m,op], [rawTransLatency], constant=LAT_UNIT,
+                                          name=f"C_transLatency_ceil_({acc.mem2dict(m)},{op_name})")
 
-            # Reg bypass penalty: when memory m is the innermost loop's memory for op
-            # AND the register is bypassed, every transfer at m costs +1 cycle for the
-            # serial-to-parallel conversion path.  Embed this into transLatency so ALL
-            # loop levels that map to m inherit the penalty automatically.
+            # Reg bypass: CIM 位串行要求数据经 Reg 串转并。Reg 被 bypass 时每次传输 +1 cycle。
+            # 嵌入 EffTrans 使所有映射到该 memory 的 level 自动继承。
             effectiveTransLatency = gp.tupledict()
             for m in range(1, acc.Num_mem):
                 if acc.mappingArray[op][m]:
-                    # bp = 1 iff (m is innermost mem for op) AND (Reg bypassed)
-                    # Product of two binaries: indic_loop2Mem[NL-1,op,m] * (1 - usedMem[lastMem,op])
-                    bp = model.addVar(vtype=GRB.BINARY, name=f"tmp_regBypass_({acc.mem2dict(m)},{op_name})")
+                    bp = model.addVar(vtype=GRB.BINARY, name=f"indic_regBypass_({acc.mem2dict(m)},{op_name})")
                     model.addConstr(bp <= indic_loop2Mem[Num_Loops-1,op,m],     name=f"C_bp_a_({acc.mem2dict(m)},{op_name})")
                     model.addConstr(bp <= 1 - indic_usedMem[acc.lastMem[op],op],name=f"C_bp_b_({acc.mem2dict(m)},{op_name})")
                     model.addConstr(bp >= indic_loop2Mem[Num_Loops-1,op,m] - indic_usedMem[acc.lastMem[op],op],
@@ -916,48 +925,47 @@ class Solver():
                 else:
                     effectiveTransLatency[m,op] = 0
 
-            UB_eff_trans = self.MAX_TRANS[op] + LAT_UNIT      # effective max includes bypass penalty
+            # transfer[i,op] = Σ_m loop2Mem(i,λ,m) × EffTrans(m,λ)
+            UB_effectiveTransfer = self.MAX_TRANS[op] + LAT_UNIT
             for i in range(Num_Loops):
-                transfer[i,op] = model.addVar(lb=0, ub=UB_eff_trans, vtype=GRB.CONTINUOUS, name=f"transfer_({i},{op_name})")
+                transfer[i,op] = model.addVar(lb=0, ub=UB_effectiveTransfer, vtype=GRB.CONTINUOUS, name=f"transfer_({i},{op_name})")
                 model.addConstr(transfer[i,op]==quicksum(var_mul01(model, indic_loop2Mem[i,op,m], effectiveTransLatency[m,op],
-                                                                    A_ub=UB_eff_trans, var_ub=UB_eff_trans,
+                                                                    A_ub=UB_effectiveTransfer, var_ub=UB_effectiveTransfer,
                                                                     name=f"tmp_transfer_({i},{op_name})_{acc.mem2dict(m)}")
                                                          for m in range(1, acc.Num_mem) if acc.mappingArray[op][m]),
                                  name=f"C_transfer_({i},{op_name})")
 
-        # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -#
-        latency_Critical = gp.tupledict()           # latency_cp[i] = Latency of Critical Path
-        latency_Process = gp.tupledict()            # latency_Process[i,op]
-        latency_Transfer = gp.tupledict()           # latency_Transfer[i,op]
-        latency_ChildTime = gp.tupledict()          # latency_ChildTime[i] = max(Process[i+1,*])
+        # ─── L1: Per-Level Transfer(i,λ) = xMem × transfer ─────────────────────────────────────────────────────────
+        latency_Critical = gp.tupledict()
+        latency_Process = gp.tupledict()
+        latency_Transfer = gp.tupledict()
+        latency_Body = gp.tupledict()
         for i in range(Num_Loops):
             latency_Critical[i] = model.addVar(lb=0, ub=UB_latencyLevel[i], vtype=GRB.CONTINUOUS, name=f"latency_Critical_({i})")
             for op, op_name in enumerate(['I','W','O']):
                 latency_Process[i,op] = model.addVar(lb=0, ub=UB_latencyLevel[i], vtype=GRB.CONTINUOUS, name=f"latency_Process_({i},{op_name})")
 
-                # Unified xMem gate for ALL levels (including innermost).
-                # Issue 3 fix: stationary operands (xMem=0) produce zero transfer.
+                # xMem 门控：stationary 操作数（xMem=0）无传输开销
                 latency_Transfer[i,op] = var_mul01(model, indic_xMem[i, op], transfer[i, op], A_ub=self.MAX_TRANS[op]+LAT_UNIT, var_ub=self.MAX_TRANS[op]+LAT_UNIT,
                                                     name=f"latency_Transfer_({i},{op_name})")
                 if i == Num_Loops-1:
                     latency_Process[Num_Loops,op] = t_MAC
 
+        # ─── L2: Body(i) = max_λ { Process(i+1,λ) − dbl_overlap } ────────────────────────────────────────────
         for i in range(Num_Loops):
-            latency_ChildTime[i] = model.addVar(lb=0, ub=UB_latencyLevel[i], vtype=GRB.CONTINUOUS, name=f"latency_ChildTime_({i})")
+            latency_Body[i] = model.addVar(lb=0, ub=UB_latencyLevel[i], vtype=GRB.CONTINUOUS, name=f"latency_Body_({i})")
             for op, op_name in enumerate(['I','W','O']):
-                if i < Num_Loops - 1 and op < 2:   # I,W only
-                    # When I/W is double-buffered at the child level (i+1), its first-iter
-                    # transfer overlaps with other operands' parallel pipeline, so it does
-                    # not extend the child wall-clock time.  Subtract it from ChildTime.
-                    dbl_overlap = var_mul01(model, indic_doubleLoop[i+1,op], latency_Transfer[i+1,op],
-                                           A_ub=self.MAX_TRANS[op], var_ub=self.MAX_TRANS[op],
-                                           name=f"tmp_dbl_overlap_({i},{op_name})")
-                    model.addConstr(latency_ChildTime[i] >= latency_Process[i+1,op] - dbl_overlap,
-                                     name=f"C_ChildTime_({i},{op_name})")
+                if i < Num_Loops - 1 and op < 2:   # I/W 双缓冲时首迭代传输与父级流水重叠
+                    indic_dblOverlap = var_mul01(model, indic_doubleLoop[i+1,op], latency_Transfer[i+1,op],
+                                           A_ub=self.MAX_TRANS[op]+LAT_UNIT, var_ub=self.MAX_TRANS[op]+LAT_UNIT,
+                                           name=f"indic_dblOverlap_({i},{op_name})")
+                    model.addConstr(latency_Body[i] >= latency_Process[i+1,op] - indic_dblOverlap,
+                                     name=f"C_Body_({i},{op_name})")
                 else:
-                    model.addConstr(latency_ChildTime[i] >= latency_Process[i+1,op],
-                                     name=f"C_ChildTime_({i},{op_name})")
+                    model.addConstr(latency_Body[i] >= latency_Process[i+1,op],
+                                     name=f"C_Body_({i},{op_name})")
 
+        # Cut: Σ Transfer ≥ transLatency for each used memory (strengthening)
         for op, op_name in enumerate(['I','W','O']):
             sum_latency_transfer = quicksum(latency_Transfer[i,op] for i in range(Num_Loops))
             for m in range(1, acc.Num_mem):
@@ -966,58 +974,51 @@ class Solver():
                                                                      name=f"tmp_sum_latencyTransfer_({acc.mem2dict(m)},{op_name})"),
                                     name=f"Cut_sum_latencyTransfer_({acc.mem2dict(m)},{op_name})")
 
+        # ─── L3: Critical(i) — 单次稳态迭代瓶颈 ───────────────────────────────────────────────────────────────────
         for i in range(Num_Loops):
-            model.addConstr(latency_Critical[i] >= latency_ChildTime[i], name=f"C_latency_cp_child_({i})")
+            model.addConstr(latency_Critical[i] >= latency_Body[i], name=f"C_latency_cp_child_({i})")
             for op, op_name in enumerate(['I','W','O']):
-
-                tmp_coeff = 2 if op_name == 'O' else 1
-
-                model.addConstr(latency_Critical[i] >= tmp_coeff * latency_Transfer[i,op], name=f"C_latency_cp_transfer_({i},{op_name})")
+                coeff_rw = 2 if op == 2 else 1
+                # 双缓冲：Transfer 与 Body 并行 → 瓶颈取 max
+                model.addConstr(latency_Critical[i] >= coeff_rw * latency_Transfer[i,op], name=f"C_latency_cp_transfer_({i},{op_name})")
+                # 单缓冲：Transfer 与 Body 串行 → 瓶颈取 sum
                 model.addGenConstrIndicator(indic_doubleLoop[i,op], False,
-                                latency_Critical[i] >= tmp_coeff * latency_Transfer[i,op] + latency_ChildTime[i],
+                                latency_Critical[i] >= coeff_rw * latency_Transfer[i,op] + latency_Body[i],
                                  name=f"C_latency_cp_transfer+child_({i},{op_name})")
 
+        # ─── L4: Process(i,λ) = c(λ)×Transfer + child + (F(i)−1)×Critical ─────────────────────────────────────────
         for i in range(Num_Loops):
-
-            tmp_LxF_expr = quicksum(((UNIQUE_FACTOR[p]-1) * var_mul01(model, indic_loop2Factor[i,p], latency_Critical[i],
-                                                                    name=f"tmp_LxF_expr_({i},{p})"))
-                                     for p in range(len(UNIQUE_FACTOR)))
-
             for op, op_name in enumerate(['I','W','O']):
-                if op < 2:      # I,W
-                    model.addConstr(latency_Process[i,op] >= latency_Transfer[i,op]+latency_Process[i+1,op]+tmp_LxF_expr,
-                                     name=f"C_latency_process_({i},{op_name})")
-                else:           # O
-                    model.addConstr(latency_Process[i,op] >= 2*latency_Transfer[i,op]+latency_Process[i+1,op]+tmp_LxF_expr,
-                                     name=f"C_latency_process_({i},{op_name})")
+                coeff_rw = 2 if op == 2 else 1
+                for p in range(len(UNIQUE_FACTOR)):
+                    model.addGenConstrIndicator(indic_loop2Factor[i,p], True,
+                        latency_Process[i,op] >= coeff_rw * latency_Transfer[i,op] + latency_Process[i+1,op]
+                                                  + (UNIQUE_FACTOR[p] - 1) * latency_Critical[i],
+                        name=f"C_latency_process_LxF_({i},{op_name},{p})")
 
                 model.addConstr(latency_Process[i,op] >= 2 * latency_Process[i+1,op], name=f"Cut_Hierarchical_Decay_({i},{op_name})")
 
         model.addConstr(latency_Process[0,2] >= MIN_INNER_PROD[0] * t_MAC +
                         quicksum(2 * MIN_OUTER_PROD[i] * latency_Transfer[i,2] for i in range(Num_Loops)),
                          name="Cut_Output_Transfer_Cascade")
-                    
-# - - - - - - - - - - - - - - - - - - - - - - - - Dataflow Evaluation Results - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -#          
-        # Cross-operand startup: first MAC waits for the slowest operand's
-        # bootstrap (DRAM→firstMem) + PR cascade (per-tile through all levels).
-        bootstrap_read = {}
-        sum_transfer_op = {}
+
+        # ─── L5-L6: MaxStartup & res_latency ───────────────────────────────────────────────────────────────────────
+        latency_BootstrapRead = {}
+        latency_SumTransfer = {}
         for op, op_name in enumerate(['I','W','O']):
-            bootstrap_read[op] = MAX_SIZE[op] * worst_prec(acc.Dram2mem, op) / acc.bw[acc.Dram2mem] / CONST.SCALE_LATENCY
-            sum_transfer_op[op] = quicksum(latency_Transfer[i,op] for i in range(Num_Loops))
+            latency_BootstrapRead[op] = MAX_SIZE[op] * worst_prec(acc.Dram2mem, op) / acc.bw[acc.Dram2mem] / CONST.SCALE_LATENCY
+            latency_SumTransfer[op] = quicksum(latency_Transfer[i,op] for i in range(Num_Loops))
 
         latency_MaxStartup = model.addVar(lb=0, ub=UB_latencyLevel[0], vtype=GRB.CONTINUOUS, name="latency_MaxStartup")
         for op, op_name in enumerate(['I','W','O']):
-            model.addConstr(latency_MaxStartup >= bootstrap_read[op] * (1 - indic_loop2Mem[0,op,acc.Dram2mem])
-                                                  + sum_transfer_op[op],
+            model.addConstr(latency_MaxStartup >= latency_BootstrapRead[op] * (1 - indic_loop2Mem[0,op,acc.Dram2mem])
+                                                  + latency_SumTransfer[op],
                             name=f"C_MaxStartup_{op_name}")
 
-        # Total latency: max_startup offsets each operand's pipeline.
-        # O always dominates (has extra WB teardown), but add all three for soundness.
         for op, op_name in enumerate(['I','W','O']):
-            bootstrap_write = bootstrap_read[op] * (1 - indic_loop2Mem[0,op,acc.Dram2mem]) if op == 2 else 0
-            model.addConstr(res_latency >= latency_MaxStartup - sum_transfer_op[op]
-                                           + latency_Process[0,op] + bootstrap_write,
+            latency_BootstrapWrite = latency_BootstrapRead[op] * (1 - indic_loop2Mem[0,op,acc.Dram2mem]) if op == 2 else 0
+            model.addConstr(res_latency >= latency_MaxStartup - latency_SumTransfer[op]
+                                           + latency_Process[0,op] + latency_BootstrapWrite,
                              name=f"C_Res_Latency_CrossOp_({op_name})")
 
         model.addConstr(res_energy >= energy_expr_rw + energy_expr_comp + energy_expr_leakage, name="C_Res_Energy_Summation")

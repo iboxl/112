@@ -67,7 +67,7 @@ def solve_scheme_worker(count:int, origin_index:int, scheme, acc:CIM_Acc, ops:Wo
         has_solution = solver.model is not None and solver.model.SolCount > 0
         if has_solution:
             if FLAG.SIMU:
-                simu = tranSimulator(acc=acc, ops=ops, dataflow=solver.dataflow)
+                simu = tranSimulator(acc=acc, ops=ops, dataflow=solver.dataflow, DEBUG_SIMU=FLAG.DEBUG_SIMU)
                 sim_l, sim_e = simu.run()
                 profile = simu.PD
             else:
