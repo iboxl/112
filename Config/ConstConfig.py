@@ -9,7 +9,7 @@ class _const_num_config():
         
         self.FLAG_OPT = "Feasible"
 
-        self.MIPFOCUS = 2                               # MIPFocus: 0=balanced, 1=feasibility, 2=optimality, 3=best bound
+        self.MIPFOCUS = 1                               # MIPFocus: 0=balanced, 1=feasibility, 2=optimality, 3=best bound
 
         self.WEIGHT_LATENCY = 0.8
 

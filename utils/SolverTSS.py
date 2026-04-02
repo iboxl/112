@@ -54,10 +54,9 @@ class Solver():
         self.model.setParam('Cuts', -1)
         self.model.setParam('Presolve', 2)
         self.model.setParam('Heuristics', 0.25)
-        self.model.setParam("ScaleFlag", 2)
-
         self.model.setParam("ScaleFlag", 2)                          # 用于调节数值比例问题coefficient range
         self.model.setParam("NumericFocus", 1)
+        self.model.setParam("Symmetry", 2)                           # 自动对称检测+破坏
         # self.model.setParam('MIPGap', 0.03)
 
         self.model.setParam('FeasibilityTol', 1e-6)
@@ -504,17 +503,38 @@ class Solver():
                 model.addConstr(quicksum(indic_xMem[i,op] for i in range(Num_Loops)) >= _sum_used - 1,
                                 name=f"min_xMem_from_usedMem_{op_name}")
 
-        # SOS1 declarations for branching quality
+        # SOS1 declarations: guide Gurobi to use efficient SOS branching on "exactly-one" indicator groups.
+        # Not a constraint (already implied by Σ=1 + binary), but changes branching from linear to log depth.
         for i in range(Num_Loops):
-            _sos_vars = [indic_loop2Factor[i,p] for p in range(len(UNIQUE_FACTOR)) if isinstance(indic_loop2Factor.get((i,p), 0), gp.Var)]
-            if len(_sos_vars) > 1:
-                model.addSOS(GRB.SOS_TYPE1, _sos_vars)
+            _s = [indic_loop2Factor[i,p] for p in range(len(UNIQUE_FACTOR)) if isinstance(indic_loop2Factor.get((i,p), 0), gp.Var)]
+            if len(_s) > 1: model.addSOS(GRB.SOS_TYPE1, _s)
         for d in range(1, ops.Num_dim):
             if factors[d] == [1]: continue
             for f in range(len(factors[d])):
-                _sos_vars = [indic_factor2Loop[d,f,i] for i in range(Num_Loops) if isinstance(indic_factor2Loop.get((d,f,i), 0), gp.Var)]
-                if len(_sos_vars) > 1:
-                    model.addSOS(GRB.SOS_TYPE1, _sos_vars)
+                _s = [indic_factor2Loop[d,f,i] for i in range(Num_Loops) if isinstance(indic_factor2Loop.get((d,f,i), 0), gp.Var)]
+                if len(_s) > 1: model.addSOS(GRB.SOS_TYPE1, _s)
+            for f in range(len(factors[d])):
+                for op in range(3):
+                    _s = [indic_factor2Mem[d,f,op,m] for m in range(1, acc.Num_mem) if isinstance(indic_factor2Mem.get((d,f,op,m), 0), gp.Var)]
+                    if len(_s) > 1: model.addSOS(GRB.SOS_TYPE1, _s)
+        for i in range(Num_Loops):
+            for op in range(3):
+                _s = [indic_loop2Mem[i,op,m] for m in range(1, acc.Num_mem) if isinstance(indic_loop2Mem.get((i,op,m), 0), gp.Var)]
+                if len(_s) > 1: model.addSOS(GRB.SOS_TYPE1, _s)
+
+        # Branch priority: resolve factor assignment (combinatorial core) first,
+        # then memory assignment. Once both are fixed, remaining continuous/buffer decisions are trivial.
+        for d in range(1, ops.Num_dim):
+            if factors[d] == [1]: continue
+            for f in range(len(factors[d])):
+                for i in range(Num_Loops):
+                    v = indic_factor2Loop.get((d,f,i), None)
+                    if isinstance(v, gp.Var): v.BranchPriority = 100
+        for i in range(Num_Loops):
+            for op in range(3):
+                for m in range(1, acc.Num_mem):
+                    v = indic_loop2Mem.get((i,op,m), None)
+                    if isinstance(v, gp.Var): v.BranchPriority = 50
 
         ####################################################################  Capacity Constraints   #######################################################################
 
