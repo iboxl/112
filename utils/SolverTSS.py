@@ -138,10 +138,26 @@ class Solver():
         if CONST.FLAG_OPT == "Latency" and self.metric_ub is not None:
             UB_latencySimple = min(UB_latencySimple, self.metric_ub / CONST.SCALE_LATENCY)
         UB_latencySimple = max(UB_latencySimple, LAT_UNIT)
+        _f_max = max(UNIQUE_FACTOR) if UNIQUE_FACTOR else 2
+        _UB_P = [0] * (Num_Loops + 1)
+        _UB_P[Num_Loops] = t_MAC
+        for _i in range(Num_Loops - 1, -1, -1):
+            _UB_P[_i] = _f_max * (2 * MAX_STAGE_TRANSFER + _UB_P[_i + 1])
         UB_latencyLevel = {
-            i: max(UB_latencySimple / math.pow(2, i), max(t_MAC, LAT_UNIT))
+            i: max(min(UB_latencySimple, _UB_P[i]), max(t_MAC, LAT_UNIT))
             for i in range(Num_Loops)
         }
+
+        LB_Process = [0] * (Num_Loops + 1)
+        LB_Process[Num_Loops] = t_MAC
+        for _i in range(Num_Loops - 1, -1, -1):
+            LB_Process[_i] = MIN_INNER_PROD[_i] * t_MAC
+
+        # Critical[i] ≤ c_max*Transfer + Body ≤ 2*MAX_STAGE + UB_Process[i+1], much tighter than UB_Process[i]
+        UB_Critical = {}
+        for _i in range(Num_Loops):
+            _ub_child = UB_latencyLevel[_i + 1] if _i + 1 < Num_Loops else t_MAC
+            UB_Critical[_i] = 2 * MAX_STAGE_TRANSFER + _ub_child
 
         spur = {}
         UB_dataVolume, UB_lg_dataVolume = {}, {}
@@ -482,7 +498,24 @@ class Solver():
                     # CIM inherent mapping constraint
 
             model.addConstr(quicksum(indic_xMem[i,op] for i in range(Num_Loops)) <= XMAX_TOTAL[op], name=f"max_xMem_{op_name}")
-        
+            # Valid inequality: #xMem boundaries >= #used_memory_levels - 1
+            _sum_used = quicksum(indic_usedMem[m,op] for m in range(1, acc.Num_mem) if acc.mappingArray[op][m])
+            if Num_Loops > 1:
+                model.addConstr(quicksum(indic_xMem[i,op] for i in range(Num_Loops)) >= _sum_used - 1,
+                                name=f"min_xMem_from_usedMem_{op_name}")
+
+        # SOS1 declarations for branching quality
+        for i in range(Num_Loops):
+            _sos_vars = [indic_loop2Factor[i,p] for p in range(len(UNIQUE_FACTOR)) if isinstance(indic_loop2Factor.get((i,p), 0), gp.Var)]
+            if len(_sos_vars) > 1:
+                model.addSOS(GRB.SOS_TYPE1, _sos_vars)
+        for d in range(1, ops.Num_dim):
+            if factors[d] == [1]: continue
+            for f in range(len(factors[d])):
+                _sos_vars = [indic_factor2Loop[d,f,i] for i in range(Num_Loops) if isinstance(indic_factor2Loop.get((d,f,i), 0), gp.Var)]
+                if len(_sos_vars) > 1:
+                    model.addSOS(GRB.SOS_TYPE1, _sos_vars)
+
         ####################################################################  Capacity Constraints   #######################################################################
 
         lg_dimExistMem = gp.tupledict()         # lg_dimExistMem[m,op,d] = dimSize
@@ -806,6 +839,39 @@ class Solver():
                 count_ReadOut[m,op] = count_expr_readOut
                 count_WriteIn[m,op] = count_expr_writeIn
        
+        # ─── Precompute energy upper bounds for tighter PWL approximation ───
+        _max_lg_factor_count = sum(logF[d, f]
+                                    for d in range(1, ops.Num_dim)
+                                    for f in range(len(factors[d]))
+                                    if factors[d] != [1])
+        UB_lg_energy, UB_exp_energy, UB_energy_perMem = {}, {}, {}
+        for _m in range(1, acc.Num_mem):
+            for _op, _opn in enumerate(['I', 'W', 'O']):
+                if acc.mappingArray[_op][_m] == 0:
+                    continue
+                _spatial_lg = sum(math.log(self.su[u][d])
+                                  for d in range(1, ops.Num_dim)
+                                  for u in range(acc.Num_SpUr)
+                                  if _m > acc.SpUr2Mem[u, _op])
+                _ub_count = _max_lg_factor_count + _spatial_lg
+                _lg_prec_ub = math.log(worst_prec(_m, _op))
+                _can_read = _m not in [acc.IReg2mem, acc.OReg2mem, acc.Macro2mem] and acc.cost_r[_m] > 0
+                _can_write = _m > 1
+                _ub_sum = 0
+                if _can_read:
+                    _v = math.log(acc.cost_r[_m]) + _lg_prec_ub + _ub_count + UB_lg_transVolume[_m, _op]
+                    UB_lg_energy[_m, _op, 'r2L'] = _v; UB_exp_energy[_m, _op, 'r2L'] = math.exp(_v); _ub_sum += math.exp(_v)
+                if _can_write:
+                    _v = math.log(max(acc.cost_w[_m], 1e-30)) + _lg_prec_ub + _ub_count + UB_lg_dataVolume[_m, _op]
+                    UB_lg_energy[_m, _op, 'w2L'] = _v; UB_exp_energy[_m, _op, 'w2L'] = math.exp(_v); _ub_sum += math.exp(_v)
+                if _opn == 'O' and _can_read and _m > acc.Dram2mem:
+                    _v = math.log(acc.cost_r[_m]) + math.log(acc.precision_psum) + _ub_count + UB_lg_dataVolume[_m, _op]
+                    UB_lg_energy[_m, _op, 'r2H'] = _v; UB_exp_energy[_m, _op, 'r2H'] = math.exp(_v); _ub_sum += math.exp(_v)
+                if _opn == 'O':
+                    _v = math.log(max(acc.cost_w[_m], 1e-30)) + math.log(acc.precision_psum) + _ub_count + UB_lg_transVolume[_m, _op]
+                    UB_lg_energy[_m, _op, 'w2H'] = _v; UB_exp_energy[_m, _op, 'w2H'] = math.exp(_v); _ub_sum += math.exp(_v)
+                UB_energy_perMem[_m, _op] = max(_ub_sum, 1.0)
+
         energy_perMem = gp.tupledict()
         lg_transEnergy_r2L, lg_transEnergy_w2L = gp.tupledict(), gp.tupledict()
         lg_transEnergy_r2H, lg_transEnergy_w2H = gp.tupledict(), gp.tupledict()
@@ -821,40 +887,40 @@ class Solver():
 
                 # 1) Base read-out energy of this memory level.
                 if can_read:
-                    lg_transEnergy_r2L[m,op] = model.addVar(lb=LB_lg_transEnergy, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name=f"lg_transEnergy_r2L_({acc.mem2dict(m)},{op_name})")
+                    lg_transEnergy_r2L[m,op] = model.addVar(lb=LB_lg_transEnergy, ub=UB_lg_energy[m,op,'r2L'], vtype=GRB.CONTINUOUS, name=f"lg_transEnergy_r2L_({acc.mem2dict(m)},{op_name})")
                     prec_term_r2l = lg_prec_O(m) if op_name == 'O' else math.log(acc.precision[m,op])
                     model.addConstr(lg_transEnergy_r2L[m,op] == math.log(acc.cost_r[m]) + prec_term_r2l + count_expr_readOut + lg_transVolume[m,op],
                                     name=f"C_lg_transEnergy_r2L_({acc.mem2dict(m)},{op_name})")
-                    
-                    tmp_energy_expr += var_exp(model=model, lg_term=lg_transEnergy_r2L[m,op], lb=0, ub=GRB.INFINITY, name=f"transEnergy_r2L_({acc.mem2dict(m)},{op_name})")
+
+                    tmp_energy_expr += var_exp(model=model, lg_term=lg_transEnergy_r2L[m,op], lb=0, ub=UB_exp_energy[m,op,'r2L'], name=f"transEnergy_r2L_({acc.mem2dict(m)},{op_name})")
 
                 # 2) Base write-in energy of this memory level.
                 if can_write:
-                    lg_transEnergy_w2L[m,op] = model.addVar(lb=LB_lg_transEnergy, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name=f"lg_transEnergy_w2L_({acc.mem2dict(m)},{op_name})")
+                    lg_transEnergy_w2L[m,op] = model.addVar(lb=LB_lg_transEnergy, ub=UB_lg_energy[m,op,'w2L'], vtype=GRB.CONTINUOUS, name=f"lg_transEnergy_w2L_({acc.mem2dict(m)},{op_name})")
                     prec_term_w2l = lg_prec_O(m) if op_name == 'O' else math.log(acc.precision[m,op])
                     model.addConstr(lg_transEnergy_w2L[m,op] == math.log(acc.cost_w[m]) + prec_term_w2l + count_expr_writeIn + lg_dataVolume[m,op],
                                      name=f"C_lg_transEnergy_w2L_({acc.mem2dict(m)},{op_name})")
-                    
-                    tmp_energy_expr += var_exp(model=model, lg_term=lg_transEnergy_w2L[m,op], lb=0, ub=GRB.INFINITY, name=f"transEnergy_w2L_({acc.mem2dict(m)},{op_name})")
+
+                    tmp_energy_expr += var_exp(model=model, lg_term=lg_transEnergy_w2L[m,op], lb=0, ub=UB_exp_energy[m,op,'w2L'], name=f"transEnergy_w2L_({acc.mem2dict(m)},{op_name})")
 
                 # 3) Output readout for sending upstream memory hierarchy.
                 # output往里面写多少次就要读多少次写回 ⬆
                 if op_name == 'O' and can_read and m > acc.Dram2mem:
-                    lg_transEnergy_r2H[m,op] = model.addVar(lb=LB_lg_transEnergy, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name=f"lg_transEnergy_r2H_({acc.mem2dict(m)},{op_name})")
+                    lg_transEnergy_r2H[m,op] = model.addVar(lb=LB_lg_transEnergy, ub=UB_lg_energy[m,op,'r2H'], vtype=GRB.CONTINUOUS, name=f"lg_transEnergy_r2H_({acc.mem2dict(m)},{op_name})")
                     model.addConstr(lg_transEnergy_r2H[m,op] == math.log(acc.cost_r[m]) + lg_prec_O(m) + count_expr_writeIn + lg_dataVolume[m,op],
                                      name=f"C_lg_transEnergy_r2H_({acc.mem2dict(m)},{op_name})")
-                    
-                    tmp_energy_expr += var_exp(model=model, lg_term=lg_transEnergy_r2H[m,op], lb=0, ub=GRB.INFINITY, name=f"transEnergy_r2H_({acc.mem2dict(m)},{op_name})")
+
+                    tmp_energy_expr += var_exp(model=model, lg_term=lg_transEnergy_r2H[m,op], lb=0, ub=UB_exp_energy[m,op,'r2H'], name=f"transEnergy_r2H_({acc.mem2dict(m)},{op_name})")
 
                 # 4) Output write-back energy when this level sends output upward.
                 if op_name == 'O':
-                    lg_transEnergy_w2H[m,op] = model.addVar(lb=LB_lg_transEnergy, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name=f"lg_transEnergy_w2H_({acc.mem2dict(m)},{op_name})")
+                    lg_transEnergy_w2H[m,op] = model.addVar(lb=LB_lg_transEnergy, ub=UB_lg_energy[m,op,'w2H'], vtype=GRB.CONTINUOUS, name=f"lg_transEnergy_w2H_({acc.mem2dict(m)},{op_name})")
                     model.addConstr(lg_transEnergy_w2H[m,op] == math.log(acc.cost_w[m]) + lg_prec_O(m) + count_expr_readOut + lg_transVolume[m,op],
                                      name=f"C_lg_transEnergy_w2H_({acc.mem2dict(m)},{op_name})")
-                    
-                    tmp_energy_expr += var_exp(model=model, lg_term=lg_transEnergy_w2H[m,op], lb=0, ub=GRB.INFINITY, name=f"transEnergy_w2H_({acc.mem2dict(m)},{op_name})")
 
-                energy_perMem[m,op] = model.addVar(lb=0, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name=f"energy_perMem_({acc.mem2dict(m)},{op_name})")
+                    tmp_energy_expr += var_exp(model=model, lg_term=lg_transEnergy_w2H[m,op], lb=0, ub=UB_exp_energy[m,op,'w2H'], name=f"transEnergy_w2H_({acc.mem2dict(m)},{op_name})")
+
+                energy_perMem[m,op] = model.addVar(lb=0, ub=UB_energy_perMem[m,op], vtype=GRB.CONTINUOUS, name=f"energy_perMem_({acc.mem2dict(m)},{op_name})")
                 model.addConstr(energy_perMem[m,op] == tmp_energy_expr, name=f"C_energy_perMem_({acc.mem2dict(m)},{op_name})")
 
         energy_expr_rw, energy_usedMem = 0, gp.tupledict()
@@ -865,14 +931,9 @@ class Solver():
                 if m in [acc.Dram2mem, acc.IReg2mem, acc.OReg2mem]:
                     energy_expr_rw += energy_perMem[m,op]
                 else:
-                    energy_usedMem[m,op] = model.addVar(lb=0, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS,
-                                                        name=f"energy_usedMem_({acc.mem2dict(m)},{op_name})")
-                    model.addGenConstrIndicator(indic_usedMem[m,op], False, energy_usedMem[m,op] == 0,
-                                                 name=f"C_energy_usedMem_false_({acc.mem2dict(m)},{op_name})")
-                    model.addGenConstrIndicator(indic_usedMem[m,op], True, energy_usedMem[m,op] == energy_perMem[m,op],
-                                                 name=f"C_energy_usedMem_true_({acc.mem2dict(m)},{op_name})")
-                    # energy_usedMem[m,op] = var_mul01(model, indic_usedMem[m,op], energy_perMem[m,op],
-                    #                                   name=f"energy_usedMem_({acc.mem2dict(m)},{op_name})")
+                    energy_usedMem[m,op] = var_mul01(model, indic_usedMem[m,op], energy_perMem[m,op],
+                                                      A_ub=UB_energy_perMem[m,op],
+                                                      name=f"energy_usedMem_({acc.mem2dict(m)},{op_name})")
                     energy_expr_rw += energy_usedMem[m,op]
 
         # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -#                 
@@ -890,7 +951,6 @@ class Solver():
         # ══════════════════════════════════════════════════════════════════════════════════════════════════════════════#
 
         # ─── L0: Per-Memory 传输代价  Trans(m,λ) = max(rawTrans, 1 cycle) ───────────────────────────────────────────
-        transfer = gp.tupledict()                           # transfer[i,op]  — per-level 传输（xMem 门控前）
         transLatency = gp.tupledict()                       # transLatency[m,op] — per-memory 传输延迟
         for op, op_name in enumerate(['I','W','O']):
             for m in range(1, acc.Num_mem):
@@ -913,7 +973,7 @@ class Solver():
 
             # Reg bypass: CIM 位串行要求数据经 Reg 串转并。Reg 被 bypass 时每次传输 +1 cycle。
             # 嵌入 EffTrans 使所有映射到该 memory 的 level 自动继承。
-            effectiveTransLatency = gp.tupledict()
+            if op == 0: effectiveTransLatency = gp.tupledict()
             for m in range(1, acc.Num_mem):
                 if acc.mappingArray[op][m]:
                     bp = model.addVar(vtype=GRB.BINARY, name=f"indic_regBypass_({acc.mem2dict(m)},{op_name})")
@@ -925,35 +985,38 @@ class Solver():
                 else:
                     effectiveTransLatency[m,op] = 0
 
-            # transfer[i,op] = Σ_m loop2Mem(i,λ,m) × EffTrans(m,λ)
-            UB_effectiveTransfer = self.MAX_TRANS[op] + LAT_UNIT
-            for i in range(Num_Loops):
-                transfer[i,op] = model.addVar(lb=0, ub=UB_effectiveTransfer, vtype=GRB.CONTINUOUS, name=f"transfer_({i},{op_name})")
-                model.addConstr(transfer[i,op]==quicksum(var_mul01(model, indic_loop2Mem[i,op,m], effectiveTransLatency[m,op],
-                                                                    A_ub=UB_effectiveTransfer, var_ub=UB_effectiveTransfer,
-                                                                    name=f"tmp_transfer_({i},{op_name})_{acc.mem2dict(m)}")
-                                                         for m in range(1, acc.Num_mem) if acc.mappingArray[op][m]),
-                                 name=f"C_transfer_({i},{op_name})")
-
-        # ─── L1: Per-Level Transfer(i,λ) = xMem × transfer ─────────────────────────────────────────────────────────
+        # ─── L1: Per-Memory Transfer — Transfer(i,λ) = Σ_m (loop2Mem AND xMem) × EffTrans(m) ───────────────────────
+        # Per-memory big-M replaces global MAX_TRANS, eliminating 200-50000× looseness for inner memories.
         latency_Critical = gp.tupledict()
         latency_Process = gp.tupledict()
         latency_Transfer = gp.tupledict()
         latency_Body = gp.tupledict()
         for i in range(Num_Loops):
-            latency_Critical[i] = model.addVar(lb=0, ub=UB_latencyLevel[i], vtype=GRB.CONTINUOUS, name=f"latency_Critical_({i})")
+            latency_Critical[i] = model.addVar(lb=LB_Process[i+1], ub=UB_Critical[i], vtype=GRB.CONTINUOUS, name=f"latency_Critical_({i})")
             for op, op_name in enumerate(['I','W','O']):
-                latency_Process[i,op] = model.addVar(lb=0, ub=UB_latencyLevel[i], vtype=GRB.CONTINUOUS, name=f"latency_Process_({i},{op_name})")
+                latency_Process[i,op] = model.addVar(lb=LB_Process[i], ub=UB_latencyLevel[i], vtype=GRB.CONTINUOUS, name=f"latency_Process_({i},{op_name})")
 
-                # xMem 门控：stationary 操作数（xMem=0）无传输开销
-                latency_Transfer[i,op] = var_mul01(model, indic_xMem[i, op], transfer[i, op], A_ub=self.MAX_TRANS[op]+LAT_UNIT, var_ub=self.MAX_TRANS[op]+LAT_UNIT,
-                                                    name=f"latency_Transfer_({i},{op_name})")
+                # Per-memory McCormick: active = loop2Mem AND xMem; Transfer = Σ active × EffTrans
+                _contrib = 0
+                for m in range(1, acc.Num_mem):
+                    if acc.mappingArray[op][m]:
+                        _active = var_AandB(model, indic_loop2Mem[i,op,m], indic_xMem[i,op],
+                                             name=f"active_Transfer_({i},{op_name},{acc.mem2dict(m)})")
+                        _ub_eff_m = max(UB_transLatency[m,op], LAT_UNIT) + LAT_UNIT
+                        _contrib += var_mul01(model, _active, effectiveTransLatency[m,op],
+                                               A_ub=_ub_eff_m, var_ub=_ub_eff_m,
+                                               name=f"latency_Transfer_c_({i},{op_name},{acc.mem2dict(m)})")
+                latency_Transfer[i,op] = model.addVar(lb=0, ub=self.MAX_TRANS[op]+LAT_UNIT,
+                                                       vtype=GRB.CONTINUOUS, name=f"latency_Transfer_({i},{op_name})")
+                model.addConstr(latency_Transfer[i,op] == _contrib,
+                                name=f"C_latency_Transfer_({i},{op_name})")
                 if i == Num_Loops-1:
                     latency_Process[Num_Loops,op] = t_MAC
 
         # ─── L2: Body(i) = max_λ { Process(i+1,λ) − dbl_overlap } ────────────────────────────────────────────
         for i in range(Num_Loops):
-            latency_Body[i] = model.addVar(lb=0, ub=UB_latencyLevel[i], vtype=GRB.CONTINUOUS, name=f"latency_Body_({i})")
+            _ub_body = UB_latencyLevel[i + 1] if i + 1 < Num_Loops else t_MAC
+            latency_Body[i] = model.addVar(lb=LB_Process[i+1], ub=_ub_body, vtype=GRB.CONTINUOUS, name=f"latency_Body_({i})")
             for op, op_name in enumerate(['I','W','O']):
                 if i < Num_Loops - 1 and op < 2:   # I/W 双缓冲时首迭代传输与父级流水重叠
                     indic_dblOverlap = var_mul01(model, indic_doubleLoop[i+1,op], latency_Transfer[i+1,op],
@@ -981,26 +1044,53 @@ class Solver():
                 coeff_rw = 2 if op == 2 else 1
                 # 双缓冲：Transfer 与 Body 并行 → 瓶颈取 max
                 model.addConstr(latency_Critical[i] >= coeff_rw * latency_Transfer[i,op], name=f"C_latency_cp_transfer_({i},{op_name})")
-                # 单缓冲：Transfer 与 Body 串行 → 瓶颈取 sum
-                model.addGenConstrIndicator(indic_doubleLoop[i,op], False,
-                                latency_Critical[i] >= coeff_rw * latency_Transfer[i,op] + latency_Body[i],
+                # 单缓冲：Transfer 与 Body 串行 → 瓶颈取 sum (tight big-M: M = max possible c*Transfer)
+                _M_tight = coeff_rw * (self.MAX_TRANS[op] + LAT_UNIT)
+                model.addConstr(latency_Critical[i] >= coeff_rw * latency_Transfer[i,op] + latency_Body[i]
+                                - _M_tight * indic_doubleLoop[i,op],
                                  name=f"C_latency_cp_transfer+child_({i},{op_name})")
 
         # ─── L4: Process(i,λ) = c(λ)×Transfer + child + (F(i)−1)×Critical ─────────────────────────────────────────
+        # McCormick envelope: Z_crit[i,p] = indic_loop2Factor[i,p] × Critical[i]
+        # Produces convex-hull LP relaxation instead of indicator big-M
+        Z_crit = {}
+        for i in range(Num_Loops):
+            _UB_C = UB_Critical[i]
+            for p in range(len(UNIQUE_FACTOR)):
+                Z_crit[i, p] = model.addVar(lb=0, ub=_UB_C, vtype=GRB.CONTINUOUS,
+                                             name=f"Z_crit_({i},{p})")
+                model.addConstr(Z_crit[i, p] <= _UB_C * indic_loop2Factor[i, p],
+                                name=f"C_McCormick_Z_ub1_({i},{p})")
+                model.addConstr(Z_crit[i, p] >= latency_Critical[i] - _UB_C * (1 - indic_loop2Factor[i, p]),
+                                name=f"C_McCormick_Z_lb1_({i},{p})")
+                model.addConstr(Z_crit[i, p] <= latency_Critical[i],
+                                name=f"C_McCormick_Z_ub2_({i},{p})")
+
         for i in range(Num_Loops):
             for op, op_name in enumerate(['I','W','O']):
                 coeff_rw = 2 if op == 2 else 1
-                for p in range(len(UNIQUE_FACTOR)):
-                    model.addGenConstrIndicator(indic_loop2Factor[i,p], True,
-                        latency_Process[i,op] >= coeff_rw * latency_Transfer[i,op] + latency_Process[i+1,op]
-                                                  + (UNIQUE_FACTOR[p] - 1) * latency_Critical[i],
-                        name=f"C_latency_process_LxF_({i},{op_name},{p})")
+                model.addConstr(
+                    latency_Process[i, op] >= coeff_rw * latency_Transfer[i, op]
+                        + latency_Process[i + 1, op]
+                        + quicksum((UNIQUE_FACTOR[p] - 1) * Z_crit[i, p]
+                                   for p in range(len(UNIQUE_FACTOR))),
+                    name=f"C_latency_process_McCormick_({i},{op_name})")
 
-                model.addConstr(latency_Process[i,op] >= 2 * latency_Process[i+1,op], name=f"Cut_Hierarchical_Decay_({i},{op_name})")
+                # Cut: valid hierarchical decay bound
+                if op == 2:  # O: always valid since Body >= Process[i+1,O] (no dbl subtraction)
+                    model.addConstr(latency_Process[i, op] >= 2 * latency_Process[i + 1, op],
+                                    name=f"Cut_Hierarchical_Decay_({i},{op_name})")
+                else:  # I/W: weaker but always valid (dbl_overlap may invalidate 2× bound)
+                    model.addConstr(latency_Process[i, op] >= latency_Process[i + 1, op] + LB_Process[i + 1],
+                                    name=f"Cut_Hierarchical_Decay_({i},{op_name})")
 
-        model.addConstr(latency_Process[0,2] >= MIN_INNER_PROD[0] * t_MAC +
-                        quicksum(2 * MIN_OUTER_PROD[i] * latency_Transfer[i,2] for i in range(Num_Loops)),
-                         name="Cut_Output_Transfer_Cascade")
+        # Cut: Transfer cascade bounds for all operands
+        for op, op_name in enumerate(['I','W','O']):
+            coeff_rw = 2 if op == 2 else 1
+            model.addConstr(latency_Process[0, op] >= MIN_INNER_PROD[0] * t_MAC
+                            + quicksum(coeff_rw * MIN_OUTER_PROD[i] * latency_Transfer[i, op]
+                                       for i in range(Num_Loops)),
+                            name=f"Cut_Transfer_Cascade_({op_name})")
 
         # ─── L5-L6: MaxStartup & res_latency ───────────────────────────────────────────────────────────────────────
         latency_BootstrapRead = {}
@@ -1020,6 +1110,13 @@ class Solver():
             model.addConstr(res_latency >= latency_MaxStartup - latency_SumTransfer[op]
                                            + latency_Process[0,op] + latency_BootstrapWrite,
                              name=f"C_Res_Latency_CrossOp_({op_name})")
+
+        # ─── Hardware-prior valid inequalities ────────────────────────────────────────────────────────────────────
+        # Cut: DRAM bandwidth lower bound on res_latency (all data must pass through DRAM)
+        for op, op_name in enumerate(['I','W','O']):
+            coeff_rw = 2 if op == 2 else 1
+            _dram_time = coeff_rw * MAX_SIZE[op] * worst_prec(acc.Dram2mem, op) / acc.bw[acc.Dram2mem] / CONST.SCALE_LATENCY
+            model.addConstr(res_latency >= _dram_time, name=f"Cut_DRAM_BW_({op_name})")
 
         model.addConstr(res_energy >= energy_expr_rw + energy_expr_comp + energy_expr_leakage, name="C_Res_Energy_Summation")
         if CONST.FLAG_OPT == "EDP":

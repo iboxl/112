@@ -9,7 +9,7 @@ class _const_num_config():
         
         self.FLAG_OPT = "Feasible"
 
-        self.MIPFOCUS = 1                               # MIPFocus: 0=balanced, 1=feasibility, 2=optimality, 3=best bound
+        self.MIPFOCUS = 2                               # MIPFocus: 0=balanced, 1=feasibility, 2=optimality, 3=best bound
 
         self.WEIGHT_LATENCY = 0.8
 
@@ -37,7 +37,7 @@ class _const_num_config():
 
         self.EPS = 1e-5
 
-        self.ExpOption = "FuncPieces=-2 FuncPieceError=0.01"
+        self.ExpOption = "FuncPieces=-2 FuncPieceError=0.001"
 
 class _constraint_flag_config():
     def __init__(self):
