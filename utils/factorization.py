@@ -154,15 +154,16 @@ def flexible_factorization(N: int) -> list[int]:
     Parameters
     ----------
     N : int
-        Dimension size (>1).
+        Dimension size (positive integer; N<=1 returns [N]).
 
     Returns
     -------
     list[int]
         Ascending factor list whose product = N.
-        • 因子数量被压到最少 (≥2)；  
-        • 对 1-3 级循环的尺寸覆盖度 ≥ 90 % 的理论上限；  
-        • 无需任何调参，结果确定且可重复。
+        • Tile-size set T(F) = D(N) preserved by hard constraint;
+        • Multi-level tiling configurations C_k(F) = C_k(P) preserved (HC-score zero-loss);
+        • Factor count minimized subject to the above two invariants;
+        • Deterministic and reproducible.
     """
 
     if N <= 1:
@@ -215,26 +216,35 @@ def flexible_factorization(N: int) -> list[int]:
 
     hc_full = hc_score(tuple(factors))   # 理论满分
 
-    # ── 3. 贪婪合并：每步尽量少损失 HC ─────────────────────────
-    LOSS_LIMIT = 0.10      # 每次合并若使 HC 下降超过 10 %·hc_full 就停止
-    MIN_FACTORS = 2        # 至少保留两个因子，避免全并成 N
+    # ── Tile-size completeness check ──────────────────────────
+    def _tile_set(fs: list[int]) -> set[int]:
+        """All distinct products of subsets of *fs*."""
+        ts = {1}
+        for f in fs:
+            ts |= {t * f for t in ts}
+        return ts
+
+    # ── 3. 贪婪合并：仅在 tile-set 和 HC-score 均不变时执行 ──
+    MIN_FACTORS = 2
+
+    base_tiles = _tile_set(factors)
 
     while len(factors) > MIN_FACTORS:
         base_hc = hc_score(tuple(sorted(factors)))
-        best_delta, best_pair, best_new = float('inf'), None, None
+        best_new = None
 
-        # 枚举所有两两合并
         for i, j in combinations(range(len(factors)), 2):
-            merged = factors[:i] + factors[i+1:j] + factors[j+1:]        # 删除 i,j
-            merged.append(factors[i] * factors[j])                       # 插入乘积
+            merged = factors[:i] + factors[i+1:j] + factors[j+1:]
+            merged.append(factors[i] * factors[j])
             merged.sort()
-            new_hc = hc_score(tuple(merged))
-            delta = (base_hc - new_hc) / hc_full                         # 相对损失
-            if delta < best_delta:
-                best_delta, best_pair, best_new = delta, (i, j), merged
+            if _tile_set(merged) != base_tiles:          # tile-set invariant
+                continue
+            if hc_score(tuple(merged)) < base_hc:        # HC-score invariant
+                continue
+            if best_new is None or len(merged) < len(best_new):
+                best_new = merged
 
-        # 若最优合并仍会损失 >10 %，就停；否则执行合并
-        if best_new is None or best_delta > LOSS_LIMIT:
+        if best_new is None:
             break
         factors = best_new
 
