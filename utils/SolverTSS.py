@@ -18,7 +18,7 @@ import copy
 
 class Solver():
     def __init__(self, acc:CIM_Acc, ops:WorkLoad, tu, su, metric_ub, outputdir=None,
-                 threads=None, soft_mem_limit_gb=None):
+                 threads=None, soft_mem_limit_gb=None, fixed_factor_ordering=None):
         self.acc = copy.deepcopy(acc)
         self.ops = copy.deepcopy(ops)
         self.tu = tu
@@ -27,6 +27,7 @@ class Solver():
         self.outputdir = outputdir
         self.threads = threads
         self.soft_mem_limit_gb = soft_mem_limit_gb
+        self.fixed_factor_ordering = fixed_factor_ordering  # dict{(d,f)->i} for enumeration mode
         self.gurobi_output = FLAG.GUROBI_OUTPUT
         self._owns_env = True
 
@@ -253,9 +254,21 @@ class Solver():
                     if factors[d][f] == factors[d][f1]:   # 相同因子之间才需要加对称约束
                         model.addConstr(quicksum(i * indic_factor2Loop[d,f,i] for i in range(Num_Loops)) <= 
                                         quicksum(i * indic_factor2Loop[d,f1,i] for i in range(Num_Loops)),
-                                                name=f"C_SymmetryBreaking_Factor2Loop_({ops.dim2Dict[d]},{f},{f1})") 
+                                                name=f"C_SymmetryBreaking_Factor2Loop_({ops.dim2Dict[d]},{f},{f1})")
 
-        # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -# 
+        # Fix factor-to-loop assignment for enumeration mode
+        if self.fixed_factor_ordering is not None:
+            for d in range(1, ops.Num_dim):
+                if factors[d] == [1]: continue
+                for f in range(len(factors[d])):
+                    target_i = self.fixed_factor_ordering[(d, f)]
+                    for i in range(Num_Loops):
+                        var = indic_factor2Loop[d, f, i]
+                        if isinstance(var, gp.Var):
+                            var.lb = 1.0 if i == target_i else 0.0
+                            var.ub = 1.0 if i == target_i else 0.0
+
+        # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -#
 
         indic_usedMem = gp.tupledict()            # indic_usedMem[m,op] = {0,1}           
         for m in range(1,acc.Num_mem):
@@ -1049,11 +1062,15 @@ class Solver():
                                      name=f"C_Body_({i},{op_name})")
 
         # Cut: Σ Transfer ≥ transLatency for each used memory (strengthening)
+        # 排除Macro Weight：CIM权重静态驻留，xMem被强制为0（line 509），Transfer路径不适用
         for op, op_name in enumerate(['I','W','O']):
             sum_latency_transfer = quicksum(latency_Transfer[i,op] for i in range(Num_Loops))
             for m in range(1, acc.Num_mem):
-                if acc.mappingArray[op][m]:
-                    model.addConstr(sum_latency_transfer >= var_mul01(model, indic_usedMem[m,op], transLatency[m,op],
+                if acc.mappingArray[op][m] == 0:
+                    continue
+                if op == 1 and m == acc.Macro2mem:
+                    continue  # Macro Weight: 静态驻留，无per-iteration Transfer
+                model.addConstr(sum_latency_transfer >= var_mul01(model, indic_usedMem[m,op], transLatency[m,op],
                                                                      name=f"tmp_sum_latencyTransfer_({acc.mem2dict(m)},{op_name})"),
                                     name=f"Cut_sum_latencyTransfer_({acc.mem2dict(m)},{op_name})")
 
@@ -1113,10 +1130,19 @@ class Solver():
                             name=f"Cut_Transfer_Cascade_({op_name})")
 
         # ─── L5-L6: MaxStartup & res_latency ───────────────────────────────────────────────────────────────────────
+        # Bootstrap: 最外层loop不在DRAM时，需要一次性加载全部数据。
+        # Output精度绑定holdPsum[DRAM]：bootstrap生效 ⟹ 无Output loop在DRAM ⟹ holdPsum[DRAM]=0 ⟹ 精度=final。
+        # 因此Output bootstrap直接使用precision_final（不使用worst_prec的psum上界）。
+        def dram_prec(op):
+            """DRAM级bootstrap精度：I/W用标准精度，O用final（bootstrap生效时DRAM无psum）"""
+            if op != 2:
+                return acc.precision[acc.Dram2mem, op]
+            return acc.precision_final
+
         latency_BootstrapRead = {}
         latency_SumTransfer = {}
         for op, op_name in enumerate(['I','W','O']):
-            latency_BootstrapRead[op] = MAX_SIZE[op] * worst_prec(acc.Dram2mem, op) / acc.bw[acc.Dram2mem] / CONST.SCALE_LATENCY
+            latency_BootstrapRead[op] = MAX_SIZE[op] * dram_prec(op) / acc.bw[acc.Dram2mem] / CONST.SCALE_LATENCY
             latency_SumTransfer[op] = quicksum(latency_Transfer[i,op] for i in range(Num_Loops))
 
         latency_MaxStartup = model.addVar(lb=0, ub=UB_latencyLevel[0], vtype=GRB.CONTINUOUS, name="latency_MaxStartup")
@@ -1133,10 +1159,18 @@ class Solver():
 
         # ─── Hardware-prior valid inequalities ────────────────────────────────────────────────────────────────────
         # Cut: DRAM bandwidth lower bound on res_latency (all data must pass through DRAM)
+        # Output DRAM流量：write总是final精度，read在holdPsum[DRAM]=1时为psum精度
         for op, op_name in enumerate(['I','W','O']):
             coeff_rw = 2 if op == 2 else 1
-            _dram_time = coeff_rw * MAX_SIZE[op] * worst_prec(acc.Dram2mem, op) / acc.bw[acc.Dram2mem] / CONST.SCALE_LATENCY
-            model.addConstr(res_latency >= _dram_time, name=f"Cut_DRAM_BW_({op_name})")
+            if op != 2:
+                _dram_time = coeff_rw * MAX_SIZE[op] * acc.precision[acc.Dram2mem, op] / acc.bw[acc.Dram2mem] / CONST.SCALE_LATENCY
+                model.addConstr(res_latency >= _dram_time, name=f"Cut_DRAM_BW_({op_name})")
+            else:
+                # Output: write + read 精度均由holdPsum[DRAM]决定（与simulator一致）
+                _base_rw = 2 * MAX_SIZE[op] * acc.precision_final / acc.bw[acc.Dram2mem] / CONST.SCALE_LATENCY
+                _psum_extra_rw = 2 * MAX_SIZE[op] * (acc.precision_psum - acc.precision_final) / acc.bw[acc.Dram2mem] / CONST.SCALE_LATENCY
+                model.addConstr(res_latency >= _base_rw + _psum_extra_rw * indic_holdPsum[acc.Dram2mem],
+                                name=f"Cut_DRAM_BW_({op_name})")
 
         model.addConstr(res_energy >= energy_expr_rw + energy_expr_comp + energy_expr_leakage, name="C_Res_Energy_Summation")
         if CONST.FLAG_OPT == "EDP":

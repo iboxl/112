@@ -7,6 +7,10 @@ import configparser
 import sympy
 import pathlib
 import itertools
+import time
+import json
+import subprocess
+import glob
 from functools import reduce
 
 func_conv_info = {}
@@ -196,6 +200,61 @@ def prepare_save_dir(save_dir: str) -> pathlib.Path:
     else:
         p.mkdir(parents=True, exist_ok=False)  # 递归创建
     return p
+
+def get_code_version(repo_root=None):
+    """获取影响实验结果的关键源文件的git版本标识（commit hash前12位）。
+    跟踪 SolverTSS.py 和 Simulax.py — 这两个文件的变更会影响MIP和simulator的行为。"""
+    if repo_root is None:
+        repo_root = os.path.join(os.path.dirname(__file__), '..', '..')
+    try:
+        commit = subprocess.check_output(
+            ['git', 'log', '-1', '--format=%H', '--',
+             'utils/SolverTSS.py', 'Simulator/Simulax.py'],
+            cwd=repo_root, stderr=subprocess.DEVNULL
+        ).decode().strip()
+        return commit[:12] if commit else 'unknown'
+    except Exception:
+        return 'unknown'
+
+
+def save_result_json(result_dir, prefix, result_dict, case_key='workload'):
+    """保存实验结果JSON，自动附加code_version和timestamp。
+    仅清理同case、不同code_version的旧结果；同版本多次运行结果全部保留。
+    参数:
+        result_dir: 保存目录 (如 output/Eval_Result/)
+        prefix: 文件名前缀 (如 'bruteforce', 'enumLoop')
+        result_dict: 结果字典（会自动补充timestamp和code_version）
+        case_key: result_dict中标识case的字段名
+    返回: 保存的文件路径"""
+    os.makedirs(result_dir, exist_ok=True)
+    code_ver = get_code_version()
+    result_dict.setdefault('timestamp', time.strftime('%Y-%m-%d %H:%M:%S'))
+    result_dict['code_version'] = code_ver
+    # 清理同case异版本旧结果
+    case_id = result_dict.get(case_key, '')
+    for f in glob.glob(os.path.join(result_dir, f"{prefix}_*.json")):
+        try:
+            with open(f) as fh:
+                old = json.load(fh)
+            if old.get(case_key) == case_id and old.get('code_version') != code_ver:
+                os.remove(f)
+        except Exception:
+            pass
+    import uuid
+    result_file = os.path.join(result_dir, f"{prefix}_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.json")
+    with open(result_file, 'w') as f:
+        json.dump(result_dict, f, indent=2, ensure_ascii=False)
+    return result_file
+
+
+def make_timestamped_dir(base, prefix=""):
+    """创建带时间戳的输出目录，格式: base/prefix_YYYYMMDD_HHMMSS。
+    用于 run.py / SolveMapping.py 等需要唯一输出目录的场景。"""
+    name = f"{prefix}_{time.strftime('%Y%m%d_%H%M%S')}" if prefix else time.strftime('%Y%m%d_%H%M%S')
+    p = os.path.join(base, name)
+    os.makedirs(p, exist_ok=True)
+    return p
+
 
 def get_Spatial_Unrolling(dim, mappingRule, SpUnrolling):
     """

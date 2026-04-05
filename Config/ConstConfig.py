@@ -37,7 +37,7 @@ class _const_num_config():
 
         self.EPS = 1e-5
 
-        self.ExpOption = "FuncPieces=-2 FuncPieceError=0.001"
+        self.ExpOption = "FuncPieces=-2 FuncPieceError=0.01"
 
 class _constraint_flag_config():
     def __init__(self):

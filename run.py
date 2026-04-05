@@ -51,8 +51,9 @@ def get_Args():
                         type=int, default=CONST.TIMELIMIT, help = 'time limitation for solving gurobi model')
     # parser.add_argument('-n', '--name', dest='dataflow_name', required=False, 
     #                     type=str, default='ds', help = 'save dataflow in FigName')
-    parser.add_argument('-o', '--outputdir', dest='output_dir', required=False, 
-                        type=str, default=f'test_{uuid.uuid1()}', help = 'save output files in folder')
+    parser.add_argument('-o', '--outputdir', dest='output_dir', required=False,
+                        type=str, default=f'test_{time.strftime("%Y%m%d_%H%M%S")}_{uuid.uuid1().hex[:8]}',
+                        help = 'save output files in folder')
     parser.add_argument('-arch', '--architecture', dest='architecture', required=False, 
                         type=str, default=f'ZigzagAcc', help = 'save output files in folder')
     args = parser.parse_args()

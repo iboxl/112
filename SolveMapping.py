@@ -323,7 +323,7 @@ if __name__ == "__main__":
     
     import uuid
     import time
-    outFolder = os.path.join("output",f"#SolveMappingTest_{uuid.uuid1()}")
+    outFolder = os.path.join("output",f"#SolveMappingTest_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid1().hex[:8]}")
     prepare_save_dir(outFolder)
 
     start_time = time.time()
