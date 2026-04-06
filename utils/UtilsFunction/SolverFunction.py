@@ -245,18 +245,15 @@ def var_mul01(model:gp.Model, indic, A, name, A_ub = None, A_lb = None, var_ub =
             return A
         else:
             return 0
-    model.update()
-    assert indic.VType == GRB.BINARY
-    if A_ub is not None:
-        ub = A_ub
-    else:
-        ub = A.ub if isinstance(A, gp.Var) else A
-    if A_lb is not None:
-        lb = A_lb
-    elif isinstance(A, gp.Var):
-        lb = A.lb
-    else:
-        lb = 0
+    # model.update() flushes all pending Gurobi operations — expensive when
+    # called repeatedly.  Only needed when we read back Var.ub or Var.lb
+    # from the model (bounds may have been modified after addVar).
+    need_ub = A_ub is None and isinstance(A, gp.Var)
+    need_lb = A_lb is None and isinstance(A, gp.Var)
+    if need_ub or need_lb:
+        model.update()
+    ub = A_ub if A_ub is not None else (A.ub if isinstance(A, gp.Var) else A)
+    lb = A_lb if A_lb is not None else (A.lb if isinstance(A, gp.Var) else 0)
 
     var = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=(ub if var_ub is None else var_ub), name=name)
     model.addConstr(var <= ub * indic, name=f"C_{name}_1")

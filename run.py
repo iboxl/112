@@ -54,12 +54,12 @@ def get_Args():
     parser.add_argument('-o', '--outputdir', dest='output_dir', required=False,
                         type=str, default=f'test_{time.strftime("%Y%m%d_%H%M%S")}_{uuid.uuid1().hex[:8]}',
                         help = 'save output files in folder')
-    parser.add_argument('-arch', '--architecture', dest='architecture', required=False, 
+    parser.add_argument('-arch', '--architecture', dest='architecture', required=False,
                         type=str, default=f'ZigzagAcc', help = 'save output files in folder')
     args = parser.parse_args()
 
     return args
- 
+
 def __main__(**kwargs):
 
     args = get_Args()

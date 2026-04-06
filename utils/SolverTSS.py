@@ -18,12 +18,14 @@ import copy
 
 class Solver():
     def __init__(self, acc:CIM_Acc, ops:WorkLoad, tu, su, metric_ub, outputdir=None,
-                 threads=None, soft_mem_limit_gb=None, fixed_factor_ordering=None):
+                 threads=None, soft_mem_limit_gb=None, fixed_factor_ordering=None,
+                 shared_ub=None, env=None):
         self.acc = copy.deepcopy(acc)
         self.ops = copy.deepcopy(ops)
         self.tu = tu
         self.su = su
         self.metric_ub = metric_ub
+        self.shared_ub = shared_ub
         self.outputdir = outputdir
         self.threads = threads
         self.soft_mem_limit_gb = soft_mem_limit_gb
@@ -31,16 +33,21 @@ class Solver():
         self.gurobi_output = FLAG.GUROBI_OUTPUT
         self._owns_env = True
 
-        self.env = gp.Env(empty=True)
-        self.env.setParam('OutputFlag', self.gurobi_output)
-        if self.threads is not None:
-            self.env.setParam('ThreadLimit', max(1, int(self.threads)))
-        self.env.start()
+        if env is not None:
+            self.env = env
+            self._owns_env = False
+        else:
+            self.env = gp.Env(empty=True)
+            self.env.setParam('OutputFlag', self.gurobi_output)
+            if self.threads is not None:
+                self.env.setParam('ThreadLimit', max(1, int(self.threads)))
+            self.env.start()
 
         self.model = gp.Model(name="MIREDO", env=self.env)
         self.model.setParam('OutputFlag', self.gurobi_output)
         self.model.setParam('Seed', 112)                               # 随机种子
-        self.model.setParam('LogFile',os.path.join(self.outputdir, "Solver.log"))
+        if self.gurobi_output:
+            self.model.setParam('LogFile', os.path.join(self.outputdir, "Solver.log"))
         
         if self.threads is None:
             self.model.setParam('Threads', psutil.cpu_count(logical=False))
@@ -1176,6 +1183,10 @@ class Solver():
         if CONST.FLAG_OPT == "EDP":
             model.addConstr(res_EDP >= res_latency * res_energy * CONST.SCALINGFACTOR, name="C_Res_EDP_Multiplication")
 
+        # Tighten metric_ub from cross-worker shared state (if available)
+        if self.shared_ub is not None:
+            self.metric_ub = min(self.metric_ub, self.shared_ub.value)
+
         match CONST.FLAG_OPT:
             case "Latency":
                 model.addConstr(res_latency <= self.metric_ub / CONST.SCALE_LATENCY, name="C_metric_ub_latency")
@@ -1250,10 +1261,42 @@ class Solver():
 
         model.setParam('TimeLimit', CONST.TIMELIMIT)
         model.update()
-        model.write(os.path.join(self.outputdir, "debug_model.lp"))
+        if FLAG.DEBUG:
+            model.write(os.path.join(self.outputdir, "debug_model.lp"))
+
+        # Build Gurobi callback for cross-worker bound propagation
+        _cb = None
+        if self.shared_ub is not None:
+            match CONST.FLAG_OPT:
+                case "Latency" | "EDP":
+                    _ub_to_obj = 1.0 / CONST.SCALE_LATENCY
+                case _:
+                    _ub_to_obj = 1.0
+
+            _shared = self.shared_ub
+            _state = [0, 0, _shared.value * _ub_to_obj]  # [obj_idx, node_count, cached_ub]
+            _REFRESH_NODES = 500  # refresh shared memory every N B&B nodes
+
+            def _cb(model, where):
+                if where == GRB.Callback.MULTIOBJ:
+                    _state[0] = model.cbGet(GRB.Callback.MULTIOBJ_OBJCNT)
+                elif where == GRB.Callback.MIPSOL and _state[0] == 0:
+                    # Worker found a new incumbent — propagate to shared state
+                    obj_val = model.cbGet(GRB.Callback.MIPSOL_OBJ)
+                    result_val = obj_val / _ub_to_obj
+                    _shared.update_min(result_val)
+                    _state[2] = _shared.value * _ub_to_obj
+                elif where == GRB.Callback.MIP and _state[0] == 0:
+                    _state[1] += 1
+                    if _state[1] >= _REFRESH_NODES:
+                        _state[1] = 0
+                        _state[2] = _shared.value * _ub_to_obj
+                        obj_bound = model.cbGet(GRB.Callback.MIP_OBJBND)
+                        if obj_bound > _state[2]:
+                            model.terminate()
 
         start_time = time.time()
-        model.optimize()
+        model.optimize(_cb)
         end_time = time.time()
 
         ####################################################################  Debug & Output  #######################################################################
@@ -1340,7 +1383,8 @@ class Solver():
                 solved_edp = solved_latency * solved_energy * CONST.SCALINGFACTOR
             self.result = [solved_latency, solved_energy, solved_edp]
             set_dataflow()
-            model.write(os.path.join(self.outputdir, "solution.sol"))
+            if FLAG.DEBUG:
+                model.write(os.path.join(self.outputdir, "solution.sol"))
             match CONST.FLAG_OPT:
                 case "Latency":
                     Logger.debug(f"Get best Latency= {solved_latency}")
