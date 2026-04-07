@@ -196,6 +196,22 @@ class Solver():
                     max(best_prec(m, op) / acc.bw[m] / CONST.SCALE_LATENCY, 1 / CONST.MAX_POS)
                 )
 
+        # ── Spatial-unrolling lower bounds on tile volume and transLatency ──
+        LB_transLatency_const = {}
+        LB_lg_dataVolume, LB_lg_transVolume = {}, {}
+        for m in range(1, acc.Num_mem):
+            for op in range(3):
+                if not acc.mappingArray[op][m]: continue
+                _min_dims = [1] * ops.Num_dim
+                for d in range(1, ops.Num_dim):
+                    _min_dims[d] = spur[m, op, d]
+                _min_vol = max(1, min(ops.get_operand_size(_min_dims, op), UB_dataVolume[m, op]))
+                _prec = best_prec(m, op)  # must use best (smallest) precision for valid LB
+                LB_transLatency_const[m, op] = max(LAT_UNIT, _min_vol * _prec / acc.bw[m] / CONST.SCALE_LATENCY)
+                if m >= 2:
+                    LB_lg_dataVolume[m, op] = math.log(max(1, _min_vol))
+                    LB_lg_transVolume[m, op] = math.log(max(1, _min_vol))
+
         ###########################################################  Variable & Constant & Constraints  ##################################################################
         # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -# 
 
@@ -265,10 +281,12 @@ class Solver():
 
         # Fix factor-to-loop assignment for enumeration mode
         if self.fixed_factor_ordering is not None:
+            FIXED_FACTOR_VAL_AT = {}  # FIXED_FACTOR_VAL_AT[i] = factor value at loop position i
             for d in range(1, ops.Num_dim):
                 if factors[d] == [1]: continue
                 for f in range(len(factors[d])):
                     target_i = self.fixed_factor_ordering[(d, f)]
+                    FIXED_FACTOR_VAL_AT[target_i] = factors[d][f]
                     for i in range(Num_Loops):
                         var = indic_factor2Loop[d, f, i]
                         if isinstance(var, gp.Var):
@@ -347,8 +365,19 @@ class Solver():
                                                                      for d in range(1, ops.Num_dim) for f in range(len(factors[d]))),
                                  name=f"C_relevantLoop_({i},{op_name})")
 
-        # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -# 
-        
+        # Fix loop2Factor in enumeration mode (eliminates Z_crit McCormick gap — Theorem 3)
+        if self.fixed_factor_ordering is not None:
+            for i in range(Num_Loops):
+                target_val = FIXED_FACTOR_VAL_AT.get(i)
+                if target_val is not None:
+                    for p in range(len(UNIQUE_FACTOR)):
+                        var = indic_loop2Factor[i, p]
+                        if isinstance(var, gp.Var):
+                            var.lb = 1.0 if UNIQUE_FACTOR[p] == target_val else 0.0
+                            var.ub = 1.0 if UNIQUE_FACTOR[p] == target_val else 0.0
+
+        # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -#
+
         KEEP_temp_Output_irDim = any(factors[d] != [1] and ops.relevance[2][d] == 0 for d in range(1, ops.Num_dim))
 
         indic_irDim_ExistIN = gp.tupledict()                # indic_irDim_ExistIN[m] = {0,1}
@@ -655,7 +684,7 @@ class Solver():
                 model.addConstr(sum_s == lg_dimExistMem[m,op,ops.dict2Dim('S')], name=f"C_Uniqueness_IndicSumS_({acc.mem2dict(m)},{op_name})")
                 model.addConstr(sum_q == lg_dimExistMem[m,op,ops.dict2Dim('Q')], name=f"C_Uniqueness_IndicSumQ_({acc.mem2dict(m)},{op_name})")
 
-                lg_dataVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=UB_lg_dataVolume[m,op],
+                lg_dataVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=LB_lg_dataVolume.get((m,op), 0), ub=UB_lg_dataVolume[m,op],
                                                     name=f"lg_dataVolume_({acc.mem2dict(m)},{op_name})")
                 model.addConstr(lg_dataVolume[m,op] == sum_dim_h + sum_dim_w + lg_dimExistMem[m,op,ops.dict2Dim('C')] + lg_dimExistMem[m,op,ops.dict2Dim('G')],
                                     name=f"C_lg_dataVolume_({acc.mem2dict(m)},{op_name})")
@@ -666,7 +695,7 @@ class Solver():
                         
             op, op_name = 1,'W'     # Weight
             if acc.mappingArray[op][m] == True:
-                lg_dataVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=UB_lg_dataVolume[m,op],
+                lg_dataVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=LB_lg_dataVolume.get((m,op), 0), ub=UB_lg_dataVolume[m,op],
                                                 name=f"lg_dataVolume_({acc.mem2dict(m)},{op_name})")
                 model.addConstr(lg_dataVolume[m,op] == quicksum(lg_dimExistMem[m,op,ops.dict2Dim(dChar)] for dChar in ['R','S','C','K','G']),
                                 name=f"C_lg_dataVolume_({acc.mem2dict(m)},{op_name})")
@@ -677,7 +706,7 @@ class Solver():
 
             op, op_name = 2,'O'     # Output
             if acc.mappingArray[op][m] == True:
-                lg_dataVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=UB_lg_dataVolume[m,op],
+                lg_dataVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=LB_lg_dataVolume.get((m,op), 0), ub=UB_lg_dataVolume[m,op],
                                                     name=f"lg_dataVolume_({acc.mem2dict(m)},{op_name})")
                 model.addConstr(lg_dataVolume[m,op] == quicksum(lg_dimExistMem[m,op,ops.dict2Dim(dChar)] for dChar in ['P','Q','K','G']),
                                     name=f"C_lg_dataVolume_({acc.mem2dict(m)},{op_name})")
@@ -723,21 +752,21 @@ class Solver():
                 model.addConstr(sum_s == lg_dimOfTile[m,op,ops.dict2Dim('S')], name=f"C_Uniqueness_IndicTileS_({acc.mem2dict(m)},{op_name})")
                 model.addConstr(sum_q == lg_dimOfTile[m,op,ops.dict2Dim('Q')], name=f"C_Uniqueness_IndicTileQ_({acc.mem2dict(m)},{op_name})")
 
-                lg_transVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=UB_lg_transVolume[m,op],
+                lg_transVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=LB_lg_transVolume.get((m,op), 0), ub=UB_lg_transVolume[m,op],
                                                      name=f"lg_transVolume_({acc.mem2dict(m)},{op_name})")
                 model.addConstr(lg_transVolume[m,op] == sum_dim_h + sum_dim_w + lg_dimOfTile[m,op,ops.dict2Dim('C')] + lg_dimOfTile[m,op,ops.dict2Dim('G')],
                                     name=f"C_lg_transVolume_({acc.mem2dict(m)},{op_name})")
 
             op, op_name = 1,'W'     # Weight
             if acc.mappingArray[op][m]:
-                lg_transVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=UB_lg_transVolume[m,op],
+                lg_transVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=LB_lg_transVolume.get((m,op), 0), ub=UB_lg_transVolume[m,op],
                                                      name=f"lg_transVolume_({acc.mem2dict(m)},{op_name})")
                 model.addConstr(lg_transVolume[m,op] == quicksum(lg_dimOfTile[m,op,ops.dict2Dim(dChar)] for dChar in ['R','S','C','K','G']),
                                      name=f"C_lg_transVolume_({acc.mem2dict(m)},{op_name})")
 
             op, op_name = 2,'O'     # Output
             if acc.mappingArray[op][m]:
-                lg_transVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=UB_lg_transVolume[m,op],
+                lg_transVolume[m,op] = model.addVar(vtype=GRB.CONTINUOUS, lb=LB_lg_transVolume.get((m,op), 0), ub=UB_lg_transVolume[m,op],
                                                      name=f"lg_transVolume_({acc.mem2dict(m)},{op_name})")
                 model.addConstr(lg_transVolume[m,op] == quicksum(lg_dimOfTile[m,op,ops.dict2Dim(dChar)] for dChar in ['P','Q','K','G']),
                                      name=f"C_lg_transVolume_({acc.mem2dict(m)},{op_name})")
@@ -1006,7 +1035,8 @@ class Solver():
                                                    name=f"tmp_rawTransLatency_({acc.mem2dict(m)},{op_name})")
                     model.addGenConstrExp(xvar=lg_transLatency, yvar=rawTransLatency, options=CONST.ExpOption,
                                           name=f"C_rawTransLatency_({acc.mem2dict(m)},{op_name})")
-                    transLatency[m,op] = model.addVar(lb=LAT_UNIT, ub=max(UB_transLatency[m,op], LAT_UNIT), vtype=GRB.CONTINUOUS,
+                    _lb_trans = LB_transLatency_const.get((m, op), LAT_UNIT)
+                    transLatency[m,op] = model.addVar(lb=_lb_trans, ub=max(UB_transLatency[m,op], _lb_trans), vtype=GRB.CONTINUOUS,
                                                        name=f"transLatency_({acc.mem2dict(m)},{op_name})")
                     model.addGenConstrMax(transLatency[m,op], [rawTransLatency], constant=LAT_UNIT,
                                           name=f"C_transLatency_ceil_({acc.mem2dict(m)},{op_name})")
@@ -1109,6 +1139,8 @@ class Solver():
                                 name=f"C_McCormick_Z_lb1_({i},{p})")
                 model.addConstr(Z_crit[i, p] <= latency_Critical[i],
                                 name=f"C_McCormick_Z_ub2_({i},{p})")
+                model.addConstr(Z_crit[i, p] >= LB_Process[i + 1] * indic_loop2Factor[i, p],
+                                name=f"C_McCormick_Z_lb2_({i},{p})")
 
         for i in range(Num_Loops):
             for op, op_name in enumerate(['I','W','O']):
@@ -1178,6 +1210,17 @@ class Solver():
                 _psum_extra_rw = 2 * MAX_SIZE[op] * (acc.precision_psum - acc.precision_final) / acc.bw[acc.Dram2mem] / CONST.SCALE_LATENCY
                 model.addConstr(res_latency >= _base_rw + _psum_extra_rw * indic_holdPsum[acc.Dram2mem],
                                 name=f"Cut_DRAM_BW_({op_name})")
+
+        # Cut: per-memory constant-floor transfer sum (spatial-unrolling minimum)
+        for op, op_name in enumerate(['I','W','O']):
+            _sum_trans = quicksum(latency_Transfer[i,op] for i in range(Num_Loops))
+            for m in range(1, acc.Num_mem):
+                if not acc.mappingArray[op][m]: continue
+                if op == 1 and m == acc.Macro2mem: continue
+                _lb_c = LB_transLatency_const.get((m, op), LAT_UNIT)
+                if _lb_c > LAT_UNIT + 1e-9:
+                    model.addConstr(_sum_trans >= _lb_c * indic_usedMem[m, op],
+                                    name=f"Cut_TransFloor_const_({acc.mem2dict(m)},{op_name})")
 
         model.addConstr(res_energy >= energy_expr_rw + energy_expr_comp + energy_expr_leakage, name="C_Res_Energy_Summation")
         if CONST.FLAG_OPT == "EDP":
