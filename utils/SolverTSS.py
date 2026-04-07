@@ -1125,14 +1125,20 @@ class Solver():
                                  name=f"C_latency_cp_transfer+child_({i},{op_name})")
 
         # ─── L4: Process(i,λ) = c(λ)×Transfer + child + (F(i)−1)×Critical ─────────────────────────────────────────
-        # McCormick envelope: Z_crit[i,p] = indic_loop2Factor[i,p] × Critical[i]
-        # Produces convex-hull LP relaxation instead of indicator big-M
+        # Z_crit[i,p] = indic_loop2Factor[i,p] × Critical[i]
+        # Adaptive: McCormick (tight LP) at inner levels where UB_Critical is small,
+        # GenConstrIndicator (exact) at outer levels where UB_Critical * IntFeasTol
+        # causes near-integer indicators to produce large Z_crit errors.
+        _intfeastol = model.Params.IntFeasTol
         Z_crit = {}
         for i in range(Num_Loops):
             _UB_C = UB_Critical[i]
+            _max_zcrit_err = _UB_C * _intfeastol
+            _use_indicator = (_max_zcrit_err > 0.01 * LB_Process[i + 1])
             for p in range(len(UNIQUE_FACTOR)):
                 Z_crit[i, p] = model.addVar(lb=0, ub=_UB_C, vtype=GRB.CONTINUOUS,
                                              name=f"Z_crit_({i},{p})")
+                # McCormick envelope — convex-hull LP relaxation
                 model.addConstr(Z_crit[i, p] <= _UB_C * indic_loop2Factor[i, p],
                                 name=f"C_McCormick_Z_ub1_({i},{p})")
                 model.addConstr(Z_crit[i, p] >= latency_Critical[i] - _UB_C * (1 - indic_loop2Factor[i, p]),
@@ -1141,6 +1147,17 @@ class Solver():
                                 name=f"C_McCormick_Z_ub2_({i},{p})")
                 model.addConstr(Z_crit[i, p] >= LB_Process[i + 1] * indic_loop2Factor[i, p],
                                 name=f"C_McCormick_Z_lb2_({i},{p})")
+                if _use_indicator:
+                    # GenConstrIndicator supplements McCormick at outer levels where
+                    # UB_Critical * IntFeasTol causes near-integer exploitation of lb1.
+                    # McCormick is retained for LP relaxation quality; indicators ensure
+                    # integer-solution exactness via Gurobi's internal integrality rounding.
+                    model.addGenConstrIndicator(indic_loop2Factor[i, p], True,
+                        Z_crit[i, p] == latency_Critical[i],
+                        name=f"C_Indicator_Z_true_({i},{p})")
+                    model.addGenConstrIndicator(indic_loop2Factor[i, p], False,
+                        Z_crit[i, p] == 0,
+                        name=f"C_Indicator_Z_false_({i},{p})")
 
         for i in range(Num_Loops):
             for op, op_name in enumerate(['I','W','O']):
