@@ -19,7 +19,7 @@ class _const_num_config():
 
         self.GAP_THRESHOLD = 0.2
 
-        self.TIMELIMIT = 600
+        self.TIMELIMIT = 60
 
         # self.TIMELIMIT = 15
 

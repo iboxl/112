@@ -8,6 +8,16 @@ import copy
 import math
 from typing import Dict, List, Tuple
 from collections import defaultdict
+from baseline.types import BaselineLayer
+from utils.GlobalUT import Logger
+from Evaluation.Zigzag_imc.CompatibleCoSA import (
+    _build_cosa_layer_tags,
+    _build_cosa_tag_rank,
+    align_double_buffer_flags_to_acc,
+    align_mapping_levels_to_acc,
+    convert_cosa_mp_to_loopMP,
+    fail_fast_if_capacity_mismatch,
+)
 
 
 def _pad_missing_inner_levels(levels, expected_len, fill_factory):
@@ -23,6 +33,7 @@ def _pad_missing_inner_levels(levels, expected_len, fill_factory):
     if missing == 0:
         return copy.deepcopy(levels)
     return [fill_factory() for _ in range(missing)] + copy.deepcopy(levels)
+
 
 
 def convert_ZZ_dflag_to_doubleflag(acc:CIM_Acc, ops:WorkLoad, cme_dflag):
@@ -190,6 +201,32 @@ def _calc_explicit_mem_usage(loops: LoopNest):
     return raw_bits, used_bits
 
 
+def _assert_mapping_unrolling_complete(loops: LoopNest, source_tag: str):
+    """
+    在 preprogress 前做一次维度展开完整性检查，
+    提供更直接的缺失维度信息，便于定位 parser/converter 语义问题。
+    """
+    unrolling = [1 for _ in loops.ops.dim2Dict]
+    for mapping in loops.tm + loops.sm:
+        if mapping.dim < 0 or mapping.dim >= len(unrolling):
+            raise ValueError(
+                f"{source_tag}: illegal dimension id {mapping.dim} in mapping before replay"
+            )
+        unrolling[mapping.dim] *= int(round(mapping.dimSize))
+
+    deficits = []
+    for dim, dim_name in enumerate(loops.ops.dim2Dict):
+        bound = int(loops.ops.dim2bound[dim])
+        got = int(unrolling[dim])
+        if got < bound:
+            deficits.append(f"{dim_name}: got={got}, need={bound}")
+
+    if deficits:
+        raise ValueError(
+            f"{source_tag}: incomplete unrolling before replay -> " + "; ".join(deficits)
+        )
+
+
 def project_replay_safe_double_flag(loops: LoopNest, double_tag):
     safe_double_tag = np.array(double_tag, dtype=int, copy=True)
     loops.usr_defined_double_flag = safe_double_tag
@@ -255,7 +292,21 @@ def convert_ZZMP_to_loopMP(
     """
     # ---------------- 0. 参数 / 默认 -----------------
     if dim_code is None:
-        dim_code = {"FX": 1, "FY": 2, "OX": 3, "OY": 4, "C": 5, "K": 6, "G":7}
+        dim_code = {
+            "FX": 1,
+            "FY": 2,
+            "OX": 3,
+            "OY": 4,
+            "R": 1,
+            "S": 2,
+            "P": 3,
+            "Q": 4,
+            "C": 5,
+            "K": 6,
+            "G": 7,
+            "N": 7,
+            "B": 7,
+        }
 
     if len(mappingArray) != len(array_row_order):
         raise ValueError("mappingArray 行数必须等于 array_row_order 长度")
@@ -264,7 +315,8 @@ def convert_ZZMP_to_loopMP(
     level_map: Dict[str, Dict[Tuple[str, int], deque[int]]] = {
         op: defaultdict(deque) for op in array_row_order
     }
-    aligned_mapping_dict = {}
+    aligned_mapping_dict: Dict[str, List[List[Tuple[str, int]]]] = {}
+    fallback_mem_level: Dict[str, int] = {}
 
     for row_idx, op in enumerate(array_row_order):
         layers = mapping_dict[op]                       # 外 → 内
@@ -280,6 +332,7 @@ def convert_ZZMP_to_loopMP(
                 "请检查 mappingArray / mapping_dict"
             )
 
+        fallback_mem_level[op] = pos[-1]
         rev_pos = list(reversed(pos))                  # 外层 → 对应的存储级
         for layer_idx, layer in enumerate(layers):     # 外 → 内
             mem_level = rev_pos[layer_idx]             # 正确的列号
@@ -287,18 +340,37 @@ def convert_ZZMP_to_loopMP(
                 level_map[op][tuple(tup)].appendleft(mem_level)
                 # appendleft 保证 popleft 先弹“最内层”
 
-    # ---------------- 2. 生成全局遍历次序 (基于 I)，内 → 外 -------
+    # ---------------- 2. 生成全局遍历次序（联合 I/W/O），内 → 外 -------
+    required_count: Dict[Tuple[str, int], int] = {}
+    for op in array_row_order:
+        for tup, dq in level_map[op].items():
+            required_count[tup] = max(required_count.get(tup, 0), len(dq))
+
+    max_levels = max(len(aligned_mapping_dict[op]) for op in array_row_order)
+    produced_count: Dict[Tuple[str, int], int] = defaultdict(int)
     order: List[Tuple[str, int]] = []
-    for layer_idx in reversed(range(len(aligned_mapping_dict["I"]))):        # 内 → 外
-        for tup in reversed(aligned_mapping_dict["I"][layer_idx]):           # 右 → 左
-            order.append(tuple(tup))
+    for layer_idx in reversed(range(max_levels)):                    # 内 → 外
+        for op in array_row_order:
+            layers = aligned_mapping_dict[op]
+            if layer_idx >= len(layers):
+                continue
+            for tup in reversed(layers[layer_idx]):                  # 右 → 左
+                key = tuple(tup)
+                if produced_count[key] < required_count.get(key, 0):
+                    order.append(key)
+                    produced_count[key] += 1
+
+    for tup, need in required_count.items():
+        while produced_count[tup] < need:
+            order.append(tup)
+            produced_count[tup] += 1
 
     # ---------------- 3. 依次输出 Mapping ------------------------
     for tup in order:
         levels = []
         for op in array_row_order:                   # I, W, O 顺序
             dq = level_map[op].get(tup)
-            levels.append(dq.popleft() if dq else None)
+            levels.append(dq.popleft() if dq else fallback_mem_level[op])
 
         mappingList.append(
             Mapping(
@@ -308,6 +380,7 @@ def convert_ZZMP_to_loopMP(
             )
         )
     return mappingList
+
 
 def fix_all_memHierarchy(acc:CIM_Acc, tm:list[Mapping]):
     tm_first = tm[0]
@@ -377,26 +450,139 @@ def normalize_spatial_mapping(mapping):
 
     return mp
 
-def convert_Zigzag_to_MIREDO(loops:LoopNest, cme=None):
-    
-    temporal_mapping_dic=cme.temporal_mapping.mapping_dic_origin
-    spatial_mapping_dict=cme.spatial_mapping_int.mapping_dict_origin
-    double_buffer_flag=cme.double_buffer_true
 
-    top_r_loop_size = _extract_top_r_loop_size(cme)
-    loops.tm = convert_ZZMP_to_loopMP(mapping_dict = process_top_r(ori_tm_dict=temporal_mapping_dic, cme_top_r_loop=top_r_loop_size),
-                                       mappingArray = loops.acc.mappingArray, 
-                                       mappingList = loops.tm)
-    
-    # loops.tm = fix_all_memHierarchy(acc=loops.acc, tm=loops.tm)
-    
-    loops.sm = convert_ZZMP_to_loopMP(mapping_dict = normalize_spatial_mapping(spatial_mapping_dict),
-                                       mappingArray = loops.acc.mappingArray, 
-                                       mappingList = loops.sm)
-    loops.usr_defined_double_flag = convert_ZZ_dflag_to_doubleflag(loops.acc, loops.ops, double_buffer_flag)
+def baseline_layer_from_zigzag_cme(cme) -> BaselineLayer:
+    cme_dim = cme.layer.loop_dim_size
+    return BaselineLayer(
+        source="zigzag",
+        loop_dim={
+            "R": cme_dim["FX"],
+            "S": cme_dim["FY"],
+            "P": cme_dim["OX"],
+            "Q": cme_dim["OY"],
+            "C": cme_dim["C"],
+            "K": cme_dim["K"],
+            "G": cme_dim["G"],
+        },
+        temporal_mapping=cme.temporal_mapping.mapping_dic_origin,
+        spatial_mapping=cme.spatial_mapping_int.mapping_dict_origin,
+        double_buffer_flag=cme.double_buffer_true,
+        top_r_loop_size=_extract_top_r_loop_size(cme),
+        raw=cme,
+    )
+
+
+def convert_baseline_to_MIREDO(loops: LoopNest, baseline: BaselineLayer):
+    temporal_mapping_dic = baseline.temporal_mapping
+    spatial_mapping_dict = baseline.spatial_mapping
+    double_buffer_flag = baseline.double_buffer_flag
+
+    if baseline.top_r_loop_size is None:
+        temporal_processed = temporal_mapping_dic
+    else:
+        temporal_processed = process_top_r(
+            ori_tm_dict=temporal_mapping_dic,
+            cme_top_r_loop=baseline.top_r_loop_size,
+        )
+
+    temporal_aligned = align_mapping_levels_to_acc(
+        mapping_dict=temporal_processed,
+        mapping_array=loops.acc.mappingArray,
+        source_tag=f"{baseline.source}:temporal",
+        warn=Logger.warning,
+    )
+    spatial_aligned = align_mapping_levels_to_acc(
+        mapping_dict=normalize_spatial_mapping(spatial_mapping_dict),
+        mapping_array=loops.acc.mappingArray,
+        source_tag=f"{baseline.source}:spatial",
+        warn=Logger.warning,
+    )
+    dflag_aligned = align_double_buffer_flags_to_acc(
+        double_buffer_flag=double_buffer_flag,
+        mapping_array=loops.acc.mappingArray,
+        source_tag=f"{baseline.source}:double_buffer",
+        warn=Logger.warning,
+    )
+
+    if baseline.source == "cosa":
+        cosa_layer_tags = _build_cosa_layer_tags(
+            baseline=baseline,
+            aligned_mapping=temporal_aligned,
+        )
+        cosa_tag_rank = _build_cosa_tag_rank(
+            baseline=baseline,
+            layer_tags=cosa_layer_tags,
+        )
+        loops.tm = convert_cosa_mp_to_loopMP(
+            mapping_dict=temporal_aligned,
+            mappingArray=loops.acc.mappingArray,
+            mappingList=loops.tm,
+            layer_tags=cosa_layer_tags,
+            tag_rank=cosa_tag_rank,
+        )
+        loops.sm = convert_cosa_mp_to_loopMP(
+            mapping_dict=spatial_aligned,
+            mappingArray=loops.acc.mappingArray,
+            mappingList=loops.sm,
+            layer_tags=cosa_layer_tags,
+            tag_rank=cosa_tag_rank,
+        )
+    elif baseline.source == "cimloop":
+        # CiMLoop maps are not ZigZag-native; use the safer converter that keeps
+        # missing tuples at an outer/safe level instead of forcing them inward.
+        loops.tm = convert_cosa_mp_to_loopMP(
+            mapping_dict=temporal_aligned,
+            mappingArray=loops.acc.mappingArray,
+            mappingList=loops.tm,
+        )
+        loops.sm = convert_cosa_mp_to_loopMP(
+            mapping_dict=spatial_aligned,
+            mappingArray=loops.acc.mappingArray,
+            mappingList=loops.sm,
+        )
+    else:
+        loops.tm = convert_ZZMP_to_loopMP(
+            mapping_dict=temporal_aligned,
+            mappingArray=loops.acc.mappingArray,
+            mappingList=loops.tm,
+        )
+
+        loops.sm = convert_ZZMP_to_loopMP(
+            mapping_dict=spatial_aligned,
+            mappingArray=loops.acc.mappingArray,
+            mappingList=loops.sm,
+        )
+
+    _assert_mapping_unrolling_complete(loops, source_tag=f"{baseline.source}:unrolling_check")
+
+    try:
+        loops.usr_defined_double_flag = convert_ZZ_dflag_to_doubleflag(
+            loops.acc, loops.ops, dflag_aligned
+        )
+    except Exception as e:
+        Logger.warning(
+            f"Falling back to all-disabled double buffer flags for source={baseline.source}: {e}"
+        )
+        loops.usr_defined_double_flag = [
+            [0 for _ in range(3)] for __ in range(loops.acc.Num_mem + 1)
+        ]
     loops.usr_defined_double_flag[loops.acc.Macro2mem][1] = loops.acc.double_Macro
-    loops.usr_defined_double_flag = project_replay_safe_double_flag(loops, loops.usr_defined_double_flag)
+    loops.usr_defined_double_flag = project_replay_safe_double_flag(
+        loops, loops.usr_defined_double_flag
+    )
+    # CoSA/CIMLoop baseline 常见问题是 map/hardware 语义不一致；在进入 simulator 前先 fail-fast。
+    if baseline.source in ("cosa", "cimloop"):
+        fail_fast_if_capacity_mismatch(
+            loops,
+            source_tag=f"{baseline.source}:capacity_check",
+            calc_explicit_mem_usage=_calc_explicit_mem_usage,
+        )
     return loops
+
+
+def convert_Zigzag_to_MIREDO(loops: LoopNest, cme=None):
+    baseline = baseline_layer_from_zigzag_cme(cme)
+    return convert_baseline_to_MIREDO(loops=loops, baseline=baseline)
 
 # def compare_ops_cme(ops:WorkLoad, cme):
 #     loop_dim = cme.layer.loop_dim_size
