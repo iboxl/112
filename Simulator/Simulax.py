@@ -26,6 +26,15 @@ class ProfilingDetail():
     Energy_OnChip:float = 0
     Energy_OffChip:float = 0
     doubleFlag:list[list[bool]] = field(default_factory=list)
+    transfer_cycles:list[float] = field(default_factory=lambda: [0, 0, 0])
+    mode_switch_cycles:list[float] = field(default_factory=lambda: [0, 0, 0])
+    mismatch_cycles:list[float] = field(default_factory=lambda: [0, 0, 0])
+    output_writeback_cycles:float = 0
+    bootstrap_cycles:float = 0
+    mode_switch_stall:float = 0
+    mismatch_stall:float = 0
+    writeback_stall:float = 0
+    idle_cycles:float = 0
 
 class tranSimulator():
     def __init__(self, acc:CIM_Acc, ops:WorkLoad, dataflow:LoopNest, DEBUG_SIMU=False):
@@ -260,10 +269,14 @@ class tranSimulator():
                         self.timer[mem_cur[op],op] = self.timer[mem_cur[op],op] + Cons[op]
                         stall = max(0,max(self.timer[mem_nxt[op],op], self.timer[mem_cur[op],op]) - self.timer[mem_nxt[op],op])
                         self.timer[mem_nxt[op],op] = max(self.timer[mem_nxt[op],op], self.timer[mem_cur[op],op])
+                        self.PD.transfer_cycles[op] += Cons[op]
+                        self.PD.mismatch_cycles[op] += stall
                     else:                   # single-buffer: wait for nxt
                         self.timer[mem_cur[op],op] = max(self.timer[mem_cur[op],op], self.timer[mem_nxt[op],op]) + Cons[op]
                         self.timer[mem_nxt[op],op] = self.timer[mem_cur[op],op]
                         stall = Cons[op]
+                        self.PD.transfer_cycles[op] += Cons[op]
+                        self.PD.mode_switch_cycles[op] += Cons[op]
                     self.memCost[mem_cur[op]].t += stall
 
                     if mem_cur[op] == self.lastMappingMem[op] and self.lastMemReg[op] is False:
@@ -283,6 +296,8 @@ class tranSimulator():
                 op = 2  # O
                 if i > 0 and Cons[op] > 0 and dflag[op] == 1:
                     self.timer[mem_cur[op],op] = max(self.timer[mem_cur[op],op], self.timer[mem_nxt[op],op]) + Cons[op]
+                    self.PD.transfer_cycles[op] += Cons[op]
+                    self.PD.output_writeback_cycles += Cons[op]
 
                     if mem_cur[op] == self.lastMappingMem[op] and self.lastMemReg[op] is False:
                         self.memCost[mem_nxt[op]].r += self.acc.cost_r[mem_nxt[op]] * nxtSize[op]  * self._prec(mem_nxt[op], op)
@@ -303,6 +318,8 @@ class tranSimulator():
                 if dflag[op] != 1:
                     self.timer[mem_nxt[op],op] = max(self.timer[mem_cur[op],op], self.timer[mem_nxt[op],op]) + Cons[op]
                     self.timer[mem_cur[op],op] = self.timer[mem_nxt[op],op]
+                    self.PD.transfer_cycles[op] += Cons[op]
+                    self.PD.output_writeback_cycles += Cons[op]
 
                     if mem_cur[op] == self.lastMappingMem[op] and self.lastMemReg[op] is False:
                         self.memCost[mem_nxt[op]].r += self.acc.cost_r[mem_nxt[op]] * nxtSize[op]  * self._prec(mem_nxt[op], op)
@@ -322,6 +339,8 @@ class tranSimulator():
             op = 2  # O
             if N > 0 and Cons[op] > 0 and dflag[op] == 1:
                 self.timer[mem_cur[op],op] = max(self.timer[mem_cur[op],op], self.timer[mem_nxt[op],op]) + Cons[op]
+                self.PD.transfer_cycles[op] += Cons[op]
+                self.PD.output_writeback_cycles += Cons[op]
 
                 if mem_cur[op] == self.lastMappingMem[op] and self.lastMemReg[op] is False:
                     self.memCost[mem_nxt[op]].r += self.acc.cost_r[mem_nxt[op]] * nxtSize[op]  * self._prec(mem_nxt[op], op)
@@ -354,16 +373,20 @@ class tranSimulator():
         for op, op_name in enumerate(['I','W','O']):
             if self.firstMemDram[op] is False:
                 dram_prec = self._prec(self.acc.Dram2mem, op)
-                self.timer[self.acc.Dram2mem, op]        += self.ops.size[op] * dram_prec / self.acc.bw[self.acc.Dram2mem]
-                self.timer[self.firstMappingMem[op], op] += self.ops.size[op] * dram_prec / self.acc.bw[self.acc.Dram2mem]
+                bootstrap_cycles = self.ops.size[op] * dram_prec / self.acc.bw[self.acc.Dram2mem]
+                self.timer[self.acc.Dram2mem, op]        += bootstrap_cycles
+                self.timer[self.firstMappingMem[op], op] += bootstrap_cycles
+                self.PD.bootstrap_cycles += bootstrap_cycles
 
         self.loopExecution(0)
 
         for op, op_name in enumerate(['I','W','O']):
             if op_name == 'O' and self.firstMemDram[op] is False:
                 dram_prec = self._prec(self.acc.Dram2mem, op)
-                self.timer[self.acc.Dram2mem, op]        += self.ops.size[op] * dram_prec / self.acc.bw[self.acc.Dram2mem]
-                self.timer[self.firstMappingMem[op], op] += self.ops.size[op] * dram_prec / self.acc.bw[self.acc.Dram2mem]
+                bootstrap_cycles = self.ops.size[op] * dram_prec / self.acc.bw[self.acc.Dram2mem]
+                self.timer[self.acc.Dram2mem, op]        += bootstrap_cycles
+                self.timer[self.firstMappingMem[op], op] += bootstrap_cycles
+                self.PD.bootstrap_cycles += bootstrap_cycles
 
         res_Latency = max(self.timer[mem, op] for op in range(3) for mem in range(self.acc.Num_mem))
 
@@ -419,6 +442,17 @@ class tranSimulator():
 
         self.PD.latency = res_Latency
         self.PD.macLatency = self.count_mac * self.acc.t_MAC
+        self.PD.mode_switch_stall = sum(self.PD.mode_switch_cycles)
+        self.PD.mismatch_stall = sum(self.PD.mismatch_cycles)
+        self.PD.writeback_stall = self.PD.output_writeback_cycles
+        self.PD.idle_cycles = max(
+            0,
+            self.PD.latency
+            - self.PD.macLatency
+            - self.PD.mode_switch_stall
+            - self.PD.mismatch_stall
+            - self.PD.writeback_stall,
+        )
 
         return res_Latency, res_Energy
 

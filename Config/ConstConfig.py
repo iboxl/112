@@ -82,9 +82,11 @@ class _constraint_flag_config():
 
         self.ROW_STATIONARY = False
         
-        self.WEIGHT_STATIONARY = False
-
         self.OUTPUT_STATIONARY = False                      # 部分和累加在固定的位置完成-即一个output只存在于local OR global
+
+        self.ABLATION_FIXED_DOUBLE_BUFFER = False       # 消融：禁用双缓冲决策（强制全部单缓冲）
+        
+        self.ABLATION_SIMPLIFIED_PIPELINE = False       # 消融：移除流水线重叠建模（传输与计算永远串行）
 
         self.PRESOLVE_SEARCH =    False                  # 预搜索MN寻找简单初始解
 

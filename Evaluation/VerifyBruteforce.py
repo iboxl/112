@@ -4,7 +4,7 @@
 # 与MIREDO MIP框架完全独立，仅共享：硬件规格、负载描述、simulator。
 # 搜索空间：空间展开 × 时间因子分解 × 循环排序 × 存储级分配 × 双缓冲配置
 # 用途：为MIREDO的全局最优性提供独立穷举证明。
-# 用法：python Evaluation/Verify_bruteforce.py [--case CASE_NAME]
+# 用法：python Evaluation/VerifyBruteforce.py [--case CASE_NAME]
 # 可选case: 1x1_C64K64, 3x3_C64K64, resnet_layer13, 自定义(修改CASES字典)
 
 import os, sys, math, itertools, time, copy
@@ -12,6 +12,7 @@ import os, sys, math, itertools, time, copy
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from Architecture.ArchSpec import CIM_Acc
+from Evaluation.common.EvalCommon import save_experiment_json
 from utils.Workload import WorkLoad, LoopNest, Mapping
 from utils.UtilsFunction.ToolFunction import get_Spatial_Unrolling
 from Simulator.Simulax import tranSimulator
@@ -361,7 +362,7 @@ def run_verify(acc, ops, scheme, mip_timelimit=120, log_fn=log):
     from utils.UtilsFunction.ToolFunction import save_result_json
     result_dir = os.path.join(os.path.dirname(__file__), '..', 'output', 'Eval_Result')
     result = {
-        'script': 'Verify_bruteforce',
+        'script': 'VerifyBruteforce',
         'workload': str(ops),
         'scheme': scheme,
         'bruteforce': {
@@ -374,11 +375,55 @@ def run_verify(acc, ops, scheme, mip_timelimit=120, log_fn=log):
         'mip': {
             'simu_latency': mip_simu_lat,
         },
-        'gap_percent': round((mip_simu_lat - best_lat) / best_lat * 100, 2)
+        'optimality_gap_pct': round((mip_simu_lat - best_lat) / best_lat * 100, 2)
             if mip_simu_lat and best_lat and best_lat < float('inf') else None,
     }
     result_file = save_result_json(result_dir, 'bruteforce', result)
     log_fn(f"\n结果已保存: {result_file}")
+
+    exp6_file = save_experiment_json(
+        output_dir=result_dir,
+        file_name=f"EXP-6_bruteforce_{time.strftime('%Y%m%d_%H%M%S')}.json",
+        experiment_id="EXP-6",
+        script_path=__file__,
+        config={
+            "verification_method": "bruteforce",
+            "workload": {dim: getattr(ops, dim) for dim in ops.dim2Dict if dim != '-'},
+            "scheme": scheme,
+            "mip_time_limit": mip_timelimit,
+        },
+        results={
+            "verification": {
+                "independent_optimal_latency": best_lat if best_lat < float('inf') else None,
+                "independent_optimal_energy": best_energy if best_energy < float('inf') else None,
+                "feasible_count": stats['feasible'],
+                "candidate_count": stats['candidates'],
+                "search_time_seconds": round(stats['time'], 3),
+                "mip_simulator_latency": mip_simu_lat,
+                "optimality_gap_pct": round((mip_simu_lat - best_lat) / best_lat * 100, 2)
+                    if mip_simu_lat and best_lat and best_lat < float('inf') else None,
+            },
+            "optimality_verification": [{
+                "model": "manual",
+                "layer": f"Conv_{ops.R}x{ops.S}_C{ops.C}K{ops.K}",
+                "tier": "small",
+                "mip_latency": mip_simu_lat,
+                "exhaustive_latency": best_lat if best_lat < float('inf') else None,
+                "is_optimal": (
+                    mip_simu_lat is not None
+                    and best_lat < float('inf')
+                    and abs(mip_simu_lat - best_lat) / best_lat < 0.01
+                ),
+                "optimality_gap_pct": round((mip_simu_lat - best_lat) / best_lat * 100, 2)
+                    if mip_simu_lat and best_lat and best_lat < float('inf') else None,
+                "solve_time_sec": round(stats['time'], 3),
+                "num_spatial_schemes": stats['candidates'],
+                "num_schemes_after_pruning": stats['feasible']
+            }],
+        },
+        anomalies=[],
+    )
+    log_fn(f"EXP-6结果已保存: {exp6_file}")
 
     return best_lat, mip_simu_lat
 

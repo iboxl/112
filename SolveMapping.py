@@ -3,7 +3,7 @@
 
 from utils.Workload import WorkLoad
 from utils.Tools import get_ConfigFile, append_scheme_summary, detect_parallel_config, auto_parallel_config, SharedUB
-from utils.SolverTSS import Solver
+from utils.SolverTSS import Solver, SolverProfile
 import gurobipy as gp
 from Simulator.Simulax import tranSimulator
 from utils.GlobalUT import *
@@ -16,6 +16,30 @@ import time, math, os, struct
 import multiprocessing as mp
 from multiprocessing.shared_memory import SharedMemory
 from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
+from dataclasses import dataclass, field
+
+@dataclass
+class MappingRunProfile:
+    objective: str = ""
+    dominance_pruning_enabled: bool = False
+    num_schemes_initial: int = 0
+    num_schemes_after_dominance: int = 0
+    num_schemes_after_static_lb: int = 0
+    num_schemes_dynamic_lb_pruned: int = 0
+    num_schemes_after_dynamic_lb: int = 0
+    num_schemes_submitted: int = 0
+    num_schemes_with_solution: int = 0
+    num_schemes_no_solution: int = 0
+    best_scheme_count: int = 0
+    best_scheme_origin_index: int = 0
+    best_metric: float = 0.0
+    timing_enumeration_sec: float = 0.0
+    timing_scoring_pruning_sec: float = 0.0
+    timing_mip_wall_sec: float = 0.0
+    timing_mip_cumulative_sec: float = 0.0
+    timing_total_sec: float = 0.0
+    parallel_config: dict = field(default_factory=dict)
+    best_solver_profile: SolverProfile | None = None
 
 _worker_env = None  # cached Gurobi Env, set by _init_worker
 
@@ -66,6 +90,9 @@ def solve_scheme_worker(count:int, origin_index:int, scheme, acc:CIM_Acc, ops:Wo
             "solver_result": [CONST.MAX_POS]*3, "sim_l": CONST.MAX_POS,
             "sim_e": CONST.MAX_POS, "profile": None, "dataflow": None,
             "has_solution": False, "outputdir_root": outputdir_root,
+            "skip_reason": "dynamic_lb",
+            "objective_lb": obj_lb,
+            "solver_profile": None,
         }
 
     solver = Solver(
@@ -112,6 +139,9 @@ def solve_scheme_worker(count:int, origin_index:int, scheme, acc:CIM_Acc, ops:Wo
             "dataflow": solver.dataflow if has_solution else None,
             "has_solution": has_solution,
             "outputdir_root": outputdir_root,
+            "skip_reason": None if has_solution else "no_solution",
+            "objective_lb": obj_lb,
+            "solver_profile": solver.profile,
         }
     finally:
         solver.close()
@@ -119,13 +149,17 @@ def solve_scheme_worker(count:int, origin_index:int, scheme, acc:CIM_Acc, ops:Wo
             _shm_handle.close()
 
 
-def update_best(result_pack:dict, best_metric:float, result, best_count:int, best_dataflow, solCount:int):
+def update_best(result_pack:dict, best_metric:float, result, best_count:int, best_dataflow, solCount:int,
+                best_solver_profile=None, best_origin_index:int=0):
     count = result_pack["count"]
+    origin_index = result_pack["origin_index"]
     solver_result = result_pack["solver_result"]
     sim_l = result_pack["sim_l"]
     sim_e = result_pack["sim_e"]
     profile = result_pack["profile"]
     has_solution = result_pack["has_solution"]
+    skip_reason = result_pack.get("skip_reason")
+    solver_profile = result_pack.get("solver_profile")
 
     if has_solution:
         solCount += 1
@@ -134,11 +168,11 @@ def update_best(result_pack:dict, best_metric:float, result, best_count:int, bes
             f"EDP-{round(sim_l * sim_e,3):<15}"
         )
         lat_msg = (
-            f"      |--- Latency Accuracy: {round(100-abs(solver_result[0]-sim_l)/sim_l*100,2)}%, "
+            f"      |--- Latency Relative Error: {round(abs(solver_result[0]-sim_l)/sim_l*100,2)}%, "
             f"Solver-{round(solver_result[0]):<10} and Simu-{round(sim_l,3):<10}"
         )
         eng_msg = (
-            f"      |--- Energy  Accuracy: {round(100-abs(solver_result[1]-sim_e)/sim_e*100,2)}%, "
+            f"      |--- Energy  Relative Error: {round(abs(solver_result[1]-sim_e)/sim_e*100,2)}%, "
             f"Solver-{round(solver_result[1]):<10} and Simu-{round(sim_e,3):<10}"
         )
 
@@ -149,6 +183,10 @@ def update_best(result_pack:dict, best_metric:float, result, best_count:int, bes
         Logger.info(result_msg)
         Logger.info(lat_msg)
         Logger.info(eng_msg)
+    elif skip_reason == "dynamic_lb":
+        result_msg = f"Scheme {count:<3} End: PRUNED_BY_DYNAMIC_LB"
+        append_scheme_summary(result_pack["outputdir_root"], result_msg)
+        Logger.info(result_msg)
     else:
         result_msg = f"Scheme {count:<3} End: NO BETTER SOLUTION"
         append_scheme_summary(result_pack["outputdir_root"], result_msg)
@@ -161,11 +199,19 @@ def update_best(result_pack:dict, best_metric:float, result, best_count:int, bes
         best_metric = solver_result[metric_index]
         best_count = count
         best_dataflow = result_pack["dataflow"]
+        best_solver_profile = solver_profile
+        best_origin_index = origin_index
 
-    return best_metric, result, best_count, best_dataflow, solCount
+    return best_metric, result, best_count, best_dataflow, solCount, best_solver_profile, best_origin_index
 
 def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str, singleIter=False, **kwargs):
     time_begin = time.time()
+    return_profile = kwargs.get("return_profile", False)
+    run_profile = MappingRunProfile(
+        objective=CONST.FLAG_OPT,
+        dominance_pruning_enabled=kwargs.get("dominance_pruning", False),
+        best_metric=bestMetric,
+    )
 
     if FLAG.INPUT_STATIONARY and (acc.core.size_input_buffer * acc.num_core >= ops.dim_M * ops.dim_K * ops.input.bitwidth):
         Logger.debug("Sufficient Buffer Resources for Input")
@@ -173,8 +219,11 @@ def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str, singl
     count, solCount = 0, 0
     best_metric = bestMetric
     best_count = 0
+    best_origin_index = 0
     best_dataflow = None
+    best_solver_profile = None
     result = [CONST.MAX_POS] * 5 + [None]
+    enumeration_begin = time.time()
 
     # ── Step 1: enumerate & prune spatial schemes ──────────────────────────
     if singleIter:
@@ -185,6 +234,9 @@ def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str, singl
             "scheme": scheme,
             "meta": score_scheme(acc=acc, ops=ops, scheme=scheme),
         }]
+        run_profile.num_schemes_initial = 1
+        run_profile.num_schemes_after_dominance = 1
+        run_profile.num_schemes_after_static_lb = 1
     else:
         scheme_records = []
         for origin_index, scheme in enumerate(
@@ -199,6 +251,9 @@ def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str, singl
             })
 
         total_candidates = len(scheme_records)
+        run_profile.num_schemes_initial = total_candidates
+        run_profile.timing_enumeration_sec = time.time() - enumeration_begin
+        pruning_begin = time.time()
 
         # ── Dominance pruning (optional, off by default) ─────────────────
         # NOT provably safe: a dominator with prime temporal factors may have
@@ -236,6 +291,7 @@ def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str, singl
                     Logger.info(f"Dominance pruning: {total_candidates} -> {len(scheme_records)} schemes.")
             else:
                 Logger.info(f"Dominance pruning skipped: spatial tile exceeds buffer capacity.")
+        run_profile.num_schemes_after_dominance = len(scheme_records)
 
         # ── Sort by utilization score ──────────────────────────────────────
         # High-utilization first → finds good bounds early → tightens metric_ub
@@ -257,6 +313,12 @@ def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str, singl
             if len(survived) < before:
                 Logger.info(f"Analytical LB screening: {before} -> {len(survived)} schemes (LB <= bestMetric).")
                 scheme_records = survived
+        run_profile.num_schemes_after_static_lb = len(scheme_records)
+        run_profile.timing_scoring_pruning_sec = time.time() - pruning_begin
+
+    if singleIter:
+        run_profile.timing_enumeration_sec = 0.0
+        run_profile.timing_scoring_pruning_sec = 0.0
 
     num_schemes = len(scheme_records)
 
@@ -302,8 +364,20 @@ def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str, singl
         f"sweep={sweep_workers}w×{sweep_threads}t(rest-{max(0,num_schemes-scout_size)}), "
         f"schemes={num_schemes}"
     )
+    run_profile.parallel_config = {
+        "physical_cores": parallel_config["physical_cores"],
+        "logical_cores": parallel_config["logical_cores"],
+        "usable_cores": usable,
+        "scout_workers": scout_workers,
+        "scout_threads": scout_threads,
+        "sweep_workers": sweep_workers,
+        "sweep_threads": sweep_threads,
+        "scout_size": scout_size,
+        "num_schemes": num_schemes,
+    }
 
     scheme_iter = iter(scheme_records)
+    mip_stage_begin = time.time()
 
     if not use_parallel:
         for scheme_record in scheme_iter:
@@ -328,9 +402,19 @@ def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str, singl
                 usable,
                 soft_mem_scout,
             )
+            run_profile.num_schemes_submitted += 1
             result_pack = solve_scheme_worker(*worker_args)
-            best_metric, result, best_count, best_dataflow, solCount = update_best(
-                result_pack, best_metric, result, best_count, best_dataflow, solCount
+            if result_pack.get("skip_reason") == "dynamic_lb":
+                run_profile.num_schemes_dynamic_lb_pruned += 1
+            elif result_pack["has_solution"]:
+                run_profile.num_schemes_with_solution += 1
+            else:
+                run_profile.num_schemes_no_solution += 1
+            solver_profile = result_pack.get("solver_profile")
+            if solver_profile is not None:
+                run_profile.timing_mip_cumulative_sec += solver_profile.total_time_sec
+            best_metric, result, best_count, best_dataflow, solCount, best_solver_profile, best_origin_index = update_best(
+                result_pack, best_metric, result, best_count, best_dataflow, solCount, best_solver_profile, best_origin_index
             )
     else:
         _shm = SharedMemory(create=True, size=8)
@@ -338,7 +422,7 @@ def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str, singl
         _shm_name = _shm.name
 
         def _run_phase(executor, records, threads, soft_mem, max_workers):
-            nonlocal count, best_metric, result, best_count, best_dataflow, solCount
+            nonlocal count, best_metric, result, best_count, best_dataflow, solCount, best_solver_profile, best_origin_index
             pending = {}
             rec_iter = iter(records)
             inflight_limit = max_workers * 2  # bound pending futures to limit memory
@@ -359,6 +443,7 @@ def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str, singl
                     acc, ops, best_metric, outputdir, rec["outputdir_scheme"],
                     threads, soft_mem, runtime_config, _shm_name,
                 )
+                run_profile.num_schemes_submitted += 1
                 future = executor.submit(solve_scheme_worker, *args)
                 pending[future] = scheme_count
                 count = scheme_count
@@ -375,8 +460,17 @@ def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str, singl
                 for future in done:
                     pending.pop(future)
                     result_pack = future.result()
-                    best_metric, result, best_count, best_dataflow, solCount = update_best(
-                        result_pack, best_metric, result, best_count, best_dataflow, solCount
+                    if result_pack.get("skip_reason") == "dynamic_lb":
+                        run_profile.num_schemes_dynamic_lb_pruned += 1
+                    elif result_pack["has_solution"]:
+                        run_profile.num_schemes_with_solution += 1
+                    else:
+                        run_profile.num_schemes_no_solution += 1
+                    solver_profile = result_pack.get("solver_profile")
+                    if solver_profile is not None:
+                        run_profile.timing_mip_cumulative_sec += solver_profile.total_time_sec
+                    best_metric, result, best_count, best_dataflow, solCount, best_solver_profile, best_origin_index = update_best(
+                        result_pack, best_metric, result, best_count, best_dataflow, solCount, best_solver_profile, best_origin_index
                     )
                     SharedUB(_shm).update_min(best_metric)
                 for rec in rec_iter:
@@ -402,6 +496,7 @@ def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str, singl
         finally:
             _shm.close()
             _shm.unlink()
+    run_profile.timing_mip_wall_sec = time.time() - mip_stage_begin
     
     if count == 0:
         raise ValueError("No feasible spatial scheme found after pre-screening")
@@ -417,6 +512,18 @@ def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str, singl
     with open(file_name, 'wb') as file:
         pickle.dump(best_dataflow, file)
 
+    run_profile.num_schemes_after_dynamic_lb = max(
+        0,
+        run_profile.num_schemes_after_static_lb - run_profile.num_schemes_dynamic_lb_pruned,
+    )
+    run_profile.best_scheme_count = best_count
+    run_profile.best_scheme_origin_index = best_origin_index
+    run_profile.best_metric = best_metric
+    run_profile.best_solver_profile = best_solver_profile
+    run_profile.timing_total_sec = time_end - time_begin
+
+    if return_profile:
+        return result, run_profile
     return result
 
 if __name__ == "__main__":

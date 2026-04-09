@@ -10,11 +10,35 @@ import time
 import numpy as np
 import gurobipy as gp
 from gurobipy import GRB, quicksum
+from dataclasses import dataclass
 from utils.GlobalUT import *
 from utils.UtilsFunction.SolverFunction import *
 from utils.factorization import flexible_factorization
 from utils.UtilsFunction.ToolFunction import getDivisors, getUniqueFactors
 import copy
+
+@dataclass
+class SolverProfile:
+    objective: str = ""
+    metric_upper_bound: float = 0.0
+    threads: int | None = None
+    soft_mem_limit_gb: float | None = None
+    model_build_time_sec: float = 0.0
+    feasibility_time_sec: float = 0.0
+    optimize_time_sec: float = 0.0
+    total_time_sec: float = 0.0
+    num_vars: int = 0
+    num_bin_vars: int = 0
+    num_constrs: int = 0
+    num_sos: int = 0
+    num_genconstrs: int = 0
+    status: int = 0
+    sol_count: int = 0
+    mip_gap: float | None = None
+    best_bound: float | None = None
+    node_count: float = 0.0
+    callback_mipsol_updates: int = 0
+    callback_dynamic_terminations: int = 0
 
 class Solver():
     def __init__(self, acc:CIM_Acc, ops:WorkLoad, tu, su, metric_ub, outputdir=None,
@@ -73,6 +97,12 @@ class Solver():
         
         self.result = {}
         self.dataflow = {}
+        self.profile = SolverProfile(
+            objective=CONST.FLAG_OPT,
+            metric_upper_bound=self.metric_ub,
+            threads=self.threads,
+            soft_mem_limit_gb=self.soft_mem_limit_gb,
+        )
 
         self.FACTORS = [flexible_factorization(_) for _ in self.tu]
         self.spatial_unrolling = [math.prod(col) for col in zip(*su)]
@@ -83,6 +113,7 @@ class Solver():
         Logger.critical(f"Best {CONST.FLAG_OPT} metric upper bound is {self.metric_ub}")
 
     def run(self):
+        run_start_time = time.time()
         Logger.info('* '*20 + "Start Running MIP Solver" + ' *'*20)
         model = self.model
         acc:CIM_Acc = self.acc
@@ -456,7 +487,7 @@ class Solver():
 
         for m in range(1, acc.Num_mem):
             for op, op_name in enumerate(['I','W','O']):
-                if acc.double_config[m][op] == 0:   # or doubleConfig
+                if acc.double_config[m][op] == 0 or FLAG.ABLATION_FIXED_DOUBLE_BUFFER:
                     indic_doubleMem[m,op] = 0
                 else:
                     indic_doubleMem[m,op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_doubleMem_({acc.mem2dict(m)},{op_name})")
@@ -1088,15 +1119,19 @@ class Solver():
             _ub_body = UB_latencyLevel[i + 1] if i + 1 < Num_Loops else t_MAC
             latency_Body[i] = model.addVar(lb=LB_Process[i+1], ub=_ub_body, vtype=GRB.CONTINUOUS, name=f"latency_Body_({i})")
             for op, op_name in enumerate(['I','W','O']):
-                if i < Num_Loops - 1 and op < 2:   # I/W 双缓冲时首迭代传输与父级流水重叠
-                    indic_dblOverlap = var_mul01(model, indic_doubleLoop[i+1,op], latency_Transfer[i+1,op],
-                                           A_ub=self.MAX_TRANS[op]+LAT_UNIT, var_ub=self.MAX_TRANS[op]+LAT_UNIT,
-                                           name=f"indic_dblOverlap_({i},{op_name})")
-                    model.addConstr(latency_Body[i] >= latency_Process[i+1,op] - indic_dblOverlap,
-                                     name=f"C_Body_({i},{op_name})")
-                else:
+                if FLAG.ABLATION_SIMPLIFIED_PIPELINE:
                     model.addConstr(latency_Body[i] >= latency_Process[i+1,op],
                                      name=f"C_Body_({i},{op_name})")
+                else:
+                    if i < Num_Loops - 1 and op < 2:   # I/W 双缓冲时首迭代传输与父级流水重叠
+                        indic_dblOverlap = var_mul01(model, indic_doubleLoop[i+1,op], latency_Transfer[i+1,op],
+                                               A_ub=self.MAX_TRANS[op]+LAT_UNIT, var_ub=self.MAX_TRANS[op]+LAT_UNIT,
+                                               name=f"indic_dblOverlap_({i},{op_name})")
+                        model.addConstr(latency_Body[i] >= latency_Process[i+1,op] - indic_dblOverlap,
+                                         name=f"C_Body_({i},{op_name})")
+                    else:
+                        model.addConstr(latency_Body[i] >= latency_Process[i+1,op],
+                                         name=f"C_Body_({i},{op_name})")
 
         # Cut: Σ Transfer ≥ transLatency for each used memory (strengthening)
         # 排除Macro Weight：CIM权重静态驻留，xMem被强制为0（line 509），Transfer路径不适用
@@ -1116,13 +1151,18 @@ class Solver():
             model.addConstr(latency_Critical[i] >= latency_Body[i], name=f"C_latency_cp_child_({i})")
             for op, op_name in enumerate(['I','W','O']):
                 coeff_rw = 2 if op == 2 else 1
-                # 双缓冲：Transfer 与 Body 并行 → 瓶颈取 max
-                model.addConstr(latency_Critical[i] >= coeff_rw * latency_Transfer[i,op], name=f"C_latency_cp_transfer_({i},{op_name})")
-                # 单缓冲：Transfer 与 Body 串行 → 瓶颈取 sum (tight big-M: M = max possible c*Transfer)
-                _M_tight = coeff_rw * (self.MAX_TRANS[op] + LAT_UNIT)
-                model.addConstr(latency_Critical[i] >= coeff_rw * latency_Transfer[i,op] + latency_Body[i]
-                                - _M_tight * indic_doubleLoop[i,op],
-                                 name=f"C_latency_cp_transfer+child_({i},{op_name})")
+                if FLAG.ABLATION_SIMPLIFIED_PIPELINE:
+                    # Simplified: always serial (Transfer + Body), no pipeline overlap
+                    model.addConstr(latency_Critical[i] >= coeff_rw * latency_Transfer[i,op] + latency_Body[i],
+                                     name=f"C_latency_cp_transfer+child_({i},{op_name})")
+                else:
+                    # 双缓冲：Transfer 与 Body 并行 → 瓶颈取 max
+                    model.addConstr(latency_Critical[i] >= coeff_rw * latency_Transfer[i,op], name=f"C_latency_cp_transfer_({i},{op_name})")
+                    # 单缓冲：Transfer 与 Body 串行 → 瓶颈取 sum (tight big-M: M = max possible c*Transfer)
+                    _M_tight = coeff_rw * (self.MAX_TRANS[op] + LAT_UNIT)
+                    model.addConstr(latency_Critical[i] >= coeff_rw * latency_Transfer[i,op] + latency_Body[i]
+                                    - _M_tight * indic_doubleLoop[i,op],
+                                     name=f"C_latency_cp_transfer+child_({i},{op_name})")
 
         # ─── L4: Process(i,λ) = c(λ)×Transfer + child + (F(i)−1)×Critical ─────────────────────────────────────────
         # Z_crit[i,p] = indic_loop2Factor[i,p] × Critical[i]
@@ -1263,8 +1303,19 @@ class Solver():
         model.Params.TimeLimit = 7  # Determine the feasibility within a 7s time limit.
         model.Params.MIPFocus = 1 
         model.update()
+        self.profile.model_build_time_sec = time.time() - run_start_time
+        self.profile.num_vars = model.NumVars
+        self.profile.num_constrs = model.NumConstrs
+        self.profile.num_sos = model.NumSOS
+        self.profile.num_genconstrs = model.NumGenConstrs
+        self.profile.num_bin_vars = sum(1 for var in model.getVars() if var.VType == GRB.BINARY)
+        feasibility_start_time = time.time()
         model.optimize()
+        self.profile.feasibility_time_sec = time.time() - feasibility_start_time
         if model.SolCount == 0:
+            self.profile.status = int(model.Status)
+            self.profile.sol_count = 0
+            self.profile.total_time_sec = time.time() - run_start_time
             self.result = [CONST.MAX_POS, CONST.MAX_POS, CONST.MAX_POS]
             # ''' Debug IIS
             # model.computeIIS()
@@ -1346,6 +1397,7 @@ class Solver():
                     result_val = obj_val / _ub_to_obj
                     _shared.update_min(result_val)
                     _state[2] = _shared.value * _ub_to_obj
+                    self.profile.callback_mipsol_updates += 1
                 elif where == GRB.Callback.MIP and _state[0] == 0:
                     _state[1] += 1
                     if _state[1] >= _REFRESH_NODES:
@@ -1353,11 +1405,25 @@ class Solver():
                         _state[2] = _shared.value * _ub_to_obj
                         obj_bound = model.cbGet(GRB.Callback.MIP_OBJBND)
                         if obj_bound > _state[2]:
+                            self.profile.callback_dynamic_terminations += 1
                             model.terminate()
 
         start_time = time.time()
         model.optimize(_cb)
         end_time = time.time()
+        self.profile.optimize_time_sec = end_time - start_time
+        self.profile.total_time_sec = end_time - run_start_time
+        self.profile.status = int(model.Status)
+        self.profile.sol_count = int(model.SolCount)
+        self.profile.node_count = float(getattr(model, "NodeCount", 0.0))
+        try:
+            self.profile.mip_gap = float(model.MIPGap)
+        except Exception:
+            self.profile.mip_gap = None
+        try:
+            self.profile.best_bound = float(model.ObjBound)
+        except Exception:
+            self.profile.best_bound = None
 
         ####################################################################  Debug & Output  #######################################################################
 
@@ -1400,7 +1466,8 @@ class Solver():
                         double_tag[m][op] = acc.double_Macro
                         continue
                     if acc.double_config[m][op]:
-                        double_tag[m][op] = round(indic_doubleMem[m,op].x)
+                        val = indic_doubleMem[m,op]
+                        double_tag[m][op] = round(val.x) if isinstance(val, gp.Var) else int(val)
                     else:
                         double_tag[m][op] = 0
             loops.usr_defined_double_flag = double_tag

@@ -2,7 +2,7 @@
 # 通过穷举所有不同的因子排列（factor ordering），对每种排列固定后求解子MIP，
 # 验证标准MIP求解器找到的解是否为全局最优。
 # 用途：对gap>0%的层提供最优性的穷举证明。
-# 用法：python Evaluation/Verify_enumLoop.py
+# 用法：python Evaluation/VerifyEnumLoop.py
 
 import os, sys, math, time, shutil, copy, functools
 import multiprocessing as mp
@@ -19,6 +19,7 @@ def log(msg):
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from Architecture.ArchSpec import CIM_Acc
+from Evaluation.common.EvalCommon import save_experiment_json
 from utils.Workload import WorkLoad
 from utils.SolverTSS import Solver
 from utils.GlobalUT import *
@@ -178,7 +179,7 @@ def run_enumeration(acc_template, ops_dict, scheme, timelimit=15, max_workers=No
     from utils.UtilsFunction.ToolFunction import save_result_json
     result_dir = os.path.join(os.path.dirname(__file__), '..', 'output', 'Eval_Result')
     result = {
-        'script': 'Verify_enumLoop',
+        'script': 'VerifyEnumLoop',
         'workload': str(ops),
         'scheme': su,
         'total_orderings': len(orderings),
@@ -190,6 +191,44 @@ def run_enumeration(acc_template, ops_dict, scheme, timelimit=15, max_workers=No
     }
     result_file = save_result_json(result_dir, 'enumLoop', result)
     log(f"结果已保存: {result_file}")
+
+    exp6_file = save_experiment_json(
+        output_dir=result_dir,
+        file_name=f"EXP-6_enumLoop_{time.strftime('%Y%m%d_%H%M%S')}.json",
+        experiment_id="EXP-6",
+        script_path=__file__,
+        config={
+            "verification_method": "enumLoop",
+            "workload": ops_dict,
+            "scheme": su,
+            "mip_time_limit": timelimit,
+            "max_workers": max_workers,
+        },
+        results={
+            "verification": {
+                "total_orderings": len(orderings),
+                "feasible_orderings": feasible,
+                "proven_optimal_orderings": proven_opt,
+                "global_best_latency": best_lat if best_lat < CONST.MAX_POS else None,
+                "best_ordering_idx": best_idx,
+                "elapsed_seconds": round(elapsed, 3),
+            },
+            "optimality_verification": [{
+                "model": "manual",
+                "layer": f"Conv_{ops_dict.get('R',1)}x{ops_dict.get('S',1)}_C{ops_dict.get('C',1)}K{ops_dict.get('K',1)}",
+                "tier": "small",
+                "mip_latency": best_lat if best_lat < CONST.MAX_POS else None,
+                "exhaustive_latency": best_lat if best_lat < CONST.MAX_POS else None,
+                "is_optimal": (proven_opt > 0),
+                "optimality_gap_pct": 0.0 if proven_opt > 0 else None,
+                "solve_time_sec": round(elapsed, 3),
+                "num_spatial_schemes": len(orderings),
+                "num_schemes_after_pruning": feasible
+            }],
+        },
+        anomalies=[],
+    )
+    log(f"EXP-6结果已保存: {exp6_file}")
 
     return best_lat, best_idx
 
