@@ -10,11 +10,35 @@ import time
 import numpy as np
 import gurobipy as gp
 from gurobipy import GRB, quicksum
+from dataclasses import dataclass
 from utils.GlobalUT import *
 from utils.UtilsFunction.SolverFunction import *
 from utils.factorization import flexible_factorization
 from utils.UtilsFunction.ToolFunction import getDivisors, getUniqueFactors
 import copy
+
+@dataclass
+class SolverProfile:
+    objective: str = ""
+    metric_upper_bound: float = 0.0
+    threads: int | None = None
+    soft_mem_limit_gb: float | None = None
+    model_build_time_sec: float = 0.0
+    feasibility_time_sec: float = 0.0
+    optimize_time_sec: float = 0.0
+    total_time_sec: float = 0.0
+    num_vars: int = 0
+    num_bin_vars: int = 0
+    num_constrs: int = 0
+    num_sos: int = 0
+    num_genconstrs: int = 0
+    status: int = 0
+    sol_count: int = 0
+    mip_gap: float | None = None
+    best_bound: float | None = None
+    node_count: float = 0.0
+    callback_mipsol_updates: int = 0
+    callback_dynamic_terminations: int = 0
 
 class Solver():
     def __init__(self, acc:CIM_Acc, ops:WorkLoad, tu, su, metric_ub, outputdir=None,
@@ -73,6 +97,12 @@ class Solver():
         
         self.result = {}
         self.dataflow = {}
+        self.profile = SolverProfile(
+            objective=CONST.FLAG_OPT,
+            metric_upper_bound=self.metric_ub,
+            threads=self.threads,
+            soft_mem_limit_gb=self.soft_mem_limit_gb,
+        )
 
         self.FACTORS = [flexible_factorization(_) for _ in self.tu]
         self.spatial_unrolling = [math.prod(col) for col in zip(*su)]
@@ -82,7 +112,135 @@ class Solver():
         
         Logger.critical(f"Best {CONST.FLAG_OPT} metric upper bound is {self.metric_ub}")
 
+    def _solve_trivial(self, acc: CIM_Acc, ops: WorkLoad, factors):
+        """Analytical solution for the degenerate case: Num_Loops == 0.
+
+        When spatial unrolling covers the entire computation, all temporal
+        factors are 1 and the mapping has zero degrees of freedom. The result
+        is computed directly from the MIP model's L5/L6 latency formulas and
+        per-memory energy formulas, evaluated at the unique feasible point.
+        """
+        start_time = time.time()
+        Logger.info("Num_Loops == 0: analytical solution (no MIP needed)")
+
+        # ── Spatial volume at each memory level ───────────────────────────────
+        spur = {}
+        for m in range(1, acc.Num_mem):
+            for d in range(1, ops.Num_dim):
+                for op in range(3):
+                    spur[m, op, d] = 1
+                    for u in range(acc.Num_SpUr):
+                        if m <= acc.SpUr2Mem[u, op]:
+                            spur[m, op, d] *= self.su[u][d]
+
+        # ── Latency (MIP model L5/L6, simplified for Num_Loops=0) ────────────
+        # No temporal loops → all data bootstrapped from DRAM before compute.
+        # bootstrap[op] = full operand size / DRAM bandwidth
+        # Output uses precision_final (no partial sums when Num_Loops=0).
+        def dram_prec(op):
+            return acc.precision_final if op == 2 else acc.precision[acc.Dram2mem, op]
+
+        MAX_SIZE = ops.size
+        bootstrap = [MAX_SIZE[op] * dram_prec(op) / acc.bw[acc.Dram2mem] for op in range(3)]
+        max_startup = max(bootstrap)
+        t_MAC = acc.t_MAC
+        # L6: res_latency >= MaxStartup + Process[0,op] + BootstrapWrite[O]
+        # Process[0,op] = t_MAC (base case); BootstrapWrite only for Output.
+        solved_latency = max_startup + t_MAC + bootstrap[2]
+
+        # ── Energy (per-memory formulas, simplified for Num_Loops=0) ──────────
+        # All temporal factor contributions vanish (log(1)=0).
+        # Only unconditional memories contribute (DRAM, IReg, OReg);
+        # all other memories are bypassed (indic_usedMem=0).
+        # No partial sums → Output precision = precision_final everywhere.
+
+        # MAC energy: count_mac = 1 (single temporal pass), count_core from spatial
+        count_core = 1
+        for d in range(1, ops.Num_dim):
+            count_core *= self.su[0][d]
+        energy_comp = acc.cost_ActMacro * 1 * count_core
+
+        # Per-memory read/write energy for unconditional memories
+        energy_rw = 0.0
+        unconditional_mems = {acc.Dram2mem, acc.IReg2mem, acc.OReg2mem}
+        for m in unconditional_mems:
+            for op in range(3):
+                if not acc.mappingArray[op][m]:
+                    continue
+
+                # Tile volume at this memory level (spatial-only)
+                dim_at_m = [1] * ops.Num_dim
+                for d in range(1, ops.Num_dim):
+                    dim_at_m[d] = spur.get((m, op, d), 1)
+                vol = ops.get_operand_size(dim_at_m, op)
+
+                # Access count: product of spatial unrollings BELOW this level
+                count = 1
+                for d in range(1, ops.Num_dim):
+                    for u in range(acc.Num_SpUr):
+                        if m > acc.SpUr2Mem[u, op]:
+                            count *= self.su[u][d]
+
+                prec = acc.precision_final if op == 2 else acc.precision[m, op]
+
+                can_read = (m not in (acc.IReg2mem, acc.OReg2mem, acc.Macro2mem)
+                            and acc.cost_r[m] > 0)
+                can_write = m > 1
+
+                e = 0.0
+                if can_read:
+                    e += acc.cost_r[m] * prec * count * vol       # r2L: read toward compute
+                if can_write:
+                    e += acc.cost_w[m] * prec * count * vol       # w2L: write from DRAM side
+                if op == 2 and can_read and m > acc.Dram2mem:
+                    e += acc.cost_r[m] * prec * count * vol       # r2H: output read-back
+                if op == 2:
+                    e += acc.cost_w[m] * prec * count * vol       # w2H: output write-back
+                energy_rw += e
+
+        energy_leakage = acc.leakage_per_cycle * solved_latency
+        solved_energy = energy_rw + energy_comp + energy_leakage
+
+        if CONST.FLAG_OPT == "EDP":
+            solved_edp = solved_latency * solved_energy * CONST.SCALINGFACTOR
+        else:
+            solved_edp = solved_latency * solved_energy * CONST.SCALINGFACTOR
+
+        self.result = [solved_latency, solved_energy, solved_edp]
+
+        # ── Build trivial dataflow for simulator validation ───────────────────
+        # Single dummy temporal loop (dimSize=1) at DRAM satisfies simulator's
+        # non-empty tm requirement while being semantically equivalent to no loop.
+        loops = LoopNest(acc=acc, ops=ops)
+        loops.tm.append(Mapping(dim=1, dimSize=1,
+                                mem=[acc.Dram2mem, acc.Dram2mem, acc.Dram2mem]))
+        for u in range(acc.Num_SpUr):
+            for d in range(1, ops.Num_dim):
+                if self.su[u][d] > 1:
+                    loops.sm.append(Mapping(dim=d, dimSize=self.su[u][d],
+                                           mem=[acc.SpUr2Mem[u, op] for op in range(3)]))
+        double_tag = [[0] * 3 for _ in range(acc.Num_mem + 1)]
+        for op in range(3):
+            double_tag[acc.Num_mem][op] = acc.double_Macro
+        loops.usr_defined_double_flag = double_tag
+        loops.psum_flag = {m: False for m in range(1, acc.Num_mem)}
+        self.dataflow = loops
+
+        # ── Profile ───────────────────────────────────────────────────────────
+        elapsed = time.time() - start_time
+        self.profile.total_time_sec = elapsed
+        self.profile.model_build_time_sec = elapsed
+        self.profile.status = 2  # OPTIMAL equivalent
+        self.profile.sol_count = 1
+        self.profile.mip_gap = 0.0
+        self.profile.num_vars = 0
+        self.profile.num_constrs = 0
+
+        Logger.critical(f"Trivial solution: Latency={solved_latency}, Energy={round(solved_energy, 3)}, "
+                        f"EDP={solved_edp:.3e} (analytical, {elapsed:.4f}s)")
+
     def run(self):
+        run_start_time = time.time()
         Logger.info('* '*20 + "Start Running MIP Solver" + ' *'*20)
         model = self.model
         acc:CIM_Acc = self.acc
@@ -92,6 +250,13 @@ class Solver():
         TEMP_DIVISORS = [getDivisors(d) for d in self.tu]
 
         Num_Loops = sum(len(f) for f in factors[1:ops.Num_dim] if f != [1])
+
+        # ── Degenerate case: Num_Loops == 0 (spatial covers everything) ────────
+        # All temporal factors are 1 → zero degrees of freedom → unique solution.
+        # Compute analytically from MIP model formulas (L5/L6, per-memory energy).
+        if Num_Loops == 0:
+            self._solve_trivial(acc, ops, factors)
+            return
 
         MAX_SIZE = self.ops.size
 
@@ -130,7 +295,7 @@ class Solver():
 
         LAT_UNIT = 1 / CONST.SCALE_LATENCY
         t_MAC = acc.t_MAC / CONST.SCALE_LATENCY
-        XMAX_TOTAL = {0: min(4, Num_Loops), 1: min(2, Num_Loops), 2: min(4, Num_Loops)}
+        MAX_TRANSFER_LEVELS = {0: min(4, Num_Loops), 1: min(2, Num_Loops), 2: min(4, Num_Loops)}
 
         TOTAL_TEMPORAL_ITERS = max(MIN_INNER_PROD[0], 1)
         MAX_STAGE_TRANSFER = max((2 if op == 2 else 1) * self.MAX_TRANS[op] for op in range(3))
@@ -149,7 +314,7 @@ class Solver():
         _UB_P = [0] * (Num_Loops + 1)
         _UB_P[Num_Loops] = t_MAC
         for _i in range(Num_Loops - 1, -1, -1):
-            _UB_P[_i] = _f_max * (2 * MAX_STAGE_TRANSFER + _UB_P[_i + 1])
+            _UB_P[_i] = _f_max * (MAX_STAGE_TRANSFER + 2 * LAT_UNIT + _UB_P[_i + 1])
         UB_latencyLevel = {
             i: max(min(UB_latencySimple, _UB_P[i]), max(t_MAC, LAT_UNIT))
             for i in range(Num_Loops)
@@ -160,11 +325,11 @@ class Solver():
         for _i in range(Num_Loops - 1, -1, -1):
             LB_Process[_i] = MIN_INNER_PROD[_i] * t_MAC
 
-        # Critical[i] ≤ c_max*Transfer + Body ≤ 2*MAX_STAGE + UB_Process[i+1], much tighter than UB_Process[i]
+        # Critical[i] ≤ c_max*(Transfer+bypass) + Body; bypass adds at most 2*LAT_UNIT (c_max=2, 1 cycle each)
         UB_Critical = {}
         for _i in range(Num_Loops):
             _ub_child = UB_latencyLevel[_i + 1] if _i + 1 < Num_Loops else t_MAC
-            UB_Critical[_i] = 2 * MAX_STAGE_TRANSFER + _ub_child
+            UB_Critical[_i] = MAX_STAGE_TRANSFER + 2 * LAT_UNIT + _ub_child
 
         spur = {}
         UB_dataVolume, UB_lg_dataVolume = {}, {}
@@ -380,14 +545,14 @@ class Solver():
 
         KEEP_temp_Output_irDim = any(factors[d] != [1] and ops.relevance[2][d] == 0 for d in range(1, ops.Num_dim))
 
-        indic_irDim_ExistIN = gp.tupledict()                # indic_irDim_ExistIN[m] = {0,1}
+        indic_hasIrrelevantDim = gp.tupledict()                # indic_hasIrrelevantDim[m] = {0,1}
         for m in range(1, acc.Num_mem):
             op, op_name = 2, 'O'
             if acc.mappingArray[op][m] == 0 or (not KEEP_temp_Output_irDim):
-                indic_irDim_ExistIN[m] = 0
+                indic_hasIrrelevantDim[m] = 0
                 continue
             else:
-                indic_irDim_ExistIN[m] = model.addVar(vtype=GRB.BINARY, name=f"indic_irDim_ExistIN_({acc.mem2dict(m)})")
+                indic_hasIrrelevantDim[m] = model.addVar(vtype=GRB.BINARY, name=f"indic_hasIrrelevantDim_({acc.mem2dict(m)})")
 
                 sum_ir_terms = 0
                 for d in range(1, ops.Num_dim):
@@ -395,26 +560,26 @@ class Solver():
                         continue
                     for f in range(len(factors[d])):
                         sum_ir_terms += indic_factor2Mem[d, f, op, m]
-                        model.addConstr(indic_irDim_ExistIN[m] >= indic_factor2Mem[d, f, op, m],
+                        model.addConstr(indic_hasIrrelevantDim[m] >= indic_factor2Mem[d, f, op, m],
                                         name=f"C_has_ir_lb_({acc.mem2dict(m)},{ops.dim2Dict[d]},{f})")
-                model.addConstr(indic_irDim_ExistIN[m] <= sum_ir_terms, name=f"C_has_ir_ub_({acc.mem2dict(m)})")
+                model.addConstr(indic_hasIrrelevantDim[m] <= sum_ir_terms, name=f"C_has_ir_ub_({acc.mem2dict(m)})")
 
-        indic_holdPsum = gp.tupledict()                     # indic_holdPsum[m] = {0,1}
+        indic_holdPartialSum = gp.tupledict()                     # indic_holdPartialSum[m] = {0,1}
         for m in range(1, acc.Num_mem):
             op, op_name = 2, 'O'
             if acc.mappingArray[op][m] == 0 or (not KEEP_temp_Output_irDim):
-                indic_holdPsum[m] = 0
+                indic_holdPartialSum[m] = 0
                 continue
             else:
-                indic_holdPsum[m] = model.addVar(vtype=GRB.BINARY, name=f"indic_holdPsum_({acc.mem2dict(m)})")
+                indic_holdPartialSum[m] = model.addVar(vtype=GRB.BINARY, name=f"indic_holdPartialSum_({acc.mem2dict(m)})")
 
-                model.addConstr( m*indic_holdPsum[m] >= quicksum(indic_irDim_ExistIN[m1] for m1 in range(1,m+1)),
-                                name=f"C_indic_holdPsum_({acc.mem2dict(m)})_1")
-                model.addConstr( indic_holdPsum[m] <= quicksum(indic_irDim_ExistIN[m1] for m1 in range(1,m+1)),
-                                name=f"C_indic_holdPsum_({acc.mem2dict(m)})_2")
+                model.addConstr( m*indic_holdPartialSum[m] >= quicksum(indic_hasIrrelevantDim[m1] for m1 in range(1,m+1)),
+                                name=f"C_indic_holdPartialSum_({acc.mem2dict(m)})_1")
+                model.addConstr( indic_holdPartialSum[m] <= quicksum(indic_hasIrrelevantDim[m1] for m1 in range(1,m+1)),
+                                name=f"C_indic_holdPartialSum_({acc.mem2dict(m)})_2")
 
         def lg_prec_O(mem):
-            state = indic_holdPsum[mem]
+            state = indic_holdPartialSum[mem]
             if isinstance(state, gp.Var):
                 return math.log(acc.precision_final) + (math.log(acc.precision_psum) - math.log(acc.precision_final)) * state
             return math.log(acc.precision_psum) if state else math.log(acc.precision_final)
@@ -424,7 +589,7 @@ class Solver():
         for op, op_name in enumerate(['I','W','O']):
             acc.mappingArray[op].append(1)
             indic_usedMem[acc.Num_mem,op] = 1
-        indic_nxtMem = gp.tupledict()
+        indic_nextMem = gp.tupledict()
         for m in range(1, acc.Num_mem):
             for op, op_name in enumerate(['I','W','O']):
                 if acc.mappingArray[op][m] == 0:
@@ -433,18 +598,18 @@ class Solver():
                 sum_nxt = 0
                 for m1 in range(m+1, acc.Num_mem+1):
                     if acc.mappingArray[op][m1] == 0:
-                        indic_nxtMem[m,m1,op] = 0
+                        indic_nextMem[m,m1,op] = 0
                         continue
                         
-                    indic_nxtMem[m,m1,op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_nextMem_({acc.mem2dict(m)},{acc.mem2dict(m1)},{op_name})")
+                    indic_nextMem[m,m1,op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_nextMem_({acc.mem2dict(m)},{acc.mem2dict(m1)},{op_name})")
 
-                    model.addConstr(indic_nxtMem[m,m1,op] <= indic_usedMem[m1,op], name=f"C_nxtMem_Valid_({acc.mem2dict(m)},{acc.mem2dict(m1)},{op_name})")
+                    model.addConstr(indic_nextMem[m,m1,op] <= indic_usedMem[m1,op], name=f"C_nxtMem_Valid_({acc.mem2dict(m)},{acc.mem2dict(m1)},{op_name})")
                     for m2 in range(m+1, m1):
                         if acc.mappingArray[op][m2] == 1:
-                            model.addConstr(indic_nxtMem[m, m1, op] <= 1 - indic_usedMem[m2, op],
+                            model.addConstr(indic_nextMem[m, m1, op] <= 1 - indic_usedMem[m2, op],
                                             name=f"C_NxtMem_Block_({acc.mem2dict(m)},{acc.mem2dict(m1)},{op_name})_by_({acc.mem2dict(m2)})")
                     
-                    sum_nxt += indic_nxtMem[m,m1,op]
+                    sum_nxt += indic_nextMem[m,m1,op]
 
                 model.addConstr(sum_nxt == indic_usedMem[m,op])
 
@@ -452,11 +617,11 @@ class Solver():
 
         indic_doubleMem = gp.tupledict()        # indic_doubleMem[m,op] = {0,1}
         indic_doubleLoop = gp.tupledict()       # indic_doubleloop[i,op] = {0,1} 
-        indic_feeds_DB = gp.tupledict()         # indic_feeds_DB[m,op] = {0,1}  表示 Memory m 的下一级是否双缓冲（无论是通过 Bypass 还是直接连接）
+        indic_feedsDoubleBuf = gp.tupledict()         # indic_feedsDoubleBuf[m,op] = {0,1}  表示 Memory m 的下一级是否双缓冲（无论是通过 Bypass 还是直接连接）
 
         for m in range(1, acc.Num_mem):
             for op, op_name in enumerate(['I','W','O']):
-                if acc.double_config[m][op] == 0:   # or doubleConfig
+                if acc.double_config[m][op] == 0 or FLAG.ABLATION_FIXED_DOUBLE_BUFFER:
                     indic_doubleMem[m,op] = 0
                 else:
                     indic_doubleMem[m,op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_doubleMem_({acc.mem2dict(m)},{op_name})")
@@ -465,18 +630,18 @@ class Solver():
         for m in range(1, acc.Num_mem):
             for op, op_name in enumerate(['I','W','O']):
                 if acc.mappingArray[op][m] == 0:
-                    indic_feeds_DB[m, op] = 0
+                    indic_feedsDoubleBuf[m, op] = 0
                     continue
-                indic_feeds_DB[m, op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_feeds_DB_({acc.mem2dict(m)},{op_name})")
+                indic_feedsDoubleBuf[m, op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_feedsDoubleBuf_({acc.mem2dict(m)},{op_name})")
                 
                 quad_expr = 0
                 for m1 in range(m+1, acc.Num_mem): # 注意边界，假设 acc.Num_mem 是最大索引(如Macro)
                     if acc.mappingArray[op][m1]:
                         if acc.double_config[m1][op] == 1:
-                            quad_expr += var_AandB(model, indic_nxtMem[m,m1,op], indic_doubleMem[m1,op],
+                            quad_expr += var_AandB(model, indic_nextMem[m,m1,op], indic_doubleMem[m1,op],
                                                     name=f"Quad_Indic_feedsDB_({acc.mem2dict(m)},{op_name})_to_{acc.mem2dict(m1)}")
                 
-                model.addConstr(indic_feeds_DB[m,op] == quad_expr, name=f"C_indic_feeds_DB_{m}_{op_name}")
+                model.addConstr(indic_feedsDoubleBuf[m,op] == quad_expr, name=f"C_indic_feedsDoubleBuf_{m}_{op_name}")
 
         for i in range(Num_Loops):
             for op, op_name in enumerate(['I','W','O']):
@@ -485,72 +650,72 @@ class Solver():
                 quad_expr_loop = 0
                 for m in range(1, acc.Num_mem):
                     if acc.mappingArray[op][m]:
-                        quad_expr_loop += var_AandB(model, indic_loop2Mem[i,op,m], indic_feeds_DB[m,op],
+                        quad_expr_loop += var_AandB(model, indic_loop2Mem[i,op,m], indic_feedsDoubleBuf[m,op],
                                                      name=f"Quad_Indic_doubleLoop_({i},{op_name})_{acc.mem2dict(m)}")
                 
                 model.addConstr(indic_doubleLoop[i,op] == quad_expr_loop, name=f"C_Indic_doubleLoop_({i},{op_name})")
         
         # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -#    
         
-        indic_xMem = gp.tupledict()                         # indic_xMem[i,op] = {0,1}
-        indic_xMemCarry = gp.tupledict()                    # indic_xMemCarry[i,op] = {0,1}
+        indic_hasTransfer = gp.tupledict()                         # indic_hasTransfer[i,op] = {0,1}
+        indic_hasTransferCarry = gp.tupledict()                    # indic_hasTransferCarry[i,op] = {0,1}
         for op, op_name in enumerate(['I', 'W', 'O']):
-            indic_sameMem, indic_boundaryMem = {}, {}
+            indic_sameMem, indic_memBoundary = {}, {}
 
             for i in range(Num_Loops):
                 if i == Num_Loops-1:
-                    indic_boundaryMem[i] = 1 - indic_loop2Mem[i,op,acc.Macro2mem] if op_name == 'W' else 1 
+                    indic_memBoundary[i] = 1 - indic_loop2Mem[i,op,acc.Macro2mem] if op_name == 'W' else 1 
                 else:
-                    indic_boundaryMem[i] = model.addVar(vtype=GRB.BINARY, name=f"Indic_boundaryMem_({i},{op_name})")
+                    indic_memBoundary[i] = model.addVar(vtype=GRB.BINARY, name=f"Indic_memBoundary_({i},{op_name})")
                     tmp_diff = quicksum(m*indic_loop2Mem[i+1,op,m] for m in range(1,acc.Num_mem)) - quicksum(m*indic_loop2Mem[i,op,m] for m in range(1,acc.Num_mem))
-                    model.addConstr(tmp_diff >= indic_boundaryMem[i], name=f"C_tmp_diff_({i},{op_name})")
-                    model.addConstr(tmp_diff <= acc.Num_mem * indic_boundaryMem[i], name=f"C_tmp_diff_ub_({i},{op_name})")
-                indic_sameMem[i] = 1 - indic_boundaryMem[i]
+                    model.addConstr(tmp_diff >= indic_memBoundary[i], name=f"C_tmp_diff_({i},{op_name})")
+                    model.addConstr(tmp_diff <= acc.Num_mem * indic_memBoundary[i], name=f"C_tmp_diff_ub_({i},{op_name})")
+                indic_sameMem[i] = 1 - indic_memBoundary[i]
 
             for i in range(Num_Loops-1, -1, -1):
                 '''
-                indic_xMemCarry[i, op] = 
-                        indic_boundaryMem[i, op] OR (indic_sameMem[i, op] AND indic_xMemCarry[i+1,op] AND (NOT indic_relevantLoop[i+1, op]))
+                indic_hasTransferCarry[i, op] = 
+                        indic_memBoundary[i, op] OR (indic_sameMem[i, op] AND indic_hasTransferCarry[i+1,op] AND (NOT indic_relevantLoop[i+1, op]))
                 '''
                 if i == Num_Loops-1:
-                    indic_xMemCarry[i,op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_xMemCarry_({i},{op_name})")
-                    model.addConstr(indic_xMemCarry[i,op] == indic_boundaryMem[i],
-                                    name=f"C_xMemCarry_last_({op_name})")
+                    indic_hasTransferCarry[i,op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_transferCarry_({i},{op_name})")
+                    model.addConstr(indic_hasTransferCarry[i,op] == indic_memBoundary[i],
+                                    name=f"C_transferCarry_last_({op_name})")
                 else:
-                    indic_xMemCarry[i,op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_xMemCarry_({i},{op_name})")
-                    model.addConstr(indic_xMemCarry[i,op] >= indic_boundaryMem[i], name=f"C_xMemCarry_boundary_({i},{op_name})")
-                    model.addConstr(indic_xMemCarry[i,op] <= indic_boundaryMem[i] + indic_xMemCarry[i+1,op],
-                                    name=f"C_xMemCarry_next_ub_({i},{op_name})")
-                    model.addConstr(indic_xMemCarry[i,op] <= indic_boundaryMem[i] + 1 - indic_relevantLoop[i+1, op],
-                                    name=f"C_xMemCarry_irrel_ub_({i},{op_name})")
-                    model.addConstr(indic_xMemCarry[i,op] >= indic_sameMem[i] + indic_xMemCarry[i+1,op] - indic_relevantLoop[i+1, op] - 1,
-                                    name=f"C_xMemCarry_same_lb_({i},{op_name})")
+                    indic_hasTransferCarry[i,op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_transferCarry_({i},{op_name})")
+                    model.addConstr(indic_hasTransferCarry[i,op] >= indic_memBoundary[i], name=f"C_transferCarry_boundary_({i},{op_name})")
+                    model.addConstr(indic_hasTransferCarry[i,op] <= indic_memBoundary[i] + indic_hasTransferCarry[i+1,op],
+                                    name=f"C_transferCarry_next_ub_({i},{op_name})")
+                    model.addConstr(indic_hasTransferCarry[i,op] <= indic_memBoundary[i] + 1 - indic_relevantLoop[i+1, op],
+                                    name=f"C_transferCarry_irrel_ub_({i},{op_name})")
+                    model.addConstr(indic_hasTransferCarry[i,op] >= indic_sameMem[i] + indic_hasTransferCarry[i+1,op] - indic_relevantLoop[i+1, op] - 1,
+                                    name=f"C_transferCarry_same_lb_({i},{op_name})")
 
             for i in range(Num_Loops): 
                 '''
-                indic_xMem[i, op] = indic_xMemCarry[i, op] AND (indic_relevantLoop[i, op] OR (NOT indic_sameMem[i-1, op]))
+                indic_hasTransfer[i, op] = indic_hasTransferCarry[i, op] AND (indic_relevantLoop[i, op] OR (NOT indic_sameMem[i-1, op]))
                 '''       
                 if i == 0:
-                    indic_xMem[i,op] = indic_xMemCarry[i,op]
+                    indic_hasTransfer[i,op] = indic_hasTransferCarry[i,op]
                 else:
-                    indic_xMem[i,op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_xMem_({i},{op_name})")
-                    model.addConstr(indic_xMem[i, op] <= indic_xMemCarry[i,op], name=f"C_xMem_carry_({i},{op_name})")
-                    model.addConstr(indic_xMem[i, op] <= indic_relevantLoop[i, op] + 1 - indic_sameMem[i-1],
-                                    name=f"C_xMem_assignable_ub_({i},{op_name})")
-                    model.addConstr(indic_xMem[i, op] >= indic_xMemCarry[i,op] - indic_sameMem[i-1],
-                                    name=f"C_xMem_blockstart_lb_({i},{op_name})")
-                    model.addConstr(indic_xMem[i, op] >= indic_xMemCarry[i,op] + indic_relevantLoop[i, op] + indic_sameMem[i-1] - 2,
-                                    name=f"C_xMem_relevant_lb_({i},{op_name})")
+                    indic_hasTransfer[i,op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_hasTransfer_({i},{op_name})")
+                    model.addConstr(indic_hasTransfer[i, op] <= indic_hasTransferCarry[i,op], name=f"C_hasTransfer_carry_({i},{op_name})")
+                    model.addConstr(indic_hasTransfer[i, op] <= indic_relevantLoop[i, op] + 1 - indic_sameMem[i-1],
+                                    name=f"C_hasTransfer_assignable_ub_({i},{op_name})")
+                    model.addConstr(indic_hasTransfer[i, op] >= indic_hasTransferCarry[i,op] - indic_sameMem[i-1],
+                                    name=f"C_hasTransfer_blockstart_lb_({i},{op_name})")
+                    model.addConstr(indic_hasTransfer[i, op] >= indic_hasTransferCarry[i,op] + indic_relevantLoop[i, op] + indic_sameMem[i-1] - 2,
+                                    name=f"C_hasTransfer_relevant_lb_({i},{op_name})")
                 if op_name == 'W':
-                    model.addConstr(indic_xMem[i,op] <= 1 - indic_loop2Mem[i, op, acc.Macro2mem], name=f"C_xMem_macro_({i},{op_name})")
+                    model.addConstr(indic_hasTransfer[i,op] <= 1 - indic_loop2Mem[i, op, acc.Macro2mem], name=f"C_hasTransfer_macro_({i},{op_name})")
                     # CIM inherent mapping constraint
 
-            model.addConstr(quicksum(indic_xMem[i,op] for i in range(Num_Loops)) <= XMAX_TOTAL[op], name=f"max_xMem_{op_name}")
+            model.addConstr(quicksum(indic_hasTransfer[i,op] for i in range(Num_Loops)) <= MAX_TRANSFER_LEVELS[op], name=f"max_hasTransfer_{op_name}")
             # Valid inequality: #xMem boundaries >= #used_memory_levels - 1
             _sum_used = quicksum(indic_usedMem[m,op] for m in range(1, acc.Num_mem) if acc.mappingArray[op][m])
             if Num_Loops > 1:
-                model.addConstr(quicksum(indic_xMem[i,op] for i in range(Num_Loops)) >= _sum_used - 1,
-                                name=f"min_xMem_from_usedMem_{op_name}")
+                model.addConstr(quicksum(indic_hasTransfer[i,op] for i in range(Num_Loops)) >= _sum_used - 1,
+                                name=f"min_hasTransfer_from_usedMem_{op_name}")
 
         # SOS1 declarations: guide Gurobi to use efficient SOS branching on "exactly-one" indicator groups.
         # Not a constraint (already implied by Σ=1 + binary), but changes branching from linear to log depth.
@@ -791,7 +956,7 @@ class Solver():
                         model.addConstr(vol_total_o == tmp_volume,
                                         name=f"C_vol_total_({acc.mem2dict(m)},{op_name})")
 
-                        vol_psum_o = var_mul01(model, indic_holdPsum[m], vol_total_o,
+                        vol_psum_o = var_mul01(model, indic_holdPartialSum[m], vol_total_o,
                                             name=f"vol_psum_({acc.mem2dict(m)},{op_name})",
                                             A_ub=2 * UB_dataVolume[m, op],
                                             var_ub=2 * UB_dataVolume[m, op])
@@ -825,44 +990,44 @@ class Solver():
 
         # A loop can be irrelevant to the operand yet still trigger a real transfer.
         # Only the stationary irrelevant suffix inside a memory block should be filtered.
-        indic_stationaryIR = gp.tupledict()        # irrelevant carry loop that is not an actual xMem transfer
+        indic_stationaryIrrelevant = gp.tupledict()        # irrelevant carry loop that is not an actual xMem transfer
         for i in range(Num_Loops):
             for op, op_name in enumerate(['I','W','O']):
-                indic_stationaryIR[i,op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_stationaryIR_({i},{op_name})")
-                model.addConstr(indic_stationaryIR[i,op] <= indic_xMemCarry[i,op], name=f"C_stationaryIR_carry_({i},{op_name})")
-                model.addConstr(indic_stationaryIR[i,op] <= 1 - indic_relevantLoop[i,op], name=f"C_stationaryIR_irrel_({i},{op_name})")
-                model.addConstr(indic_stationaryIR[i,op] <= 1 - indic_xMem[i,op], name=f"C_stationaryIR_noX_({i},{op_name})")
-                model.addConstr(indic_stationaryIR[i,op] >= indic_xMemCarry[i,op] - indic_relevantLoop[i,op] - indic_xMem[i,op],
-                                name=f"C_stationaryIR_lb_({i},{op_name})")
+                indic_stationaryIrrelevant[i,op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_stationaryIrrelevant_({i},{op_name})")
+                model.addConstr(indic_stationaryIrrelevant[i,op] <= indic_hasTransferCarry[i,op], name=f"C_stationaryIrrelevant_carry_({i},{op_name})")
+                model.addConstr(indic_stationaryIrrelevant[i,op] <= 1 - indic_relevantLoop[i,op], name=f"C_stationaryIrrelevant_irrel_({i},{op_name})")
+                model.addConstr(indic_stationaryIrrelevant[i,op] <= 1 - indic_hasTransfer[i,op], name=f"C_stationaryIrrelevant_noX_({i},{op_name})")
+                model.addConstr(indic_stationaryIrrelevant[i,op] >= indic_hasTransferCarry[i,op] - indic_relevantLoop[i,op] - indic_hasTransfer[i,op],
+                                name=f"C_stationaryIrrelevant_lb_({i},{op_name})")
                 '''
-                indic_stationaryIR[i, op] = xMemCarry AND NOT(relevantLoop OR xMem)
+                indic_stationaryIrrelevant[i, op] = xMemCarry AND NOT(relevantLoop OR xMem)
                 '''
 
-        indic_factor2Mem_NotBottleIR = gp.tupledict()
-        indic_NotBottleIR = gp.tupledict()
+        indic_factor2Mem_effective = gp.tupledict()
+        indic_effectiveFactor = gp.tupledict()
         for op, op_name in enumerate(['I','W','O']):
             for d in range(1, ops.Num_dim):
                 if factors[d] == [1]:
                     continue
                 for f in range(len(factors[d])):
                     if ops.relevance[op][d] == 1:
-                        indic_NotBottleIR[d,f,op] = 1
+                        indic_effectiveFactor[d,f,op] = 1
                         for m in range(1, acc.Num_mem):
                             if acc.mappingArray[op][m] == 0:
                                 continue
-                            indic_factor2Mem_NotBottleIR[d,f,op,m] = indic_factor2Mem[d,f,op,m]
+                            indic_factor2Mem_effective[d,f,op,m] = indic_factor2Mem[d,f,op,m]
                     else:
-                        indic_NotBottleIR[d,f,op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_NotBottleIR_({ops.dim2Dict[d]},{f},{op_name})")
+                        indic_effectiveFactor[d,f,op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_NotBottleIR_({ops.dim2Dict[d]},{f},{op_name})")
                         model.addConstr(
-                            indic_NotBottleIR[d,f,op] == 1 - quicksum(var_AandB(model, indic_factor2Loop[d,f,i], indic_stationaryIR[i,op],
-                                                                                 name=f"Indic_NotBottleIR_src_({ops.dim2Dict[d]},{f},{i},{op_name})")
-                                                                       for i in range(Num_Loops)), name=f"C_Indic_NotBottleIR_({ops.dim2Dict[d]},{f},{op_name})")
+                            indic_effectiveFactor[d,f,op] == 1 - quicksum(var_AandB(model, indic_factor2Loop[d,f,i], indic_stationaryIrrelevant[i,op],
+                                                                                 name=f"Indic_effectiveFactor_src_({ops.dim2Dict[d]},{f},{i},{op_name})")
+                                                                       for i in range(Num_Loops)), name=f"C_Indic_effectiveFactor_({ops.dim2Dict[d]},{f},{op_name})")
 
                         for m in range(1, acc.Num_mem):
                             if acc.mappingArray[op][m] == 0:
                                 continue
-                            indic_factor2Mem_NotBottleIR[d,f,op,m] = var_AandB(model, indic_factor2Mem[d,f,op,m], indic_NotBottleIR[d,f,op],
-                                                                                name=f"Indic_factor2Mem_NotBottleIR_({ops.dim2Dict[d]},{f},{op_name},{acc.mem2dict(m)})")
+                            indic_factor2Mem_effective[d,f,op,m] = var_AandB(model, indic_factor2Mem[d,f,op,m], indic_effectiveFactor[d,f,op],
+                                                                                name=f"Indic_factor2Mem_effective_({ops.dim2Dict[d]},{f},{op_name},{acc.mem2dict(m)})")
         
         indic_factor2Mem_WriteIn = gp.tupledict()
         count_ReadOut, count_WriteIn = gp.tupledict(), gp.tupledict()
@@ -878,26 +1043,26 @@ class Solver():
                         for f in range(len(factors[d])):
                             for m1 in range(1,m+1):
                                 if m1 == m:
-                                    count_expr_readOut += logF[d,f] * indic_factor2Mem_NotBottleIR[d,f,op,m1]
+                                    count_expr_readOut += logF[d,f] * indic_factor2Mem_effective[d,f,op,m1]
                                 else:
                                     count_expr_readOut += logF[d,f] * indic_factor2Mem[d,f,op,m1]
                             for m1 in range(1,m):
-                                if acc.mappingArray[op][m1] == 0 or (m1, m, op) not in indic_nxtMem:
+                                if acc.mappingArray[op][m1] == 0 or (m1, m, op) not in indic_nextMem:
                                     count_expr_writeIn += logF[d,f] * indic_factor2Mem[d,f,op,m1]
                                 else:
                                     cname = f"Indic_factor2Mem_WriteIn_({ops.dim2Dict[d]},{f},{op_name},{acc.mem2dict(m1)},{acc.mem2dict(m)})"
                                     indic_factor2Mem_WriteIn[d,f,op,m1,m] = model.addVar(vtype=GRB.BINARY, name=cname)
                                     model.addConstr(indic_factor2Mem_WriteIn[d,f,op,m1,m] <= indic_factor2Mem[d,f,op,m1],
                                                     name=f"C_{cname}_base_ub")
-                                    model.addConstr(indic_factor2Mem_WriteIn[d,f,op,m1,m] >= indic_factor2Mem_NotBottleIR[d,f,op,m1],
+                                    model.addConstr(indic_factor2Mem_WriteIn[d,f,op,m1,m] >= indic_factor2Mem_effective[d,f,op,m1],
                                                     name=f"C_{cname}_nb_lb")
-                                    model.addConstr(indic_factor2Mem_WriteIn[d,f,op,m1,m] <= indic_factor2Mem_NotBottleIR[d,f,op,m1] + 1 - indic_nxtMem[m1,m,op],
+                                    model.addConstr(indic_factor2Mem_WriteIn[d,f,op,m1,m] <= indic_factor2Mem_effective[d,f,op,m1] + 1 - indic_nextMem[m1,m,op],
                                                     name=f"C_{cname}_nb_ub")
-                                    model.addConstr(indic_factor2Mem_WriteIn[d,f,op,m1,m] >= indic_factor2Mem[d,f,op,m1] - indic_nxtMem[m1,m,op],
+                                    model.addConstr(indic_factor2Mem_WriteIn[d,f,op,m1,m] >= indic_factor2Mem[d,f,op,m1] - indic_nextMem[m1,m,op],
                                                     name=f"C_{cname}_base_lb")
                                     '''
                                     W = A AND ((NOT G) OR N)
-                                    indic_factor2Mem_WriteIn = indic_factor2Mem AND ((NOT indic_nxtMem) OR indic_NotBottleIR)
+                                    indic_factor2Mem_WriteIn = indic_factor2Mem AND ((NOT indic_nextMem) OR indic_effectiveFactor)
                                     '''
                                     count_expr_writeIn += logF[d,f] * indic_factor2Mem_WriteIn[d,f,op,m1,m]
 
@@ -1070,7 +1235,7 @@ class Solver():
                 _contrib = 0
                 for m in range(1, acc.Num_mem):
                     if acc.mappingArray[op][m]:
-                        _active = var_AandB(model, indic_loop2Mem[i,op,m], indic_xMem[i,op],
+                        _active = var_AandB(model, indic_loop2Mem[i,op,m], indic_hasTransfer[i,op],
                                              name=f"active_Transfer_({i},{op_name},{acc.mem2dict(m)})")
                         _ub_eff_m = max(UB_transLatency[m,op], LAT_UNIT) + LAT_UNIT
                         _contrib += var_mul01(model, _active, effectiveTransLatency[m,op],
@@ -1088,15 +1253,19 @@ class Solver():
             _ub_body = UB_latencyLevel[i + 1] if i + 1 < Num_Loops else t_MAC
             latency_Body[i] = model.addVar(lb=LB_Process[i+1], ub=_ub_body, vtype=GRB.CONTINUOUS, name=f"latency_Body_({i})")
             for op, op_name in enumerate(['I','W','O']):
-                if i < Num_Loops - 1 and op < 2:   # I/W 双缓冲时首迭代传输与父级流水重叠
-                    indic_dblOverlap = var_mul01(model, indic_doubleLoop[i+1,op], latency_Transfer[i+1,op],
-                                           A_ub=self.MAX_TRANS[op]+LAT_UNIT, var_ub=self.MAX_TRANS[op]+LAT_UNIT,
-                                           name=f"indic_dblOverlap_({i},{op_name})")
-                    model.addConstr(latency_Body[i] >= latency_Process[i+1,op] - indic_dblOverlap,
-                                     name=f"C_Body_({i},{op_name})")
-                else:
+                if FLAG.ABLATION_SIMPLIFIED_PIPELINE:
                     model.addConstr(latency_Body[i] >= latency_Process[i+1,op],
                                      name=f"C_Body_({i},{op_name})")
+                else:
+                    if i < Num_Loops - 1 and op < 2:   # I/W 双缓冲时首迭代传输与父级流水重叠
+                        indic_dblOverlap = var_mul01(model, indic_doubleLoop[i+1,op], latency_Transfer[i+1,op],
+                                               A_ub=self.MAX_TRANS[op]+LAT_UNIT, var_ub=self.MAX_TRANS[op]+LAT_UNIT,
+                                               name=f"indic_dblOverlap_({i},{op_name})")
+                        model.addConstr(latency_Body[i] >= latency_Process[i+1,op] - indic_dblOverlap,
+                                         name=f"C_Body_({i},{op_name})")
+                    else:
+                        model.addConstr(latency_Body[i] >= latency_Process[i+1,op],
+                                         name=f"C_Body_({i},{op_name})")
 
         # Cut: Σ Transfer ≥ transLatency for each used memory (strengthening)
         # 排除Macro Weight：CIM权重静态驻留，xMem被强制为0（line 509），Transfer路径不适用
@@ -1116,23 +1285,34 @@ class Solver():
             model.addConstr(latency_Critical[i] >= latency_Body[i], name=f"C_latency_cp_child_({i})")
             for op, op_name in enumerate(['I','W','O']):
                 coeff_rw = 2 if op == 2 else 1
-                # 双缓冲：Transfer 与 Body 并行 → 瓶颈取 max
-                model.addConstr(latency_Critical[i] >= coeff_rw * latency_Transfer[i,op], name=f"C_latency_cp_transfer_({i},{op_name})")
-                # 单缓冲：Transfer 与 Body 串行 → 瓶颈取 sum (tight big-M: M = max possible c*Transfer)
-                _M_tight = coeff_rw * (self.MAX_TRANS[op] + LAT_UNIT)
-                model.addConstr(latency_Critical[i] >= coeff_rw * latency_Transfer[i,op] + latency_Body[i]
-                                - _M_tight * indic_doubleLoop[i,op],
-                                 name=f"C_latency_cp_transfer+child_({i},{op_name})")
+                if FLAG.ABLATION_SIMPLIFIED_PIPELINE:
+                    # Simplified: always serial (Transfer + Body), no pipeline overlap
+                    model.addConstr(latency_Critical[i] >= coeff_rw * latency_Transfer[i,op] + latency_Body[i],
+                                     name=f"C_latency_cp_transfer+child_({i},{op_name})")
+                else:
+                    # 双缓冲：Transfer 与 Body 并行 → 瓶颈取 max
+                    model.addConstr(latency_Critical[i] >= coeff_rw * latency_Transfer[i,op], name=f"C_latency_cp_transfer_({i},{op_name})")
+                    # 单缓冲：Transfer 与 Body 串行 → 瓶颈取 sum (tight big-M: M = max possible c*Transfer)
+                    _M_tight = coeff_rw * (self.MAX_TRANS[op] + LAT_UNIT)
+                    model.addConstr(latency_Critical[i] >= coeff_rw * latency_Transfer[i,op] + latency_Body[i]
+                                    - _M_tight * indic_doubleLoop[i,op],
+                                     name=f"C_latency_cp_transfer+child_({i},{op_name})")
 
         # ─── L4: Process(i,λ) = c(λ)×Transfer + child + (F(i)−1)×Critical ─────────────────────────────────────────
-        # McCormick envelope: Z_crit[i,p] = indic_loop2Factor[i,p] × Critical[i]
-        # Produces convex-hull LP relaxation instead of indicator big-M
+        # Z_crit[i,p] = indic_loop2Factor[i,p] × Critical[i]
+        # Adaptive: McCormick (tight LP) at inner levels where UB_Critical is small,
+        # GenConstrIndicator (exact) at outer levels where UB_Critical * IntFeasTol
+        # causes near-integer indicators to produce large Z_crit errors.
+        _intfeastol = model.Params.IntFeasTol
         Z_crit = {}
         for i in range(Num_Loops):
             _UB_C = UB_Critical[i]
+            _max_zcrit_err = _UB_C * _intfeastol
+            _use_indicator = (_max_zcrit_err > 0.01 * LB_Process[i + 1])
             for p in range(len(UNIQUE_FACTOR)):
                 Z_crit[i, p] = model.addVar(lb=0, ub=_UB_C, vtype=GRB.CONTINUOUS,
                                              name=f"Z_crit_({i},{p})")
+                # McCormick envelope — convex-hull LP relaxation
                 model.addConstr(Z_crit[i, p] <= _UB_C * indic_loop2Factor[i, p],
                                 name=f"C_McCormick_Z_ub1_({i},{p})")
                 model.addConstr(Z_crit[i, p] >= latency_Critical[i] - _UB_C * (1 - indic_loop2Factor[i, p]),
@@ -1141,6 +1321,17 @@ class Solver():
                                 name=f"C_McCormick_Z_ub2_({i},{p})")
                 model.addConstr(Z_crit[i, p] >= LB_Process[i + 1] * indic_loop2Factor[i, p],
                                 name=f"C_McCormick_Z_lb2_({i},{p})")
+                if _use_indicator:
+                    # GenConstrIndicator supplements McCormick at outer levels where
+                    # UB_Critical * IntFeasTol causes near-integer exploitation of lb1.
+                    # McCormick is retained for LP relaxation quality; indicators ensure
+                    # integer-solution exactness via Gurobi's internal integrality rounding.
+                    model.addGenConstrIndicator(indic_loop2Factor[i, p], True,
+                        Z_crit[i, p] == latency_Critical[i],
+                        name=f"C_Indicator_Z_true_({i},{p})")
+                    model.addGenConstrIndicator(indic_loop2Factor[i, p], False,
+                        Z_crit[i, p] == 0,
+                        name=f"C_Indicator_Z_false_({i},{p})")
 
         for i in range(Num_Loops):
             for op, op_name in enumerate(['I','W','O']):
@@ -1208,7 +1399,7 @@ class Solver():
                 # Output: write + read 精度均由holdPsum[DRAM]决定（与simulator一致）
                 _base_rw = 2 * MAX_SIZE[op] * acc.precision_final / acc.bw[acc.Dram2mem] / CONST.SCALE_LATENCY
                 _psum_extra_rw = 2 * MAX_SIZE[op] * (acc.precision_psum - acc.precision_final) / acc.bw[acc.Dram2mem] / CONST.SCALE_LATENCY
-                model.addConstr(res_latency >= _base_rw + _psum_extra_rw * indic_holdPsum[acc.Dram2mem],
+                model.addConstr(res_latency >= _base_rw + _psum_extra_rw * indic_holdPartialSum[acc.Dram2mem],
                                 name=f"Cut_DRAM_BW_({op_name})")
 
         # Cut: per-memory constant-floor transfer sum (spatial-unrolling minimum)
@@ -1246,8 +1437,19 @@ class Solver():
         model.Params.TimeLimit = 7  # Determine the feasibility within a 7s time limit.
         model.Params.MIPFocus = 1 
         model.update()
+        self.profile.model_build_time_sec = time.time() - run_start_time
+        self.profile.num_vars = model.NumVars
+        self.profile.num_constrs = model.NumConstrs
+        self.profile.num_sos = model.NumSOS
+        self.profile.num_genconstrs = model.NumGenConstrs
+        self.profile.num_bin_vars = sum(1 for var in model.getVars() if var.VType == GRB.BINARY)
+        feasibility_start_time = time.time()
         model.optimize()
+        self.profile.feasibility_time_sec = time.time() - feasibility_start_time
         if model.SolCount == 0:
+            self.profile.status = int(model.Status)
+            self.profile.sol_count = 0
+            self.profile.total_time_sec = time.time() - run_start_time
             self.result = [CONST.MAX_POS, CONST.MAX_POS, CONST.MAX_POS]
             # ''' Debug IIS
             # model.computeIIS()
@@ -1329,6 +1531,7 @@ class Solver():
                     result_val = obj_val / _ub_to_obj
                     _shared.update_min(result_val)
                     _state[2] = _shared.value * _ub_to_obj
+                    self.profile.callback_mipsol_updates += 1
                 elif where == GRB.Callback.MIP and _state[0] == 0:
                     _state[1] += 1
                     if _state[1] >= _REFRESH_NODES:
@@ -1336,11 +1539,25 @@ class Solver():
                         _state[2] = _shared.value * _ub_to_obj
                         obj_bound = model.cbGet(GRB.Callback.MIP_OBJBND)
                         if obj_bound > _state[2]:
+                            self.profile.callback_dynamic_terminations += 1
                             model.terminate()
 
         start_time = time.time()
         model.optimize(_cb)
         end_time = time.time()
+        self.profile.optimize_time_sec = end_time - start_time
+        self.profile.total_time_sec = end_time - run_start_time
+        self.profile.status = int(model.Status)
+        self.profile.sol_count = int(model.SolCount)
+        self.profile.node_count = float(getattr(model, "NodeCount", 0.0))
+        try:
+            self.profile.mip_gap = float(model.MIPGap)
+        except Exception:
+            self.profile.mip_gap = None
+        try:
+            self.profile.best_bound = float(model.ObjBound)
+        except Exception:
+            self.profile.best_bound = None
 
         ####################################################################  Debug & Output  #######################################################################
 
@@ -1383,14 +1600,15 @@ class Solver():
                         double_tag[m][op] = acc.double_Macro
                         continue
                     if acc.double_config[m][op]:
-                        double_tag[m][op] = round(indic_doubleMem[m,op].x)
+                        val = indic_doubleMem[m,op]
+                        double_tag[m][op] = round(val.x) if isinstance(val, gp.Var) else int(val)
                     else:
                         double_tag[m][op] = 0
             loops.usr_defined_double_flag = double_tag
 
             loops.psum_flag = {}
             for m in range(1, acc.Num_mem):
-                state = indic_holdPsum[m]
+                state = indic_holdPartialSum[m]
                 if isinstance(state, gp.Var):
                     loops.psum_flag[m] = bool(round(state.x))
                 else:

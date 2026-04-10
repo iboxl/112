@@ -15,6 +15,9 @@ from Evaluation.Zigzag_imc.CompatibleZigzag import convert_baseline_to_MIREDO
 from baseline.zigzag_adapter import ZigzagBaselineAdapter
 from baseline.cosa_adapter import CoSABaselineAdapter
 from baseline.cimloop_adapter import CimloopBaselineAdapter
+from utils.ZigzagUtils import zigzag_cache_prefix, get_hardware_performance_zigzag, convert_Zigzag_to_MIREDO, compare_ops_cme
+from Evaluation.WeightStationaryGenerator import generate_weight_stationary_baseline
+from Evaluation.common.EvalCommon import make_accelerator, normalize_loopdim_for_solver, mip_cache_get, mip_cache_put
 import time, copy
 from importlib import import_module
 
@@ -30,7 +33,6 @@ def get_Args():
     # parser.add_argument("--EX", nargs="?", const=True, default=False, help="exchange input & weight")
     # parser.add_argument("--BM", nargs="?", const=True, default=False, help="using blocking Dim_M")
     # parser.add_argument("--RS", nargs="?", const=True, default=False, help="FLAG: Row traverse")
-    parser.add_argument("--WS", nargs="?", const=True, default=False, help="FLAG: Weight stationary")
     parser.add_argument("--IS", nargs="?", const=True, default=False, help="FLAG: Buffer/Input stationary")
     # parser.add_argument("--OS", nargs="?", const=True, default=False, help="FLAG: Rejust dim/block to avoid overSize")
     # parser.add_argument("--GM", nargs="?", const=True, default=False, help="using blocking Dim_K with GAMMA")
@@ -95,15 +97,14 @@ def __main__(**kwargs):
     CONST.FLAG_OPT              = args.opt
     CONST.TIMELIMIT             = args.time_limit
     CONST.MIPFOCUS              = args.mipFocus
-    FLAG.WEIGHT_STATIONARY      = args.WS
-    FLAG.INPUT_STATIONARY       = args.IS and (not args.RS)
+    FLAG.INPUT_STATIONARY       = args.IS
     FLAG.DEBUG_SIMU             = args.SIMU
     FLAG.PRESOLVE_SEARCH        = not args.NoPreSolve
     FLAG.DEBUG_PER_LAYER_DETAIL = False               # illegal Tmp setting
 
     Logger.info("* " * 50)
-    Logger.info(f"model={args.model}, Architecture={args.architecture}, Weight_stationary={FLAG.WEIGHT_STATIONARY}, " + 
-                f"Optimization_Flag={CONST.FLAG_OPT}, MIPFOCUS={CONST.MIPFOCUS}" )
+    Logger.info(f"model={args.model}, Architecture={args.architecture}, " +
+                f"Optimization_Flag={CONST.FLAG_OPT}, MIPFOCUS={CONST.MIPFOCUS}, Baseline={args.baseline}" )
     Logger.info("* " * 50)
 
     model = f"model/{args.model}.onnx"
@@ -151,12 +152,9 @@ def __main__(**kwargs):
 
     assert len(convs) == len(loopdims)
 
-    cache = {}
+    latency_base, energy_base, latency_mi, energy_mi = 0, 0, 0, 0
 
-    latency_zz, energy_zz, latency_mi, energy_mi = 0, 0, 0, 0
-    
-    acc_template = import_module(f"Architecture.{args.architecture}").accelerator
-    accelerator_eval  = CIM_Acc(acc_template.cores[0])
+    accelerator_eval = make_accelerator(args.architecture)
 
     for i, (Conv, loopdim) in enumerate(zip(convs, loopdims)):
         # if i == 9 :
@@ -168,14 +166,19 @@ def __main__(**kwargs):
         ops = WorkLoad(loopDim=loopdim)
         Logger.info(ops)
 
-        key = tuple(sorted(loopdim.items()))
+        newdim = normalize_loopdim_for_solver(loopdim)
         pstr, cache_flag = "", False
 
-        try:                                   
-            (l_solver, e_solver, l_simu, e_simu, l_zz, e_zz) = cache[key]                  
-            Logger.info("Get Result From Cache")
+        cached = mip_cache_get(accelerator_eval, newdim, CONST.FLAG_OPT, CONST.TIMELIMIT, CONST.MIPFOCUS)
+        if cached is not None:
+            l_solver = cached["solver_latency"]
+            e_solver = cached["solver_energy"]
+            l_simu   = cached["simulator_latency"]
+            e_simu   = cached["simulator_energy"]
+            Logger.info("Get MIP Result From Persistent Cache")
             cache_flag = True
-        except KeyError:              
+
+        if not cache_flag:
             outputdir_layer = os.path.join(outFolder,Conv)
             prepare_save_dir(outputdir_layer)
             Logger.changeFile(new_file = os.path.join(outputdir_layer,"Evaluation-Layer.log"), mode="w")
@@ -206,56 +209,66 @@ def __main__(**kwargs):
             try:
                 Logger.info(f"Running: {args.baseline}-in-MIREDO-Simulator - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -")
                 simu = tranSimulator(acc=accelerator, ops=ops, dataflow=loops)
-                l_zz, e_zz = simu.run()
-            except ValueError as e:  
-                Logger.error('Wrong Match') 
-                Logger.changeFile(new_file = os.path.join(outFolder,args.log))
-                Logger.error(e) 
-                continue
-            PD_Z = simu.PD
+                l_base, e_base = simu.run()
+                PD_B = simu.PD
+            else:
+                Logger.info("Running: WS-Baseline - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -")
+                ws_result = generate_weight_stationary_baseline(
+                    acc=accelerator,
+                    ops=WorkLoad(loopDim=newdim),
+                )
+                loops = ws_result.dataflow
+                l_base, e_base = ws_result.latency, ws_result.energy
+                PD_B = ws_result.profile
+                Logger.info(f"WS baseline policy: {ws_result.policy}")
+        except ValueError as e:
+            Logger.error('Wrong Match')
+            Logger.changeFile(new_file = os.path.join(outFolder,args.log))
+            Logger.error(e)
+            continue
 
-            # simu.idealExec()
-            
-        # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -#   
+        if not cache_flag:
             accelerator = copy.deepcopy(accelerator_eval)
-            newdim = copy.deepcopy(loopdim)
-            for dChar in ['P','Q','H','W']: #newdim[dChar] += (loopdim[dChar] % 2)
-                if loopdim[dChar] % 2==1 and loopdim[dChar]>15:
-                    newdim[dChar] += 1
 
             match CONST.FLAG_OPT:
                 case "Latency":
-                    bestMetric = l_zz
+                    bestMetric = l_base
                 case "Energy":
-                    bestMetric = e_zz
+                    bestMetric = e_base
                 case "EDP":
-                    bestMetric = l_zz * e_zz * CONST.SCALINGFACTOR
+                    bestMetric = l_base * e_base * CONST.SCALINGFACTOR
                 case _:
                     bestMetric = 1e9            # flagOPT = infeasible
 
             l_solver, e_solver, edp_solver, l_simu, e_simu, PD_M = SolveMapping(acc=accelerator, ops=WorkLoad(loopDim=newdim), bestMetric=bestMetric*2, outputdir=outputdir_layer)
-            cache[key] = (l_solver, e_solver, l_simu, e_simu, l_zz, e_zz)
+            mip_cache_put(accelerator_eval, newdim, CONST.FLAG_OPT, CONST.TIMELIMIT, CONST.MIPFOCUS, {
+                "solver_latency": l_solver, "solver_energy": e_solver,
+                "solver_edp": l_solver * e_solver * CONST.SCALINGFACTOR,
+                "simulator_latency": l_simu, "simulator_energy": e_simu,
+                "simulator_profile": PD_M, "mapping_profile": None,
+                "solver_loopdim": newdim, "dataflow": None,
+            })
             
-            pstr += "\n-------- MemHierarchy ----- DB_M -- DB_Z --- PowerRate --- Power_M - Power_E -----\n"
+            pstr += "\n-------- MemHierarchy ----- DB_M -- DB_Z --- MIREDO/Baseline --- MIREDO - Baseline -----\n"
             for m in range(1,accelerator.Num_mem):
-                dm, dz = PD_M.doubleFlag, PD_Z.doubleFlag
+                dm, dz = PD_M.doubleFlag, PD_B.doubleFlag
                 pstr += '-'*8 + f" {accelerator.mem2dict(m):<15}: [ {dm[m][0]} {dm[m][1]} {dm[m][2]} | {dz[m][0]} {dz[m][1]} {dz[m][2]} ]  "
-                memCost_rate = '-'*8 if PD_Z.memCost[m]==0 else round(PD_M.memCost[m]/PD_Z.memCost[m]*100,2)
-                pstr += f"{memCost_rate:>8}%   ({PD_M.memCost[m]:.2e} / {PD_Z.memCost[m]:.2e}) pJ" + '\n'
+                energy_ratio = '-'*8 if PD_B.memCost[m]==0 else round(PD_M.memCost[m]/PD_B.memCost[m],3)
+                pstr += f"{energy_ratio:>8}x   ({PD_M.memCost[m]:.2e} / {PD_B.memCost[m]:.2e}) pJ" + '\n'
             pstr += '\n-------- Multiply & ADD : -----------------  '
-            pstr += f"{round(PD_M.macEnergy/PD_Z.macEnergy*100,2):>8}%   ({PD_M.macEnergy:.2e} / {PD_Z.macEnergy:.2e}) pJ" + '\n\n'
+            pstr += f"{round(PD_M.macEnergy/PD_B.macEnergy,3):>8}x   ({PD_M.macEnergy:.2e} / {PD_B.macEnergy:.2e}) pJ" + '\n\n'
 
-            pstr += f"Dynamic Power: {round(PD_M.dynamic_power/PD_Z.dynamic_power*100,2):>8}%   ({PD_M.dynamic_power:.2e} / {PD_Z.dynamic_power:.2e}) pJ" + '\n'
-            pstr += f"Leakage Power: {round(PD_M.leakage_power/PD_Z.leakage_power*100,2):>8}%   ({PD_M.leakage_power:.2e} / {PD_Z.leakage_power:.2e}) pJ" + '\n'
-            pstr += f"On-chip Power: {round(PD_M.dynamic_power_onChip/PD_Z.dynamic_power_onChip*100,2):>8}%   ({PD_M.dynamic_power_onChip:.2e} / {PD_Z.dynamic_power_onChip:.2e}) pJ" + '\n'
+            pstr += f"Dynamic Power: {round(PD_M.dynamic_power/PD_B.dynamic_power,3):>8}x   ({PD_M.dynamic_power:.2e} / {PD_B.dynamic_power:.2e}) pJ" + '\n'
+            pstr += f"Leakage Power: {round(PD_M.leakage_power/PD_B.leakage_power,3):>8}x   ({PD_M.leakage_power:.2e} / {PD_B.leakage_power:.2e}) pJ" + '\n'
+            pstr += f"On-chip Power: {round(PD_M.dynamic_power_onChip/PD_B.dynamic_power_onChip,3):>8}x   ({PD_M.dynamic_power_onChip:.2e} / {PD_B.dynamic_power_onChip:.2e}) pJ" + '\n'
 
         pstr += '\n'
         pstr += f"* * * Baseline-Running * * *  Latency:{round(l_zz,3):<15}, Energy:{round(e_zz,3):<20}, EDP:{round(l_zz *e_zz,3):.5e}" + '\n'
         pstr += f"* * * MIREDO-Running  * * *  Latency:{round(l_simu,3):<15}, Energy:{round(e_simu,3):<20}, EDP:{round(l_simu*e_simu,3):.5e}" + '\n'
-        pstr += f"MIP Solver Latency Accuracy of Layer: {round(l_simu/l_solver*100,2)}%    (Simu){round(l_simu,3):<15} (Solver){round(l_solver,3):<15} " + '\n'
-        pstr += f"MIP Solver Energy  Accuracy of Layer: {round(e_simu/e_solver*100,2)}%    (Simu){round(e_simu,3):<15} (Solver){round(e_solver,3):<15} " + '\n'
+        pstr += f"MIP Solver Latency Relative Error: {round(abs(l_solver-l_simu)/l_simu*100,2)}%    (Simu){round(l_simu,3):<15} (Solver){round(l_solver,3):<15} " + '\n'
+        pstr += f"MIP Solver Energy  Relative Error: {round(abs(e_solver-e_simu)/e_simu*100,2)}%    (Simu){round(e_simu,3):<15} (Solver){round(e_solver,3):<15} " + '\n'
 
-        rstr = f"Optimization Rate Of Layer-{i}: Latency-({round(l_simu/l_zz*100,2)}%), Energy-({round(e_simu/e_zz*100,2)}%), EDP-({round((l_simu*e_simu)/(l_zz * e_zz)*100,2)}%)"
+        rstr = f"Speedup Of Layer-{i}: Latency-({round(l_base/l_simu,3)}x), Energy-({round(e_base/e_simu,3)}x), EDP-({round((l_base*e_base)/(l_simu*e_simu),3)}x)"
         
         if cache_flag == False:
             Logger.info(pstr)
@@ -264,8 +277,8 @@ def __main__(**kwargs):
         
         latency_mi += l_simu
         energy_mi  += e_simu
-        latency_zz += l_zz
-        energy_zz  += e_zz
+        latency_base += l_base
+        energy_base  += e_base
 
         Logger.info(pstr)
         Logger.critical(rstr)
