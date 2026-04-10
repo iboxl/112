@@ -255,7 +255,7 @@ def convert_ZZMP_to_loopMP(
     """
     # ---------------- 0. 参数 / 默认 -----------------
     if dim_code is None:
-        dim_code = {"FX": 1, "FY": 2, "OX": 3, "OY": 4, "C": 5, "K": 6, "G":7}
+        dim_code = {"B": 0, "FX": 1, "FY": 2, "OX": 3, "OY": 4, "C": 5, "K": 6, "G": 7}
 
     if len(mappingArray) != len(array_row_order):
         raise ValueError("mappingArray 行数必须等于 array_row_order 长度")

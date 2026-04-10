@@ -140,9 +140,43 @@ def save_experiment_json(output_dir, file_name, experiment_id, script_path, conf
     return json_path
 
 
+_ACC_CACHE_VERSION = 1
+_acc_cache = None
+_acc_cache_path = None
+
+
+def _ensure_acc_cache_loaded():
+    global _acc_cache, _acc_cache_path
+    if _acc_cache is not None:
+        return
+    _acc_cache_path = repo_root() / "output" / ".acc_cache.pkl"
+    if _acc_cache_path.is_file():
+        try:
+            with open(_acc_cache_path, "rb") as fh:
+                blob = pickle.load(fh)
+            if blob.get("version") == _ACC_CACHE_VERSION:
+                _acc_cache = blob["data"]
+                return
+        except Exception:
+            pass
+    _acc_cache = {}
+
+
+def _save_acc_cache():
+    if _acc_cache is None:
+        return
+    _acc_cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(_acc_cache_path, "wb") as fh:
+        pickle.dump({"version": _ACC_CACHE_VERSION, "data": _acc_cache}, fh)
+
+
 def make_accelerator(architecture="ZigzagAcc"):
-    acc_template = import_module(f"Architecture.{architecture}").accelerator
-    return CIM_Acc(acc_template.cores[0])
+    _ensure_acc_cache_loaded()
+    if architecture not in _acc_cache:
+        acc_template = import_module(f"Architecture.{architecture}").accelerator
+        _acc_cache[architecture] = CIM_Acc(acc_template.cores[0])
+        _save_acc_cache()
+    return copy.deepcopy(_acc_cache[architecture])
 
 
 def hardware_spec_from_acc(acc):
@@ -242,11 +276,92 @@ def temporary_runtime_config(objective="Latency", time_limit=120, mip_focus=1,
         FLAG.ABLATION_SIMPLIFIED_PIPELINE = old_state["FLAG.ABLATION_SIMPLIFIED_PIPELINE"]
 
 
+import hashlib
+
+_CACHE_VERSION = 1
+_mip_cache = None
+_cache_path = None
+
+
+def _default_cache_path():
+    return repo_root() / "output" / ".mip_cache.pkl"
+
+
+def _ensure_cache_loaded():
+    global _mip_cache, _cache_path
+    if _mip_cache is not None:
+        return
+    _cache_path = _default_cache_path()
+    if _cache_path.is_file():
+        try:
+            with open(_cache_path, "rb") as fh:
+                blob = pickle.load(fh)
+            if blob.get("version") == _CACHE_VERSION:
+                _mip_cache = blob["data"]
+                return
+        except Exception:
+            pass
+    _mip_cache = {}
+
+
+def _save_cache():
+    if _mip_cache is None:
+        return
+    _cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(_cache_path, "wb") as fh:
+        pickle.dump({"version": _CACHE_VERSION, "data": _mip_cache}, fh)
+
+
+def _hardware_fingerprint(acc):
+    spec = hardware_spec_from_acc(acc)
+    raw = json.dumps(spec, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _make_cache_key(acc, solver_loopdim, objective, time_limit, mip_focus, ablation_flags):
+    hw_key = _hardware_fingerprint(acc)
+    dim_key = tuple(sorted(solver_loopdim.items()))
+    abl_key = tuple(sorted(ablation_flags.items())) if ablation_flags else ()
+    return (hw_key, dim_key, objective, time_limit, mip_focus, abl_key)
+
+
+def clear_mip_cache():
+    """Clear the persistent MIP result cache."""
+    global _mip_cache
+    _ensure_cache_loaded()
+    _mip_cache.clear()
+    _save_cache()
+
+
+def mip_cache_get(acc, solver_loopdim, objective, time_limit, mip_focus, ablation_flags=None):
+    """Look up a cached MIP result. Returns None on miss."""
+    _ensure_cache_loaded()
+    key = _make_cache_key(acc, solver_loopdim, objective, time_limit, mip_focus, ablation_flags)
+    if key in _mip_cache:
+        return copy.deepcopy(_mip_cache[key])
+    return None
+
+
+def mip_cache_put(acc, solver_loopdim, objective, time_limit, mip_focus, result, ablation_flags=None):
+    """Store a MIP result in the persistent cache."""
+    _ensure_cache_loaded()
+    key = _make_cache_key(acc, solver_loopdim, objective, time_limit, mip_focus, ablation_flags)
+    _mip_cache[key] = copy.deepcopy(result)
+    _save_cache()
+
+
 def run_miredo_layer(acc, loopdim, outputdir, objective="Latency", time_limit=120,
                      mip_focus=1, best_metric=None, return_profile=True,
                      ablation_flags=None):
-    prepare_save_dir(str(outputdir))
     solver_loopdim = normalize_loopdim_for_solver(loopdim)
+
+    _ensure_cache_loaded()
+    cache_key = _make_cache_key(acc, solver_loopdim, objective, time_limit, mip_focus, ablation_flags)
+    if cache_key in _mip_cache:
+        Logger.info(f"MIP cache hit: {solver_loopdim}")
+        return copy.deepcopy(_mip_cache[cache_key])
+
+    prepare_save_dir(str(outputdir))
     solver_ops = WorkLoad(loopDim=solver_loopdim)
     metric_ub = CONST.MAX_POS if best_metric is None else best_metric
 
@@ -278,7 +393,7 @@ def run_miredo_layer(acc, loopdim, outputdir, objective="Latency", time_limit=12
         with open(dataflow_path, "rb") as fh:
             dataflow = pickle.load(fh)
 
-    return {
+    layer_result = {
         "solver_latency": result[0],
         "solver_energy": result[1],
         "solver_edp": result[2],
@@ -289,3 +404,6 @@ def run_miredo_layer(acc, loopdim, outputdir, objective="Latency", time_limit=12
         "solver_loopdim": solver_loopdim,
         "dataflow": dataflow,
     }
+    _mip_cache[cache_key] = copy.deepcopy(layer_result)
+    _save_cache()
+    return layer_result

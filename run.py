@@ -14,6 +14,7 @@ from utils.UtilsFunction.ToolFunction import prepare_save_dir
 from Simulator.Simulax import tranSimulator
 from utils.ZigzagUtils import zigzag_cache_prefix, get_hardware_performance_zigzag, convert_Zigzag_to_MIREDO, compare_ops_cme
 from Evaluation.WeightStationaryGenerator import generate_weight_stationary_baseline
+from Evaluation.common.EvalCommon import make_accelerator, normalize_loopdim_for_solver, mip_cache_get, mip_cache_put
 import time, copy
 from importlib import import_module
 
@@ -123,12 +124,9 @@ def __main__(**kwargs):
 
     assert len(convs) == len(loopdims)
 
-    cache = {}
-
     latency_base, energy_base, latency_mi, energy_mi = 0, 0, 0, 0
-    
-    acc_template = import_module(f"Architecture.{args.architecture}").accelerator
-    accelerator_eval  = CIM_Acc(acc_template.cores[0])
+
+    accelerator_eval = make_accelerator(args.architecture)
 
     for i, (Conv, loopdim) in enumerate(zip(convs, loopdims)):
         # if i == 9 :
@@ -140,57 +138,55 @@ def __main__(**kwargs):
         ops = WorkLoad(loopDim=loopdim)
         Logger.info(ops)
 
-        key = tuple(sorted(loopdim.items()))
+        newdim = normalize_loopdim_for_solver(loopdim)
         pstr, cache_flag = "", False
 
-        try:                                   
-            (l_solver, e_solver, l_simu, e_simu, l_base, e_base) = cache[key]                  
-            Logger.info("Get Result From Cache")
+        cached = mip_cache_get(accelerator_eval, newdim, CONST.FLAG_OPT, CONST.TIMELIMIT, CONST.MIPFOCUS)
+        if cached is not None:
+            l_solver = cached["solver_latency"]
+            e_solver = cached["solver_energy"]
+            l_simu   = cached["simulator_latency"]
+            e_simu   = cached["simulator_energy"]
+            Logger.info("Get MIP Result From Persistent Cache")
             cache_flag = True
-        except KeyError:              
+
+        if not cache_flag:
             outputdir_layer = os.path.join(outFolder,Conv)
             prepare_save_dir(outputdir_layer)
             Logger.changeFile(new_file = os.path.join(outputdir_layer,"Evaluation-Layer.log"), mode="w")
             Logger.info(ops)
             Logger.info('\n' + '* '*30 + '\n')
 
-            cache_flag = False
+        # Baseline is always computed (needed for comparison output)
+        accelerator = copy.deepcopy(accelerator_eval)
+        try:
+            if args.baseline == "zigzag":
+                cme_compare = next(c for c in cmes if compare_ops_cme(loopDim=loopdim, cme=c))
+                assert cme_compare is not None
+                loops = LoopNest(acc=accelerator,ops=ops)
+                loops = convert_Zigzag_to_MIREDO(loops=loops, cme=cme_compare)
+                loops.usr_defined_double_flag[accelerator.Macro2mem][1] = accelerator.double_Macro
+                Logger.info("Running: Zigzag-in-MIREDO-Simulator - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -")
+                simu = tranSimulator(acc=accelerator, ops=ops, dataflow=loops)
+                l_base, e_base = simu.run()
+                PD_B = simu.PD
+            else:
+                Logger.info("Running: WS-Baseline - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -")
+                ws_result = generate_weight_stationary_baseline(
+                    acc=accelerator,
+                    ops=WorkLoad(loopDim=newdim),
+                )
+                loops = ws_result.dataflow
+                l_base, e_base = ws_result.latency, ws_result.energy
+                PD_B = ws_result.profile
+                Logger.info(f"WS baseline policy: {ws_result.policy}")
+        except ValueError as e:
+            Logger.error('Wrong Match')
+            Logger.changeFile(new_file = os.path.join(outFolder,args.log))
+            Logger.error(e)
+            continue
 
-            accelerator = copy.deepcopy(accelerator_eval)
-            newdim = copy.deepcopy(loopdim)
-            for dChar in ['P','Q','H','W']: #newdim[dChar] += (loopdim[dChar] % 2)
-                if loopdim[dChar] % 2==1 and loopdim[dChar]>15:
-                    newdim[dChar] += 1
-            try:
-                if args.baseline == "zigzag":
-                    cme_compare = next(c for c in cmes if compare_ops_cme(loopDim=loopdim, cme=c))
-                    assert cme_compare is not None
-                    loops = LoopNest(acc=accelerator,ops=ops)
-                    loops = convert_Zigzag_to_MIREDO(loops=loops, cme=cme_compare)
-                    loops.usr_defined_double_flag[accelerator.Macro2mem][1] = accelerator.double_Macro
-                    Logger.info("Running: Zigzag-in-MIREDO-Simulator - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -")
-                    simu = tranSimulator(acc=accelerator, ops=ops, dataflow=loops)
-                    l_base, e_base = simu.run()
-                    PD_B = simu.PD
-                else:
-                    Logger.info("Running: WS-Baseline - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -")
-                    ws_result = generate_weight_stationary_baseline(
-                        acc=accelerator,
-                        ops=WorkLoad(loopDim=newdim),
-                    )
-                    loops = ws_result.dataflow
-                    l_base, e_base = ws_result.latency, ws_result.energy
-                    PD_B = ws_result.profile
-                    Logger.info(f"WS baseline policy: {ws_result.policy}")
-            except ValueError as e:  
-                Logger.error('Wrong Match') 
-                Logger.changeFile(new_file = os.path.join(outFolder,args.log))
-                Logger.error(e) 
-                continue
-
-            # simu.idealExec()
-            
-        # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -#   
+        if not cache_flag:
             accelerator = copy.deepcopy(accelerator_eval)
 
             match CONST.FLAG_OPT:
@@ -204,7 +200,13 @@ def __main__(**kwargs):
                     bestMetric = 1e9            # flagOPT = infeasible
 
             l_solver, e_solver, edp_solver, l_simu, e_simu, PD_M = SolveMapping(acc=accelerator, ops=WorkLoad(loopDim=newdim), bestMetric=bestMetric*2, outputdir=outputdir_layer)
-            cache[key] = (l_solver, e_solver, l_simu, e_simu, l_base, e_base)
+            mip_cache_put(accelerator_eval, newdim, CONST.FLAG_OPT, CONST.TIMELIMIT, CONST.MIPFOCUS, {
+                "solver_latency": l_solver, "solver_energy": e_solver,
+                "solver_edp": l_solver * e_solver * CONST.SCALINGFACTOR,
+                "simulator_latency": l_simu, "simulator_energy": e_simu,
+                "simulator_profile": PD_M, "mapping_profile": None,
+                "solver_loopdim": newdim, "dataflow": None,
+            })
             
             pstr += "\n-------- MemHierarchy ----- DB_M -- DB_Z --- MIREDO/Baseline --- MIREDO - Baseline -----\n"
             for m in range(1,accelerator.Num_mem):

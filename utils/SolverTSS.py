@@ -112,6 +112,133 @@ class Solver():
         
         Logger.critical(f"Best {CONST.FLAG_OPT} metric upper bound is {self.metric_ub}")
 
+    def _solve_trivial(self, acc: CIM_Acc, ops: WorkLoad, factors):
+        """Analytical solution for the degenerate case: Num_Loops == 0.
+
+        When spatial unrolling covers the entire computation, all temporal
+        factors are 1 and the mapping has zero degrees of freedom. The result
+        is computed directly from the MIP model's L5/L6 latency formulas and
+        per-memory energy formulas, evaluated at the unique feasible point.
+        """
+        start_time = time.time()
+        Logger.info("Num_Loops == 0: analytical solution (no MIP needed)")
+
+        # ── Spatial volume at each memory level ───────────────────────────────
+        spur = {}
+        for m in range(1, acc.Num_mem):
+            for d in range(1, ops.Num_dim):
+                for op in range(3):
+                    spur[m, op, d] = 1
+                    for u in range(acc.Num_SpUr):
+                        if m <= acc.SpUr2Mem[u, op]:
+                            spur[m, op, d] *= self.su[u][d]
+
+        # ── Latency (MIP model L5/L6, simplified for Num_Loops=0) ────────────
+        # No temporal loops → all data bootstrapped from DRAM before compute.
+        # bootstrap[op] = full operand size / DRAM bandwidth
+        # Output uses precision_final (no partial sums when Num_Loops=0).
+        def dram_prec(op):
+            return acc.precision_final if op == 2 else acc.precision[acc.Dram2mem, op]
+
+        MAX_SIZE = ops.size
+        bootstrap = [MAX_SIZE[op] * dram_prec(op) / acc.bw[acc.Dram2mem] for op in range(3)]
+        max_startup = max(bootstrap)
+        t_MAC = acc.t_MAC
+        # L6: res_latency >= MaxStartup + Process[0,op] + BootstrapWrite[O]
+        # Process[0,op] = t_MAC (base case); BootstrapWrite only for Output.
+        solved_latency = max_startup + t_MAC + bootstrap[2]
+
+        # ── Energy (per-memory formulas, simplified for Num_Loops=0) ──────────
+        # All temporal factor contributions vanish (log(1)=0).
+        # Only unconditional memories contribute (DRAM, IReg, OReg);
+        # all other memories are bypassed (indic_usedMem=0).
+        # No partial sums → Output precision = precision_final everywhere.
+
+        # MAC energy: count_mac = 1 (single temporal pass), count_core from spatial
+        count_core = 1
+        for d in range(1, ops.Num_dim):
+            count_core *= self.su[0][d]
+        energy_comp = acc.cost_ActMacro * 1 * count_core
+
+        # Per-memory read/write energy for unconditional memories
+        energy_rw = 0.0
+        unconditional_mems = {acc.Dram2mem, acc.IReg2mem, acc.OReg2mem}
+        for m in unconditional_mems:
+            for op in range(3):
+                if not acc.mappingArray[op][m]:
+                    continue
+
+                # Tile volume at this memory level (spatial-only)
+                dim_at_m = [1] * ops.Num_dim
+                for d in range(1, ops.Num_dim):
+                    dim_at_m[d] = spur.get((m, op, d), 1)
+                vol = ops.get_operand_size(dim_at_m, op)
+
+                # Access count: product of spatial unrollings BELOW this level
+                count = 1
+                for d in range(1, ops.Num_dim):
+                    for u in range(acc.Num_SpUr):
+                        if m > acc.SpUr2Mem[u, op]:
+                            count *= self.su[u][d]
+
+                prec = acc.precision_final if op == 2 else acc.precision[m, op]
+
+                can_read = (m not in (acc.IReg2mem, acc.OReg2mem, acc.Macro2mem)
+                            and acc.cost_r[m] > 0)
+                can_write = m > 1
+
+                e = 0.0
+                if can_read:
+                    e += acc.cost_r[m] * prec * count * vol       # r2L: read toward compute
+                if can_write:
+                    e += acc.cost_w[m] * prec * count * vol       # w2L: write from DRAM side
+                if op == 2 and can_read and m > acc.Dram2mem:
+                    e += acc.cost_r[m] * prec * count * vol       # r2H: output read-back
+                if op == 2:
+                    e += acc.cost_w[m] * prec * count * vol       # w2H: output write-back
+                energy_rw += e
+
+        energy_leakage = acc.leakage_per_cycle * solved_latency
+        solved_energy = energy_rw + energy_comp + energy_leakage
+
+        if CONST.FLAG_OPT == "EDP":
+            solved_edp = solved_latency * solved_energy * CONST.SCALINGFACTOR
+        else:
+            solved_edp = solved_latency * solved_energy * CONST.SCALINGFACTOR
+
+        self.result = [solved_latency, solved_energy, solved_edp]
+
+        # ── Build trivial dataflow for simulator validation ───────────────────
+        # Single dummy temporal loop (dimSize=1) at DRAM satisfies simulator's
+        # non-empty tm requirement while being semantically equivalent to no loop.
+        loops = LoopNest(acc=acc, ops=ops)
+        loops.tm.append(Mapping(dim=1, dimSize=1,
+                                mem=[acc.Dram2mem, acc.Dram2mem, acc.Dram2mem]))
+        for u in range(acc.Num_SpUr):
+            for d in range(1, ops.Num_dim):
+                if self.su[u][d] > 1:
+                    loops.sm.append(Mapping(dim=d, dimSize=self.su[u][d],
+                                           mem=[acc.SpUr2Mem[u, op] for op in range(3)]))
+        double_tag = [[0] * 3 for _ in range(acc.Num_mem + 1)]
+        for op in range(3):
+            double_tag[acc.Num_mem][op] = acc.double_Macro
+        loops.usr_defined_double_flag = double_tag
+        loops.psum_flag = {m: False for m in range(1, acc.Num_mem)}
+        self.dataflow = loops
+
+        # ── Profile ───────────────────────────────────────────────────────────
+        elapsed = time.time() - start_time
+        self.profile.total_time_sec = elapsed
+        self.profile.model_build_time_sec = elapsed
+        self.profile.status = 2  # OPTIMAL equivalent
+        self.profile.sol_count = 1
+        self.profile.mip_gap = 0.0
+        self.profile.num_vars = 0
+        self.profile.num_constrs = 0
+
+        Logger.critical(f"Trivial solution: Latency={solved_latency}, Energy={round(solved_energy, 3)}, "
+                        f"EDP={solved_edp:.3e} (analytical, {elapsed:.4f}s)")
+
     def run(self):
         run_start_time = time.time()
         Logger.info('* '*20 + "Start Running MIP Solver" + ' *'*20)
@@ -123,6 +250,13 @@ class Solver():
         TEMP_DIVISORS = [getDivisors(d) for d in self.tu]
 
         Num_Loops = sum(len(f) for f in factors[1:ops.Num_dim] if f != [1])
+
+        # ── Degenerate case: Num_Loops == 0 (spatial covers everything) ────────
+        # All temporal factors are 1 → zero degrees of freedom → unique solution.
+        # Compute analytically from MIP model formulas (L5/L6, per-memory energy).
+        if Num_Loops == 0:
+            self._solve_trivial(acc, ops, factors)
+            return
 
         MAX_SIZE = self.ops.size
 

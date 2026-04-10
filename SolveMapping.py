@@ -112,7 +112,7 @@ def solve_scheme_worker(count:int, origin_index:int, scheme, acc:CIM_Acc, ops:Wo
     try:
         solver.run()
 
-        has_solution = solver.model is not None and solver.model.SolCount > 0
+        has_solution = solver.profile.sol_count > 0
         if has_solution:
             # Immediately propagate solution to shared state for cross-worker pruning
             if shared_ub is not None:
