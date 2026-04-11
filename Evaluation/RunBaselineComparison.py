@@ -25,6 +25,7 @@ from utils.Workload import WorkLoad
 METHOD_LABELS = {
     "ws": "WS",
     "zigzag": "ZigZag_IMC",
+    "cimloop": "CIMLoop",
 }
 
 
@@ -52,6 +53,8 @@ def main():
     parser.add_argument("--mipFocus", type=int, default=1)
     parser.add_argument("--maxLayers", type=int, default=None)
     parser.add_argument("-o", "--outputdir", dest="output_dir", default=None)
+    parser.add_argument("--cimloop-macro", default="raella_isca_2023",
+                        help="CIMLoop macro model (default: raella_isca_2023)")
     args = parser.parse_args()
 
     output_dir = make_output_dir("exp2_compare", args.output_dir)
@@ -97,6 +100,7 @@ def main():
                             model_name=model_name,
                             architecture=args.architecture,
                             objective=objective,
+                            cimloop_macro=args.cimloop_macro,
                         )
                         baseline_results[baseline_method] = baseline_result
                         _accumulate(
@@ -104,7 +108,17 @@ def main():
                             baseline_result.latency,
                             baseline_result.energy,
                         )
-                        decomposition = stall_decomposition(baseline_result.profile)
+                        if baseline_result.profile is not None:
+                            decomposition = stall_decomposition(baseline_result.profile)
+                        else:
+                            decomposition = {
+                                "compute_cycles": baseline_result.latency,
+                                "mode_switch_stall": 0,
+                                "mismatch_stall": 0,
+                                "writeback_stall": 0,
+                                "idle_cycles": 0,
+                                "total_latency": baseline_result.latency,
+                            }
                         stall_rows.append({
                             "model": model_name,
                             "layer": layer["layer"],

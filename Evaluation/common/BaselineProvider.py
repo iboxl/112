@@ -98,7 +98,55 @@ def run_ws_baseline(acc, ops, objective):
     )
 
 
-def run_baseline(method, acc, ops, loopdim, model_name, architecture, objective):
+def run_cimloop_baseline(acc, ops, loopdim, model_name, architecture, objective,
+                         macro_name="raella_isca_2023"):
+    from Evaluation.CIMLoop.CompatibleCIMLoop import (
+        cimloop_result_to_miredo_units,
+        find_matching_workload,
+        run_cimloop_mapper,
+    )
+
+    match = find_matching_workload(model_name, loopdim)
+    if match is None:
+        raise ValueError(
+            f"No CIMLoop workload match for {model_name} layer "
+            f"R={loopdim.get('R')} S={loopdim.get('S')} "
+            f"C={loopdim.get('C')} K={loopdim.get('K')} "
+            f"P={loopdim.get('P')} Q={loopdim.get('Q')}"
+        )
+
+    raw = run_cimloop_mapper(
+        cimloop_model=match["cimloop_model"],
+        layer_index=match["layer_index"],
+        loopdim=loopdim,
+        macro_name=macro_name,
+        objective=objective,
+    )
+    latency, energy = cimloop_result_to_miredo_units(raw)
+
+    return BaselineRunResult(
+        method="cimloop",
+        objective=objective,
+        latency=latency,
+        energy=energy,
+        profile=None,
+        dataflow=None,
+        metadata={
+            "policy": f"cimloop_{macro_name}",
+            "model": model_name,
+            "architecture": architecture,
+            "macro": macro_name,
+            "cimloop_model": match["cimloop_model"],
+            "layer_index": match["layer_index"],
+            "approximate_match": match["approximate"],
+            "cimloop_cycles": raw["cycles"],
+            "cimloop_energy_pj": raw["energy_pj"],
+        },
+    )
+
+
+def run_baseline(method, acc, ops, loopdim, model_name, architecture, objective,
+                 cimloop_macro="raella_isca_2023"):
     if method == "zigzag":
         return run_zigzag_baseline(
             acc=acc,
@@ -110,4 +158,14 @@ def run_baseline(method, acc, ops, loopdim, model_name, architecture, objective)
         )
     if method == "ws":
         return run_ws_baseline(acc=acc, ops=ops, objective=objective)
+    if method == "cimloop":
+        return run_cimloop_baseline(
+            acc=acc,
+            ops=ops,
+            loopdim=loopdim,
+            model_name=model_name,
+            architecture=architecture,
+            objective=objective,
+            macro_name=cimloop_macro,
+        )
     raise ValueError(f"Unsupported baseline method: {method}")

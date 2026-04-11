@@ -16,6 +16,9 @@ model/*
 Evaluation/Zigzag_imc/output/*
 !Evaluation/Zigzag_imc/output/.gitkeep
 
+Evaluation/CIMLoop/output/*
+
 **cache**
 
 output/*
+*.md
