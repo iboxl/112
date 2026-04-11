@@ -4,3 +4,9 @@
 [submodule "Evaluation/Zigzag_imc/zigzag-imc"]
 	path = Evaluation/Zigzag_imc/zigzag-imc
 	url = git@github.com:KULeuven-MICAS/zigzag-imc.git
+[submodule "Evaluation/CIMLoop/cimloop"]
+	path = Evaluation/CIMLoop/cimloop
+	url = https://github.com/mit-emze/cimloop.git
+[submodule "Evaluation/CIMLoop/timeloop-accelergy-infra"]
+	path = Evaluation/CIMLoop/timeloop-accelergy-infra
+	url = https://github.com/Accelergy-Project/accelergy-timeloop-infrastructure.git
