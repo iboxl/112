@@ -78,6 +78,16 @@ class CimloopHardwareBridge:
 
         arch_text = (base_dir / "arch.yaml").read_text(encoding="utf-8")
         arch_text = self._replace_mesh_after_name(arch_text, "array", "meshX", n_cores)
+        # The ISAAC base template pins array-level spatial mapping with
+        # *spatial_map_all_weights, which can over-constrain mapspace and lead to
+        # capacity-only infeasible searches for some layers (e.g., resnet18 layer11).
+        # Keep container defaults but relax that fixed weight-mapping anchor.
+        arch_text = re.sub(
+            r"(\n\s*name:\s*array\s*\n\s*)<<<:\s*\[\*container_defaults,\s*\*spatial_map_all_weights\]",
+            r"\1<<<: [*container_defaults]",
+            arch_text,
+            count=1,
+        )
         # Keep row/column fanout from the base macro template.
         # Directly rewriting these two values from Architecture dimX/dimY often
         # leads to no-valid-mapping failures in timeloop mapper for CIMLoop.

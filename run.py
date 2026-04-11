@@ -211,21 +211,11 @@ def __main__(**kwargs):
                 simu = tranSimulator(acc=accelerator, ops=ops, dataflow=loops)
                 l_base, e_base = simu.run()
                 PD_B = simu.PD
-            else:
-                Logger.info("Running: WS-Baseline - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -")
-                ws_result = generate_weight_stationary_baseline(
-                    acc=accelerator,
-                    ops=WorkLoad(loopDim=newdim),
-                )
-                loops = ws_result.dataflow
-                l_base, e_base = ws_result.latency, ws_result.energy
-                PD_B = ws_result.profile
-                Logger.info(f"WS baseline policy: {ws_result.policy}")
-        except ValueError as e:
-            Logger.error('Wrong Match')
-            Logger.changeFile(new_file = os.path.join(outFolder,args.log))
-            Logger.error(e)
-            continue
+            except ValueError as e:
+                Logger.error('Wrong Match')
+                Logger.changeFile(new_file = os.path.join(outFolder,args.log))
+                Logger.error(e)
+                continue
 
         if not cache_flag:
             accelerator = copy.deepcopy(accelerator_eval)
@@ -263,7 +253,7 @@ def __main__(**kwargs):
             pstr += f"On-chip Power: {round(PD_M.dynamic_power_onChip/PD_B.dynamic_power_onChip,3):>8}x   ({PD_M.dynamic_power_onChip:.2e} / {PD_B.dynamic_power_onChip:.2e}) pJ" + '\n'
 
         pstr += '\n'
-        pstr += f"* * * Baseline-Running * * *  Latency:{round(l_zz,3):<15}, Energy:{round(e_zz,3):<20}, EDP:{round(l_zz *e_zz,3):.5e}" + '\n'
+        pstr += f"* * * Baseline-Running * * *  Latency:{round(l_base,3):<15}, Energy:{round(e_base,3):<20}, EDP:{round(l_base *e_base,3):.5e}" + '\n'
         pstr += f"* * * MIREDO-Running  * * *  Latency:{round(l_simu,3):<15}, Energy:{round(e_simu,3):<20}, EDP:{round(l_simu*e_simu,3):.5e}" + '\n'
         pstr += f"MIP Solver Latency Relative Error: {round(abs(l_solver-l_simu)/l_simu*100,2)}%    (Simu){round(l_simu,3):<15} (Solver){round(l_solver,3):<15} " + '\n'
         pstr += f"MIP Solver Energy  Relative Error: {round(abs(e_solver-e_simu)/e_simu*100,2)}%    (Simu){round(e_simu,3):<15} (Solver){round(e_solver,3):<15} " + '\n'
@@ -271,8 +261,6 @@ def __main__(**kwargs):
         rstr = f"Speedup Of Layer-{i}: Latency-({round(l_base/l_simu,3)}x), Energy-({round(e_base/e_simu,3)}x), EDP-({round((l_base*e_base)/(l_simu*e_simu),3)}x)"
         
         if cache_flag == False:
-            Logger.info(pstr)
-            Logger.critical(rstr)
             Logger.changeFile(new_file = os.path.join(outFolder,args.log))
         
         latency_mi += l_simu
@@ -286,13 +274,13 @@ def __main__(**kwargs):
     # exit()
     Logger.info("* " * 50)
     Logger.info('\n\n'+'* '*20+f"The WHOLE Model"+' *'*20)
-    Logger.info(f"* * * Baseline-Running * * *  Latency:{round(latency_zz,3):<15}, Energy:{round(energy_zz,3):<15}, EDP:{round(latency_zz * energy_zz,3):.5e}")
+    Logger.info(f"* * * Baseline-Running * * *  Latency:{round(latency_base,3):<15}, Energy:{round(energy_base,3):<15}, EDP:{round(latency_base * energy_base,3):.5e}")
     Logger.info(f"* * * MIREDO-Running  * * *  Latency:{round(latency_mi,3):<15}, Energy:{round(energy_mi,3):<15}, EDP:{round(latency_mi * energy_mi,3):.5e}")
 
-    if latency_zz > 0 and energy_zz > 0:
-        opt_latency = round(latency_mi / latency_zz * 100, 2)
-        opt_energy = round(energy_mi / energy_zz * 100, 2)
-        opt_edp = round((latency_mi * energy_mi) / (latency_zz * energy_zz) * 100, 2)
+    if latency_base > 0 and energy_base > 0:
+        opt_latency = round(latency_mi / latency_base * 100, 2)
+        opt_energy = round(energy_mi / energy_base * 100, 2)
+        opt_edp = round((latency_mi * energy_mi) / (latency_base * energy_base) * 100, 2)
         Logger.info(
             f"* * *  Optimization  * * *   "
             f"Latency:{opt_latency}%, Energy:{opt_energy}%, EDP:{opt_edp}%"
