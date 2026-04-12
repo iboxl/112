@@ -175,8 +175,14 @@ def __main__(**kwargs):
             e_solver = cached["solver_energy"]
             l_simu   = cached["simulator_latency"]
             e_simu   = cached["simulator_energy"]
-            Logger.info("Get MIP Result From Persistent Cache")
-            cache_flag = True
+            l_base = cached.get("baseline_latency")
+            e_base = cached.get("baseline_energy")
+            if l_base is None or e_base is None:
+                Logger.warning("Persistent cache hit without baseline metrics; recomputing this layer")
+                cache_flag = False
+            else:
+                Logger.info("Get MIP Result From Persistent Cache")
+                cache_flag = True
 
         if not cache_flag:
             outputdir_layer = os.path.join(outFolder,Conv)
@@ -235,6 +241,7 @@ def __main__(**kwargs):
                 "solver_latency": l_solver, "solver_energy": e_solver,
                 "solver_edp": l_solver * e_solver * CONST.SCALINGFACTOR,
                 "simulator_latency": l_simu, "simulator_energy": e_simu,
+                "baseline_latency": l_base, "baseline_energy": e_base,
                 "simulator_profile": PD_M, "mapping_profile": None,
                 "solver_loopdim": newdim, "dataflow": None,
             })

@@ -124,8 +124,8 @@ class CimloopBaselineAdapter:
         self._workspace = Path(output_root).expanduser().resolve() / "cimloop_generated" / f"{model}_{architecture}"
         self._input_workload_dir = self._workspace / "inputs" / "workloads"
         self._output_root = self._workspace / "outputs"
-        self._repo_root = Path(__file__).resolve().parents[2]
-        self._cimloop_root = self._repo_root / "cimloop"
+        self._repo_root = Path(__file__).resolve().parents[1]
+        self._cimloop_root = self._repo_root / "Evaluation" / "CIMLoop" / "cimloop"
         self._cimloop_utils = self._cimloop_root / "workspace" / "scripts" / "utils.py"
         self._docker_workspace = self._cimloop_root / "workspace"
         self._docker_generated_workload_dir = (
@@ -203,6 +203,22 @@ class CimloopBaselineAdapter:
             or "Could not find cycles in stats" in stdout_text
         )
 
+    @staticmethod
+    def _should_fallback_to_docker(local_stdout: str) -> tuple[bool, str]:
+        if "No module named 'pytimeloop'" in local_stdout:
+            return True, "Host environment misses pytimeloop"
+        if "Permission denied" in local_stdout and "workspace/outputs" in local_stdout:
+            return True, "Host CIMLoop workspace outputs directory is not writable"
+        if CimloopBaselineAdapter._is_mapper_infeasible_output(local_stdout):
+            return True, "Host timeloop-mapper found no valid mappings"
+        if (
+            "Timeloop mapper failed with return code -6" in local_stdout
+            or "problem-shape.cpp" in local_stdout
+            or "term.isArray" in local_stdout
+        ):
+            return True, "Host timeloop-mapper aborted on workload parsing"
+        return False, ""
+
     def _apply_hw_profile(self, profile: dict, *, arch_active: bool) -> None:
         self.macro = profile["macro"]
         self.system = profile["system"]
@@ -266,10 +282,18 @@ class CimloopBaselineAdapter:
             "-c",
             (
                 "import importlib.util, json, pathlib\n"
+                "import pytimeloop.timeloopfe.v4.output_parsing as _op\n"
                 f"utils_path = pathlib.Path(r'{self._cimloop_utils}')\n"
                 "spec = importlib.util.spec_from_file_location('cimloop_utils', utils_path)\n"
                 "mod = importlib.util.module_from_spec(spec)\n"
                 "spec.loader.exec_module(mod)\n"
+                "_orig_get_area = _op.get_area_from_art\n"
+                "def _safe_get_area(path):\n"
+                "    try:\n"
+                "        return _orig_get_area(path)\n"
+                "    except FileNotFoundError:\n"
+                "        return {'__missing_art__': 1e-12}\n"
+                "_op.get_area_from_art = _safe_get_area\n"
                 "res = mod.run_layer("
                 f"macro={repr(self.macro)}, "
                 f"layer={repr(str(prob_path))}, "
@@ -449,22 +473,22 @@ class CimloopBaselineAdapter:
             "data_spaces": [
                 {
                     "name": "Weights",
-                    "projection": [["C"], ["M"], ["R"], ["S"], ["Y"], ["G"]],
+                    "projection": [[["C"]], [["M"]], [["R"]], [["S"]], [["Y"]], [["G"]]],
                 },
                 {
                     "name": "Inputs",
                     "projection": [
-                        ["N"],
-                        ["C"],
+                        [["N"]],
+                        [["C"]],
                         [["R", "Wdilation"], ["P", "Wstride"]],
                         [["S", "Hdilation"], ["Q", "Hstride"]],
-                        ["X"],
-                        ["G"],
+                        [["X"]],
+                        [["G"]],
                     ],
                 },
                 {
                     "name": "Outputs",
-                    "projection": [["N"], ["M"], ["Q"], ["P"], ["Z"], ["G"]],
+                    "projection": [[["N"]], [["M"]], [["Q"]], [["P"]], [["Z"]], [["G"]]],
                     "read_write": True,
                 },
             ],
@@ -728,11 +752,27 @@ class CimloopBaselineAdapter:
     def _run_cimloop_generate_layer(self, loop_dim: dict[str, int], prob_path: Path, layer_output_dir: Path) -> None:
         layer_output_dir.mkdir(parents=True, exist_ok=True)
         result_json = layer_output_dir / "cimloop_result.json"
-        local_rc, local_out = self._run_cimloop_generate_layer_local(prob_path=prob_path, result_json=result_json)
+        local_prob_path = prob_path
+        docker_layer_arg = self._find_builtin_layer_arg(loop_dim)
+        if docker_layer_arg is not None:
+            builtin_prob_path = self._cimloop_root / "workspace" / "models" / "workloads" / f"{docker_layer_arg}.yaml"
+            if builtin_prob_path.is_file():
+                local_prob_path = builtin_prob_path
+                Logger.info(f"Using built-in CIMLoop workload for local generation: {docker_layer_arg}")
 
-        if local_rc != 0 and "No module named 'pytimeloop'" in local_out:
+        local_outputs_dir = self._cimloop_root / "workspace" / "outputs"
+        if local_outputs_dir.is_dir() and not os.access(local_outputs_dir, os.W_OK):
+            local_rc = 1
+            local_out = (
+                "Permission denied: local CIMLoop workspace/outputs is not writable "
+                f"({local_outputs_dir})"
+            )
+        else:
+            local_rc, local_out = self._run_cimloop_generate_layer_local(prob_path=local_prob_path, result_json=result_json)
+        use_docker, fallback_reason = self._should_fallback_to_docker(local_out)
+
+        if local_rc != 0 and use_docker:
             layer_label = prob_path.stem
-            docker_layer_arg = self._find_builtin_layer_arg(loop_dim)
             workload_obj = None
             if docker_layer_arg is None:
                 workload_obj = yaml.safe_load(prob_path.read_text(encoding="utf-8"))
@@ -741,7 +781,7 @@ class CimloopBaselineAdapter:
                 Logger.info(f"Using built-in CIMLoop workload for docker generation: {docker_layer_arg}")
 
             Logger.warning(
-                "Host environment misses pytimeloop; falling back to CIMLoop docker service for generation"
+                f"{fallback_reason}; falling back to CIMLoop docker service for generation"
             )
             original_hw_profile = self._snapshot_hw_profile()
             docker_rc, docker_out = self._run_cimloop_generate_layer_docker(
