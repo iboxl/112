@@ -78,7 +78,6 @@ def main():
                             objective="EDP",
                             time_limit=args.timeLimit,
                             mip_focus=args.mipFocus,
-                            best_metric=objective_metric_value("EDP", baseline.latency, baseline.energy) * 2,
                             return_profile=False,
                         )
                         baseline_total += objective_metric_value("EDP", baseline.latency, baseline.energy)

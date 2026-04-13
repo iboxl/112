@@ -39,6 +39,7 @@ class SolverProfile:
     node_count: float = 0.0
     callback_mipsol_updates: int = 0
     callback_dynamic_terminations: int = 0
+    metric_upper_bound_applied: bool = False
 
 class Solver():
     def __init__(self, acc:CIM_Acc, ops:WorkLoad, tu, su, metric_ub, outputdir=None,
@@ -111,6 +112,17 @@ class Solver():
                             + [0]) for op in range(3) ]                             # maxTrans[op] = max transfer time for op in {I,W,O}
         
         Logger.critical(f"Best {CONST.FLAG_OPT} metric upper bound is {self.metric_ub}")
+
+    def _refresh_metric_ub(self):
+        current_ub = CONST.MAX_POS if self.metric_ub is None else self.metric_ub
+        if self.shared_ub is not None:
+            current_ub = min(current_ub, self.shared_ub.value)
+        self.metric_ub = current_ub
+        self.profile.metric_upper_bound = current_ub
+        return current_ub
+
+    def _has_finite_metric_ub(self):
+        return self.metric_ub is not None and self.metric_ub < CONST.MAX_POS * 0.5
 
     def _solve_trivial(self, acc: CIM_Acc, ops: WorkLoad, factors):
         """Analytical solution for the degenerate case: Num_Loops == 0.
@@ -307,7 +319,7 @@ class Solver():
             LAT_UNIT,
             TOTAL_TEMPORAL_ITERS * max(t_MAC, MAX_STAGE_TRANSFER) + UB_offchipBootstrap,
         )
-        if CONST.FLAG_OPT == "Latency" and self.metric_ub is not None:
+        if CONST.FLAG_OPT == "Latency" and self.metric_ub is not None and self.metric_ub < CONST.MAX_POS * 0.5:
             UB_latencySimple = min(UB_latencySimple, self.metric_ub / CONST.SCALE_LATENCY)
         UB_latencySimple = max(UB_latencySimple, LAT_UNIT)
         _f_max = max(UNIQUE_FACTOR) if UNIQUE_FACTOR else 2
@@ -1417,13 +1429,14 @@ class Solver():
         if CONST.FLAG_OPT == "EDP":
             model.addConstr(res_EDP >= res_latency * res_energy * CONST.SCALINGFACTOR, name="C_Res_EDP_Multiplication")
 
-        # Tighten metric_ub from cross-worker shared state (if available)
-        if self.shared_ub is not None:
-            self.metric_ub = min(self.metric_ub, self.shared_ub.value)
+        # Tighten metric_ub from cross-worker shared state (if available).
+        self._refresh_metric_ub()
 
         match CONST.FLAG_OPT:
             case "Latency":
-                model.addConstr(res_latency <= self.metric_ub / CONST.SCALE_LATENCY, name="C_metric_ub_latency")
+                if self._has_finite_metric_ub():
+                    model.addConstr(res_latency <= self.metric_ub / CONST.SCALE_LATENCY, name="C_metric_ub_latency")
+                    self.profile.metric_upper_bound_applied = True
             case "Energy" | "EDP":
                 pass
             case _:
@@ -1456,6 +1469,22 @@ class Solver():
             # exit()
             # '''
             return 1
+
+        # Energy/EDP metric bounds come only from MIREDO's internal incumbent and
+        # are applied after the feasibility prescreen so external baselines cannot
+        # turn a feasible scheme into a prescreen failure.
+        self._refresh_metric_ub()
+        match CONST.FLAG_OPT:
+            case "Energy":
+                if self._has_finite_metric_ub():
+                    model.addConstr(res_energy <= self.metric_ub, name="C_metric_ub_energy")
+                    self.profile.metric_upper_bound_applied = True
+            case "EDP":
+                if self._has_finite_metric_ub():
+                    model.addConstr(res_EDP <= self.metric_ub / CONST.SCALE_LATENCY, name="C_metric_ub_EDP")
+                    self.profile.metric_upper_bound_applied = True
+            case _:
+                pass
 
         ####################################################################  Set Constraint Flag ###################################################################
         model.discardMultiobjEnvs()

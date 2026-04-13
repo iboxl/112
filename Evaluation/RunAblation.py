@@ -5,19 +5,16 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from Evaluation.common.BaselineProvider import run_baseline
 from Evaluation.common.EvalCommon import (
     hardware_spec_from_acc,
     iter_model_layers,
     make_accelerator,
     make_output_dir,
-    objective_metric_value,
     run_miredo_layer,
     save_experiment_json,
     setup_experiment_logger,
 )
 from utils.UtilsFunction.ToolFunction import prepare_save_dir
-from utils.Workload import WorkLoad
 
 
 VARIANT_LABELS = {
@@ -92,20 +89,10 @@ def main():
 
             for layer in model_layers:
                 loopdim = copy.deepcopy(layer["loopdim"])
-                ops = WorkLoad(loopDim=loopdim)
                 layer_dir = output_dir / objective / model_name / layer["layer"]
                 prepare_save_dir(str(layer_dir))
 
                 try:
-                    baseline = run_baseline(
-                        method="ws",
-                        acc=make_accelerator(args.architecture),
-                        ops=ops,
-                        loopdim=loopdim,
-                        model_name=model_name,
-                        architecture=args.architecture,
-                        objective=objective,
-                    )
                     miredo = run_miredo_layer(
                         acc=make_accelerator(args.architecture),
                         loopdim=loopdim,
@@ -113,7 +100,6 @@ def main():
                         objective=objective,
                         time_limit=args.timeLimit,
                         mip_focus=args.mipFocus,
-                        best_metric=objective_metric_value(objective, baseline.latency, baseline.energy) * 2,
                         return_profile=False,
                     )
                     _accumulate(
@@ -157,18 +143,9 @@ def main():
                 totals = _empty_total()
                 for layer in model_layers:
                     loopdim = copy.deepcopy(layer["loopdim"])
-                    ops = WorkLoad(loopDim=loopdim)
                     layer_dir = output_dir / variant_name / model_name / layer["layer"]
                     prepare_save_dir(str(layer_dir))
                     try:
-                        baseline = run_baseline(
-                            method="ws",
-                            acc=make_accelerator(args.architecture),
-                            ops=ops, loopdim=loopdim,
-                            model_name=model_name,
-                            architecture=args.architecture,
-                            objective="Latency",
-                        )
                         miredo = run_miredo_layer(
                             acc=make_accelerator(args.architecture),
                             loopdim=loopdim,
@@ -176,7 +153,6 @@ def main():
                             objective="Latency",
                             time_limit=args.timeLimit,
                             mip_focus=args.mipFocus,
-                            best_metric=objective_metric_value("Latency", baseline.latency, baseline.energy) * 2,
                             return_profile=False,
                             ablation_flags=ablation_flags,
                         )
@@ -212,7 +188,6 @@ def main():
             "architecture": hardware_spec_from_acc(acc),
             "time_limit": args.timeLimit,
             "mip_focus": args.mipFocus,
-            "baseline": "ws",
             "structural_variants": args.structural or [],
         },
         results={

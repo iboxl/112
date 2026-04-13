@@ -16,7 +16,6 @@ from Evaluation.common.EvalCommon import (
     iter_model_layers,
     make_accelerator,
     make_output_dir,
-    objective_metric_value,
     run_miredo_layer,
     save_experiment_json,
     setup_experiment_logger,
@@ -74,7 +73,6 @@ def main():
                     objective="Latency",
                     time_limit=args.timeLimit,
                     mip_focus=args.mipFocus,
-                    best_metric=objective_metric_value("Latency", baseline.latency, baseline.energy) * 2,
                     return_profile=True,
                 )
                 analytical_latency = miredo["solver_latency"]

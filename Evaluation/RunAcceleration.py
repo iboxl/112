@@ -16,7 +16,6 @@ from Evaluation.common.EvalCommon import (
     iter_model_layers,
     make_accelerator,
     make_output_dir,
-    objective_metric_value,
     run_miredo_layer,
     save_experiment_json,
     setup_experiment_logger,
@@ -75,10 +74,9 @@ def main():
             layer_dir = output_dir / model_name / layer["layer"]
             prepare_save_dir(str(layer_dir))
 
-            baseline_metrics = []
             for baseline_method in args.baselines:
                 try:
-                    baseline_result = run_baseline(
+                    run_baseline(
                         method=baseline_method,
                         acc=make_accelerator(args.architecture),
                         ops=ops,
@@ -89,9 +87,6 @@ def main():
                         cosa_map=args.cosa_map,
                         output_root=output_dir,
                     )
-                    baseline_metrics.append(
-                        objective_metric_value(args.objective, baseline_result.latency, baseline_result.energy)
-                    )
                 except Exception as exc:
                     anomalies.append({
                         "model": model_name,
@@ -101,8 +96,6 @@ def main():
                         "message": str(exc),
                     })
 
-            best_metric = min(baseline_metrics) * 2 if baseline_metrics else None
-
             try:
                 miredo = run_miredo_layer(
                     acc=make_accelerator(args.architecture),
@@ -111,7 +104,6 @@ def main():
                     objective=args.objective,
                     time_limit=args.timeLimit,
                     mip_focus=args.mipFocus,
-                    best_metric=best_metric,
                     return_profile=True,
                 )
                 mapping_profile = miredo["mapping_profile"]
@@ -174,7 +166,7 @@ def main():
             "architecture": hardware_spec_from_acc(acc),
             "time_limit": args.timeLimit,
             "objective": args.objective,
-            "baselines_for_upper_bound": args.baselines,
+            "baselines_evaluated": args.baselines,
         },
         results={
             "acceleration_effects": acceleration_effects,

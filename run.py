@@ -201,17 +201,12 @@ def __main__(**kwargs):
         if not cache_flag:
             accelerator = copy.deepcopy(accelerator_eval)
 
-            match CONST.FLAG_OPT:
-                case "Latency":
-                    bestMetric = l_base
-                case "Energy":
-                    bestMetric = e_base
-                case "EDP":
-                    bestMetric = l_base * e_base * CONST.SCALINGFACTOR
-                case _:
-                    bestMetric = 1e9            # flagOPT = infeasible
-
-            l_solver, e_solver, edp_solver, l_simu, e_simu, PD_M = SolveMapping(acc=accelerator, ops=WorkLoad(loopDim=newdim), bestMetric=bestMetric*2, outputdir=outputdir_layer)
+            l_solver, e_solver, edp_solver, l_simu, e_simu, PD_M = SolveMapping(
+                acc=accelerator,
+                ops=WorkLoad(loopDim=newdim),
+                bestMetric=CONST.MAX_POS,
+                outputdir=outputdir_layer,
+            )
             mip_cache_put(accelerator_eval, newdim, CONST.FLAG_OPT, CONST.TIMELIMIT, CONST.MIPFOCUS, {
                 "solver_latency": l_solver, "solver_energy": e_solver,
                 "solver_edp": l_solver * e_solver * CONST.SCALINGFACTOR,

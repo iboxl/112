@@ -143,7 +143,6 @@ def main():
                         objective=objective,
                         time_limit=args.timeLimit,
                         mip_focus=args.mipFocus,
-                        best_metric=None,
                         return_profile=True,
                     )
                     _accumulate(
