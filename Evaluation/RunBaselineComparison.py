@@ -5,14 +5,17 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from Evaluation.common.BaselineProvider import run_baseline
+from Evaluation.common.BaselineProvider import (
+    BASELINE_METHOD_LABELS,
+    SUPPORTED_BASELINE_METHODS,
+    run_baseline,
+)
 from Evaluation.common.EvalCommon import (
     DEFAULT_MODELS,
     hardware_spec_from_acc,
     iter_model_layers,
     make_accelerator,
     make_output_dir,
-    objective_metric_value,
     run_miredo_layer,
     save_experiment_json,
     setup_experiment_logger,
@@ -22,11 +25,7 @@ from utils.UtilsFunction.ToolFunction import prepare_save_dir
 from utils.Workload import WorkLoad
 
 
-METHOD_LABELS = {
-    "ws": "WS",
-    "zigzag": "ZigZag_IMC",
-    "cimloop": "CIMLoop",
-}
+METHOD_LABELS = BASELINE_METHOD_LABELS
 
 
 def _empty_total():
@@ -47,7 +46,7 @@ def main():
     parser = argparse.ArgumentParser(description="EXP-2 baseline comparison")
     parser.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
     parser.add_argument("--objectives", nargs="+", default=["Latency", "Energy", "EDP"])
-    parser.add_argument("--baselines", nargs="+", default=["ws", "zigzag"])
+    parser.add_argument("--baselines", nargs="+", choices=SUPPORTED_BASELINE_METHODS, default=["ws", "zigzag"])
     parser.add_argument("--architecture", default="ZigzagAcc")
     parser.add_argument("--timeLimit", type=int, default=120)
     parser.add_argument("--mipFocus", type=int, default=1)
@@ -55,6 +54,8 @@ def main():
     parser.add_argument("-o", "--outputdir", dest="output_dir", default=None)
     parser.add_argument("--cimloop-macro", default="raella_isca_2023",
                         help="CIMLoop macro model (default: raella_isca_2023)")
+    parser.add_argument("--cosa-map", default=None,
+                        help="Path to a CoSA map_16.yaml file or directory; omit to generate locally.")
     args = parser.parse_args()
 
     output_dir = make_output_dir("exp2_compare", args.output_dir)
@@ -63,11 +64,7 @@ def main():
     per_model = []
     per_layer = []
     stall_rows = []
-    anomalies = [{
-        "method": "CoSA_adapted",
-        "kind": "unsupported",
-        "message": "Evaluation/CoSA integration is not available in the current repository.",
-    }]
+    anomalies = []
 
     for model_name in args.models:
         model_layers = iter_model_layers(model_name)
@@ -101,6 +98,8 @@ def main():
                             architecture=args.architecture,
                             objective=objective,
                             cimloop_macro=args.cimloop_macro,
+                            cosa_map=args.cosa_map,
+                            output_root=output_dir,
                         )
                         baseline_results[baseline_method] = baseline_result
                         _accumulate(
@@ -136,14 +135,6 @@ def main():
                             "message": str(exc),
                         })
 
-                best_metric = None
-                if baseline_results:
-                    baseline_metrics = [
-                        objective_metric_value(objective, result.latency, result.energy)
-                        for result in baseline_results.values()
-                    ]
-                    best_metric = min(baseline_metrics) * 2
-
                 try:
                     miredo = run_miredo_layer(
                         acc=make_accelerator(args.architecture),
@@ -152,7 +143,7 @@ def main():
                         objective=objective,
                         time_limit=args.timeLimit,
                         mip_focus=args.mipFocus,
-                        best_metric=best_metric,
+                        best_metric=None,
                         return_profile=True,
                     )
                     _accumulate(

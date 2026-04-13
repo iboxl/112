@@ -6,7 +6,10 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from Evaluation.common.BaselineProvider import run_baseline
+from Evaluation.common.BaselineProvider import (
+    SUPPORTED_BASELINE_METHODS,
+    run_baseline,
+)
 from Evaluation.common.EvalCommon import (
     DEFAULT_MODELS,
     hardware_spec_from_acc,
@@ -46,7 +49,9 @@ def main():
     parser.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
     parser.add_argument("--architecture", default="ZigzagAcc")
     parser.add_argument("--objective", default="Latency", choices=["Latency", "Energy", "EDP"])
-    parser.add_argument("--baselines", nargs="+", default=["ws", "zigzag"])
+    parser.add_argument("--baselines", nargs="+", choices=SUPPORTED_BASELINE_METHODS, default=["ws", "zigzag"])
+    parser.add_argument("--cosa-map", default=None,
+                        help="Path to a CoSA map_16.yaml file or directory; omit to generate locally.")
     parser.add_argument("--timeLimit", type=int, default=120)
     parser.add_argument("--mipFocus", type=int, default=1)
     parser.add_argument("--maxLayers", type=int, default=None)
@@ -81,6 +86,8 @@ def main():
                         model_name=model_name,
                         architecture=args.architecture,
                         objective=args.objective,
+                        cosa_map=args.cosa_map,
+                        output_root=output_dir,
                     )
                     baseline_metrics.append(
                         objective_metric_value(args.objective, baseline_result.latency, baseline_result.energy)

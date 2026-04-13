@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import shutil
 import sys
 
@@ -25,6 +26,18 @@ def cimloop_scripts_root() -> Path:
 
 def cimloop_infra_root() -> Path:
     return repo_root() / "Evaluation" / "CIMLoop" / "timeloop-accelergy-infra"
+
+
+def cimloop_timeloop_root() -> Path:
+    return cimloop_infra_root() / "src" / "timeloop"
+
+
+def cimloop_timeloop_bin_root() -> Path:
+    return cimloop_timeloop_root() / "bin"
+
+
+def cimloop_timeloop_lib_root() -> Path:
+    return cimloop_timeloop_root() / "build"
 
 
 def cimloop_output_root() -> Path:
@@ -136,5 +149,27 @@ def ensure_pytimeloop_shim():
 def ensure_cimloop_scripts_on_path():
     ensure_pytimeloop_shim()
     scripts_dir = str(cimloop_scripts_root())
-    if scripts_dir not in sys.path:
-        sys.path.insert(0, scripts_dir)
+    while scripts_dir in sys.path:
+        sys.path.remove(scripts_dir)
+    sys.path.append(scripts_dir)
+
+
+def cimloop_runtime_env() -> dict[str, str]:
+    """Return a shell-safe Timeloop runtime env for timeloopfe.call_mapper().
+
+    timeloopfe prefixes these entries as raw ``KEY=VALUE`` shell tokens, so do
+    not forward the full process environment. Values such as
+    ``CONDA_PROMPT_MODIFIER=(MIREDO)`` break the generated shell command, and a
+    polluted LD_LIBRARY_PATH can make CiMLoop load another baseline's Timeloop.
+    """
+    bin_dir = str(cimloop_timeloop_bin_root())
+    lib_dir = str(cimloop_timeloop_lib_root())
+    conda_lib = str(Path(sys.prefix) / "lib")
+    env = {
+        "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+        "LD_LIBRARY_PATH": ":".join(part for part in [lib_dir, conda_lib] if part),
+        "TIMELOOP_OUTPUT_STAT_SCIENTIFIC": "1",
+        "TIMELOOP_OUTPUT_STAT_DEFAULT_FLOAT": "0",
+        "TIMELOOP_HIDE_INCONSEQUENTIAL_STATS": "0",
+    }
+    return {key: value for key, value in env.items() if value}

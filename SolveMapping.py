@@ -194,13 +194,18 @@ def update_best(result_pack:dict, best_metric:float, result, best_count:int, bes
 
     assert CONST.FLAG_OPT in ["Latency", "Energy", "EDP"], "No Such Metric for Optimization, Please Check CONST.FLAG_OPT"
     metric_index = {"Latency": 0, "Energy": 1, "EDP": 2}[CONST.FLAG_OPT]
-    if solver_result[metric_index] <= best_metric:
+    # Record MIREDO's own best even when it's worse than the caller-supplied bound:
+    # the baseline can outperform the MIP formulation on some shapes (e.g. SE-block
+    # FC), so rejecting those results leaves `result` pinned at MAX_POS and corrupts
+    # downstream totals.  The pruning bound `best_metric` is still tightened.
+    if has_solution and solver_result[metric_index] < result[metric_index]:
         result = solver_result + [sim_l, sim_e] + [profile]
-        best_metric = solver_result[metric_index]
         best_count = count
         best_dataflow = result_pack["dataflow"]
         best_solver_profile = solver_profile
         best_origin_index = origin_index
+    if has_solution and solver_result[metric_index] < best_metric:
+        best_metric = solver_result[metric_index]
 
     return best_metric, result, best_count, best_dataflow, solCount, best_solver_profile, best_origin_index
 

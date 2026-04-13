@@ -14,6 +14,12 @@ from utils.UtilsFunction.ToolFunction import prepare_save_dir
 from Simulator.Simulax import tranSimulator
 from utils.ZigzagUtils import zigzag_cache_prefix, get_hardware_performance_zigzag, convert_Zigzag_to_MIREDO, compare_ops_cme
 from Evaluation.WeightStationaryGenerator import generate_weight_stationary_baseline
+from Evaluation.common.BaselineProvider import (
+    BASELINE_METHOD_LABELS,
+    SUPPORTED_BASELINE_METHODS,
+    get_cosa_unsupported_reason,
+    run_baseline,
+)
 from Evaluation.common.EvalCommon import make_accelerator, normalize_loopdim_for_solver, mip_cache_get, mip_cache_put
 import time, copy
 from importlib import import_module
@@ -57,8 +63,12 @@ def get_Args():
                         help = 'save output files in folder')
     parser.add_argument('-arch', '--architecture', dest='architecture', required=False,
                         type=str, default=f'ZigzagAcc', help = 'save output files in folder')
-    parser.add_argument('--baseline', dest='baseline', choices=["zigzag", "ws"], required=False,
-                        type=str.lower, default="zigzag", help='comparison baseline: zigzag cache or ws baseline dataflow')
+    parser.add_argument('--baseline', dest='baseline', choices=SUPPORTED_BASELINE_METHODS, required=False,
+                        type=str.lower, default="zigzag", help='comparison baseline')
+    parser.add_argument('--cimloop-macro', dest='cimloop_macro', required=False,
+                        default="raella_isca_2023", help='CIMLoop macro model')
+    parser.add_argument('--cosa-map', dest='cosa_map', required=False, default=None,
+                        help='Path to a CoSA map_16.yaml file or directory; omit to generate locally.')
     args = parser.parse_args()
 
     return args
@@ -88,6 +98,11 @@ def __main__(**kwargs):
     model = f"model/{args.model}.onnx"
 
     convs, loopdims = extract_loopdims(model)
+    if args.baseline == "cosa":
+        cosa_unsupported_reason = get_cosa_unsupported_reason(args.model, loopdims=loopdims)
+        if cosa_unsupported_reason is not None:
+            Logger.error(cosa_unsupported_reason)
+            raise SystemExit(cosa_unsupported_reason)
 
     match CONST.FLAG_OPT:
         case "Latency":
@@ -99,7 +114,8 @@ def __main__(**kwargs):
         case _:
             opt_flag = "latency"            # flagOPT = infeasible
     
-    baseline_label = "ZigZag" if args.baseline == "zigzag" else "WS"
+    baseline_label = BASELINE_METHOD_LABELS.get(args.baseline, args.baseline)
+    baseline_objective = args.opt if args.opt in ("Latency", "Energy", "EDP") else "Latency"
     if args.baseline == "zigzag":
         compare_filePrefix = zigzag_cache_prefix(opt_flag, args.model, args.architecture)
         compare_pickle = compare_filePrefix.with_suffix(".pickle")
@@ -160,28 +176,24 @@ def __main__(**kwargs):
         # Baseline is always computed (needed for comparison output)
         accelerator = copy.deepcopy(accelerator_eval)
         try:
-            if args.baseline == "zigzag":
-                cme_compare = next(c for c in cmes if compare_ops_cme(loopDim=loopdim, cme=c))
-                assert cme_compare is not None
-                loops = LoopNest(acc=accelerator,ops=ops)
-                loops = convert_Zigzag_to_MIREDO(loops=loops, cme=cme_compare)
-                loops.usr_defined_double_flag[accelerator.Macro2mem][1] = accelerator.double_Macro
-                Logger.info("Running: Zigzag-in-MIREDO-Simulator - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -")
-                simu = tranSimulator(acc=accelerator, ops=ops, dataflow=loops)
-                l_base, e_base = simu.run()
-                PD_B = simu.PD
-            else:
-                Logger.info("Running: WS-Baseline - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -")
-                ws_result = generate_weight_stationary_baseline(
-                    acc=accelerator,
-                    ops=WorkLoad(loopDim=newdim),
-                )
-                loops = ws_result.dataflow
-                l_base, e_base = ws_result.latency, ws_result.energy
-                PD_B = ws_result.profile
-                Logger.info(f"WS baseline policy: {ws_result.policy}")
-        except ValueError as e:
-            Logger.error('Wrong Match')
+            baseline_result = run_baseline(
+                method=args.baseline,
+                acc=accelerator,
+                ops=ops,
+                loopdim=loopdim,
+                model_name=args.model,
+                architecture=args.architecture,
+                objective=baseline_objective,
+                cimloop_macro=args.cimloop_macro,
+                cosa_map=args.cosa_map,
+                output_root=outFolder,
+            )
+            l_base, e_base = baseline_result.latency, baseline_result.energy
+            PD_B = baseline_result.profile
+            Logger.info(f"Running: {baseline_label}-Baseline")
+            Logger.info(f"{baseline_label} baseline policy: {baseline_result.metadata.get('policy')}")
+        except Exception as e:
+            Logger.error('Baseline execution failed')
             Logger.changeFile(new_file = os.path.join(outFolder,args.log))
             Logger.error(e)
             continue

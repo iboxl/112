@@ -1424,10 +1424,8 @@ class Solver():
         match CONST.FLAG_OPT:
             case "Latency":
                 model.addConstr(res_latency <= self.metric_ub / CONST.SCALE_LATENCY, name="C_metric_ub_latency")
-            case "Energy":
-                model.addConstr(res_energy  <= self.metric_ub, name="C_metric_ub_energy")
-            case "EDP":
-                model.addConstr(res_EDP     <= self.metric_ub / CONST.SCALE_LATENCY, name="C_metric_ub_EDP")
+            case "Energy" | "EDP":
+                pass
             case _:
                 Logger.warning("Undefined Optimization Objective, No Upper Bound Applied.")
 

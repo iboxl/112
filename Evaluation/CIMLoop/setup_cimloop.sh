@@ -68,20 +68,28 @@ if [ ! -d "src/pat" ] && [ -d "pat-public/src/pat" ]; then
     cp -r pat-public/src/pat src/pat
 fi
 
-# 确保 SConscript 能找到 conda 库路径
-# (如果已有补丁则跳过)
-if ! grep -q "CONDA_PREFIX" src/SConscript 2>/dev/null; then
-    sed -i "/env.Append(LIBPATH = \['\.'.*\])/a\\
-import os\\
-conda_prefix = os.environ.get('CONDA_PREFIX', '')\\
-if conda_prefix:\\
-    env.Append(CPPPATH = [os.path.join(conda_prefix, 'include')])\\
-    env.Append(LIBPATH = [os.path.join(conda_prefix, 'lib')])\\
-    env.Append(RPATH   = [os.path.join(conda_prefix, 'lib')])" src/SConscript
-fi
+# 通过构建环境注入 conda 库路径和警告选项，避免修改 vendored Timeloop 源码。
+export BARVINOKPATH="${CONDA_PREFIX}"
+export NTLPATH="${CONDA_PREFIX}"
+export CPATH="${CONDA_PREFIX}/include:${CPATH:-}"
+export LIBRARY_PATH="${CONDA_PREFIX}/lib:${LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
 
-# 放宽 ISL 头文件的编译警告
-sed -i "s/-Werror', '-Wall'/-Werror', '-Wno-error=missing-field-initializers', '-Wall'/" src/SConscript 2>/dev/null || true
+# 该 Timeloop SConstruct 不读取命令行 CCFLAGS；用一次性 compiler shim 避免改 SConscript。
+CIMLOOP_REAL_CXX="$(command -v g++)"
+CIMLOOP_REAL_CC="$(command -v gcc)"
+CIMLOOP_COMPILER_WRAPPER_DIR="$(mktemp -d)"
+trap 'rm -rf "${CIMLOOP_COMPILER_WRAPPER_DIR}"' EXIT
+cat > "${CIMLOOP_COMPILER_WRAPPER_DIR}/g++" <<EOF
+#!/usr/bin/env bash
+exec "${CIMLOOP_REAL_CXX}" "\$@" -Wno-error=missing-field-initializers
+EOF
+cat > "${CIMLOOP_COMPILER_WRAPPER_DIR}/gcc" <<EOF
+#!/usr/bin/env bash
+exec "${CIMLOOP_REAL_CC}" "\$@" -Wno-error=missing-field-initializers
+EOF
+chmod +x "${CIMLOOP_COMPILER_WRAPPER_DIR}/g++" "${CIMLOOP_COMPILER_WRAPPER_DIR}/gcc"
+export PATH="${CIMLOOP_COMPILER_WRAPPER_DIR}:${PATH}"
 
 scons -j"$(nproc)" --with-isl --accelergy 2>&1 | tail -5
 
