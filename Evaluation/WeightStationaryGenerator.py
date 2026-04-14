@@ -238,6 +238,14 @@ def build_weight_stationary_dataflow(acc: CIM_Acc, ops: WorkLoad, scheme=None,
                 mem=[assignments[op][factor_idx] for op in range(3)],
             )
         )
+    if not loops.tm:
+        loops.tm.append(
+            Mapping(
+                dim=0,
+                dimSize=1,
+                mem=[acc.Dram2mem for _ in range(3)],
+            )
+        )
 
     if enable_double_buffer:
         loops.usr_defined_double_flag = _candidate_double_flags(acc, loops)

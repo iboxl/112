@@ -10,3 +10,6 @@
 [submodule "Evaluation/CIMLoop/timeloop-accelergy-infra"]
 	path = Evaluation/CIMLoop/timeloop-accelergy-infra
 	url = https://github.com/Accelergy-Project/accelergy-timeloop-infrastructure.git
+[submodule "Evaluation/CoSA/cosa"]
+	path = Evaluation/CoSA/cosa
+	url = https://github.com/ucb-bar/cosa.git

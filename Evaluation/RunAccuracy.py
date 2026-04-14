@@ -5,7 +5,10 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from Evaluation.common.BaselineProvider import run_baseline
+from Evaluation.common.BaselineProvider import (
+    SUPPORTED_BASELINE_METHODS,
+    run_baseline,
+)
 from Evaluation.common.EvalCommon import (
     DEFAULT_MODELS,
     classify_layer_family,
@@ -13,7 +16,6 @@ from Evaluation.common.EvalCommon import (
     iter_model_layers,
     make_accelerator,
     make_output_dir,
-    objective_metric_value,
     run_miredo_layer,
     save_experiment_json,
     setup_experiment_logger,
@@ -29,7 +31,7 @@ def main():
     parser.add_argument("--architecture", default="ZigzagAcc")
     parser.add_argument("--timeLimit", type=int, default=120)
     parser.add_argument("--mipFocus", type=int, default=1)
-    parser.add_argument("--baseline", choices=["zigzag", "ws"], default="zigzag")
+    parser.add_argument("--baseline", choices=SUPPORTED_BASELINE_METHODS, default="zigzag")
     parser.add_argument("--maxLayers", type=int, default=None)
     parser.add_argument("-o", "--outputdir", dest="output_dir", default=None)
     args = parser.parse_args()
@@ -67,7 +69,6 @@ def main():
                     objective="Latency",
                     time_limit=args.timeLimit,
                     mip_focus=args.mipFocus,
-                    best_metric=objective_metric_value("Latency", baseline.latency, baseline.energy) * 2,
                     return_profile=True,
                 )
                 analytical_latency = miredo["solver_latency"]

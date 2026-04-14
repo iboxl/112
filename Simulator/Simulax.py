@@ -392,7 +392,9 @@ class tranSimulator():
 
         for op, op_name in enumerate(['I','W','O']):
             if self.firstMemDram[op] is False:
-                self.memCost[self.acc.Dram2mem].r += self.dataSize[self.firstMappingMem[op],op] * \
+                # DRAM supplies the full operand in bootstrap (matches line 376's latency accounting).
+                # firstMappingMem's write side stays per-instance; line 402-404 scales it by instance count.
+                self.memCost[self.acc.Dram2mem].r += self.ops.size[op] * \
                                                     self.acc.cost_r[self.acc.Dram2mem] * self._prec(self.acc.Dram2mem, op)
                 self.memCost[self.firstMappingMem[op]].w += self.dataSize[self.firstMappingMem[op],op] * \
                                                        self.acc.cost_w[self.firstMappingMem[op]] * self._prec(self.firstMappingMem[op], op)
@@ -480,8 +482,7 @@ class tranSimulator():
         for mem in range(1,acc.Num_mem):
             str_mem += f"{acc.mem2dict(mem):<15}:"
             for t in range(3):
-                str_mem += f"{self.dataSize[mem,t]:>8}, {int(self.multicast_size[mem,t]):>3}|{int(self.unicast_size[mem,t]):<3}"
-                # str_mem += f"{self.dataSize[mem,t]:>8}"
+                str_mem += f"{self.dataSize[mem,t]:>8}"
             str_mem += '\n'
         pstr += str_mem
         

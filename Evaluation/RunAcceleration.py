@@ -6,14 +6,16 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from Evaluation.common.BaselineProvider import run_baseline
+from Evaluation.common.BaselineProvider import (
+    SUPPORTED_BASELINE_METHODS,
+    run_baseline,
+)
 from Evaluation.common.EvalCommon import (
     DEFAULT_MODELS,
     hardware_spec_from_acc,
     iter_model_layers,
     make_accelerator,
     make_output_dir,
-    objective_metric_value,
     run_miredo_layer,
     save_experiment_json,
     setup_experiment_logger,
@@ -46,7 +48,7 @@ def main():
     parser.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
     parser.add_argument("--architecture", default="ZigzagAcc")
     parser.add_argument("--objective", default="Latency", choices=["Latency", "Energy", "EDP"])
-    parser.add_argument("--baselines", nargs="+", default=["ws", "zigzag"])
+    parser.add_argument("--baselines", nargs="+", choices=SUPPORTED_BASELINE_METHODS, default=["ws", "zigzag"])
     parser.add_argument("--timeLimit", type=int, default=120)
     parser.add_argument("--mipFocus", type=int, default=1)
     parser.add_argument("--maxLayers", type=int, default=None)
@@ -70,10 +72,9 @@ def main():
             layer_dir = output_dir / model_name / layer["layer"]
             prepare_save_dir(str(layer_dir))
 
-            baseline_metrics = []
             for baseline_method in args.baselines:
                 try:
-                    baseline_result = run_baseline(
+                    run_baseline(
                         method=baseline_method,
                         acc=make_accelerator(args.architecture),
                         ops=ops,
@@ -81,9 +82,6 @@ def main():
                         model_name=model_name,
                         architecture=args.architecture,
                         objective=args.objective,
-                    )
-                    baseline_metrics.append(
-                        objective_metric_value(args.objective, baseline_result.latency, baseline_result.energy)
                     )
                 except Exception as exc:
                     anomalies.append({
@@ -94,8 +92,6 @@ def main():
                         "message": str(exc),
                     })
 
-            best_metric = min(baseline_metrics) * 2 if baseline_metrics else None
-
             try:
                 miredo = run_miredo_layer(
                     acc=make_accelerator(args.architecture),
@@ -104,7 +100,6 @@ def main():
                     objective=args.objective,
                     time_limit=args.timeLimit,
                     mip_focus=args.mipFocus,
-                    best_metric=best_metric,
                     return_profile=True,
                 )
                 mapping_profile = miredo["mapping_profile"]
@@ -167,7 +162,7 @@ def main():
             "architecture": hardware_spec_from_acc(acc),
             "time_limit": args.timeLimit,
             "objective": args.objective,
-            "baselines_for_upper_bound": args.baselines,
+            "baselines_evaluated": args.baselines,
         },
         results={
             "acceleration_effects": acceleration_effects,

@@ -278,7 +278,7 @@ def temporary_runtime_config(objective="Latency", time_limit=120, mip_focus=1,
 
 import hashlib
 
-_CACHE_VERSION = 1
+_CACHE_VERSION = 2
 _mip_cache = None
 _cache_path = None
 
@@ -351,8 +351,11 @@ def mip_cache_put(acc, solver_loopdim, objective, time_limit, mip_focus, result,
 
 
 def run_miredo_layer(acc, loopdim, outputdir, objective="Latency", time_limit=120,
-                     mip_focus=1, best_metric=None, return_profile=True,
-                     ablation_flags=None):
+                     mip_focus=1, return_profile=True, ablation_flags=None):
+    """Run MIREDO for one layer.
+
+    Metric pruning starts from MIREDO's own incumbent instead of an external baseline.
+    """
     solver_loopdim = normalize_loopdim_for_solver(loopdim)
 
     _ensure_cache_loaded()
@@ -363,7 +366,6 @@ def run_miredo_layer(acc, loopdim, outputdir, objective="Latency", time_limit=12
 
     prepare_save_dir(str(outputdir))
     solver_ops = WorkLoad(loopDim=solver_loopdim)
-    metric_ub = CONST.MAX_POS if best_metric is None else best_metric
 
     with temporary_runtime_config(
         objective=objective,
@@ -377,7 +379,7 @@ def run_miredo_layer(acc, loopdim, outputdir, objective="Latency", time_limit=12
         solve_result = SolveMapping(
             acc=copy.deepcopy(acc),
             ops=solver_ops,
-            bestMetric=metric_ub,
+            bestMetric=CONST.MAX_POS,
             outputdir=str(outputdir),
             return_profile=return_profile,
         )

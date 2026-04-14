@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 class MappingRunProfile:
     objective: str = ""
     dominance_pruning_enabled: bool = False
+    initial_metric_bound: float = 0.0
     num_schemes_initial: int = 0
     num_schemes_after_dominance: int = 0
     num_schemes_after_static_lb: int = 0
@@ -42,6 +43,10 @@ class MappingRunProfile:
     best_solver_profile: SolverProfile | None = None
 
 _worker_env = None  # cached Gurobi Env, set by _init_worker
+
+
+def _finite_metric_bound(metric_bound):
+    return metric_bound is not None and metric_bound < CONST.MAX_POS * 0.5
 
 def _init_worker(threads_per_worker, runtime_config):
     """ProcessPoolExecutor initializer: create one Gurobi Env per worker process."""
@@ -77,7 +82,7 @@ def solve_scheme_worker(count:int, origin_index:int, scheme, acc:CIM_Acc, ops:Wo
 
     # Provable lower-bound pruning: skip model building entirely if the
     # analytical bound already exceeds the current best objective.
-    effective_ub = metric_ub
+    effective_ub = CONST.MAX_POS if metric_ub is None else metric_ub
     if shared_ub is not None:
         effective_ub = min(effective_ub, shared_ub.value)
     lat_lb, eng_lb, edp_lb = scheme_objective_lb(acc, ops, scheme, temporal_unrolling)
@@ -194,30 +199,35 @@ def update_best(result_pack:dict, best_metric:float, result, best_count:int, bes
 
     assert CONST.FLAG_OPT in ["Latency", "Energy", "EDP"], "No Such Metric for Optimization, Please Check CONST.FLAG_OPT"
     metric_index = {"Latency": 0, "Energy": 1, "EDP": 2}[CONST.FLAG_OPT]
-    if solver_result[metric_index] <= best_metric:
+    # Record MIREDO's own best independently from any external baseline.  The
+    # pruning bound `best_metric` is only tightened by MIREDO incumbents.
+    if has_solution and solver_result[metric_index] < result[metric_index]:
         result = solver_result + [sim_l, sim_e] + [profile]
-        best_metric = solver_result[metric_index]
         best_count = count
         best_dataflow = result_pack["dataflow"]
         best_solver_profile = solver_profile
         best_origin_index = origin_index
+    if has_solution and solver_result[metric_index] < best_metric:
+        best_metric = solver_result[metric_index]
 
     return best_metric, result, best_count, best_dataflow, solCount, best_solver_profile, best_origin_index
 
 def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str, singleIter=False, **kwargs):
     time_begin = time.time()
     return_profile = kwargs.get("return_profile", False)
+    initial_metric_bound = CONST.MAX_POS
     run_profile = MappingRunProfile(
         objective=CONST.FLAG_OPT,
         dominance_pruning_enabled=kwargs.get("dominance_pruning", False),
-        best_metric=bestMetric,
+        initial_metric_bound=initial_metric_bound,
+        best_metric=initial_metric_bound,
     )
 
     if FLAG.INPUT_STATIONARY and (acc.core.size_input_buffer * acc.num_core >= ops.dim_M * ops.dim_K * ops.input.bitwidth):
         Logger.debug("Sufficient Buffer Resources for Input")
 
     count, solCount = 0, 0
-    best_metric = bestMetric
+    best_metric = initial_metric_bound
     best_count = 0
     best_origin_index = 0
     best_dataflow = None
@@ -299,19 +309,19 @@ def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str, singl
         scheme_records.sort(key=lambda r: (r["meta"]["sort_key"], -r["origin_index"]), reverse=True)
 
         # ── Analytical lower-bound screening (Propositions 1-3) ────────────
-        # Discard schemes whose provable LB exceeds the initial metric UB.
+        # Discard schemes whose provable LB exceeds the initial internal metric UB.
         # The dynamic version in solve_scheme_worker re-checks against the
         # live shared_ub during parallel execution.
-        if bestMetric < CONST.MAX_POS:
+        if _finite_metric_bound(best_metric):
             before = len(scheme_records)
             survived = []
             for rec in scheme_records:
                 lat_lb, eng_lb, edp_lb = scheme_objective_lb(acc, ops, rec["scheme"], rec["meta"]["temporal_unrolling"])
                 obj_lb = {"Latency": lat_lb, "Energy": eng_lb, "EDP": edp_lb}.get(CONST.FLAG_OPT)
-                if obj_lb is None or obj_lb <= bestMetric:
+                if obj_lb is None or obj_lb <= best_metric:
                     survived.append(rec)
             if len(survived) < before:
-                Logger.info(f"Analytical LB screening: {before} -> {len(survived)} schemes (LB <= bestMetric).")
+                Logger.info(f"Analytical LB screening: {before} -> {len(survived)} schemes (LB <= internal incumbent).")
                 scheme_records = survived
         run_profile.num_schemes_after_static_lb = len(scheme_records)
         run_profile.timing_scoring_pruning_sec = time.time() - pruning_begin
@@ -624,7 +634,7 @@ if __name__ == "__main__":
     #                      [1,3,3,1,1,1,1,1],
     #                      [1,1,1,1,1,1,1,1]]
 
-    lat, eng, edp, c_lat, c_eng, ds = SolveMapping(acc=accelerator, ops=ops, bestMetric=1e10, outputdir=outFolder, singleIter=True, Spatial_unrolling=Spatial_unrolling)
+    lat, eng, edp, c_lat, c_eng, ds = SolveMapping(acc=accelerator, ops=ops, bestMetric=CONST.MAX_POS, outputdir=outFolder, singleIter=True, Spatial_unrolling=Spatial_unrolling)
 
     end_time = time.time()
     Logger.critical(f"SingleIter-Running SolveMapping Cost: {round(end_time - start_time,1)}s")

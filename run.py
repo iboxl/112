@@ -17,6 +17,11 @@ from baseline.cosa_adapter import CoSABaselineAdapter
 from baseline.cimloop_adapter import CimloopBaselineAdapter
 from utils.ZigzagUtils import zigzag_cache_prefix, get_hardware_performance_zigzag, convert_Zigzag_to_MIREDO, compare_ops_cme
 from Evaluation.WeightStationaryGenerator import generate_weight_stationary_baseline
+from Evaluation.common.BaselineProvider import (
+    BASELINE_METHOD_LABELS,
+    SUPPORTED_BASELINE_METHODS,
+    run_baseline,
+)
 from Evaluation.common.EvalCommon import make_accelerator, normalize_loopdim_for_solver, mip_cache_get, mip_cache_put
 import time, copy
 from importlib import import_module
@@ -121,6 +126,8 @@ def __main__(**kwargs):
         case _:
             opt_flag = "latency"            # flagOPT = infeasible
     
+    baseline_label = BASELINE_METHOD_LABELS.get(args.baseline, args.baseline)
+    baseline_objective = args.opt if args.opt in ("Latency", "Energy", "EDP") else "Latency"
     if args.baseline == "zigzag":
         baseline_adapter = ZigzagBaselineAdapter(
             model=args.model,
@@ -226,17 +233,12 @@ def __main__(**kwargs):
         if not cache_flag:
             accelerator = copy.deepcopy(accelerator_eval)
 
-            match CONST.FLAG_OPT:
-                case "Latency":
-                    bestMetric = l_base
-                case "Energy":
-                    bestMetric = e_base
-                case "EDP":
-                    bestMetric = l_base * e_base * CONST.SCALINGFACTOR
-                case _:
-                    bestMetric = 1e9            # flagOPT = infeasible
-
-            l_solver, e_solver, edp_solver, l_simu, e_simu, PD_M = SolveMapping(acc=accelerator, ops=WorkLoad(loopDim=newdim), bestMetric=bestMetric*2, outputdir=outputdir_layer)
+            l_solver, e_solver, edp_solver, l_simu, e_simu, PD_M = SolveMapping(
+                acc=accelerator,
+                ops=WorkLoad(loopDim=newdim),
+                bestMetric=CONST.MAX_POS,
+                outputdir=outputdir_layer,
+            )
             mip_cache_put(accelerator_eval, newdim, CONST.FLAG_OPT, CONST.TIMELIMIT, CONST.MIPFOCUS, {
                 "solver_latency": l_solver, "solver_energy": e_solver,
                 "solver_edp": l_solver * e_solver * CONST.SCALINGFACTOR,
