@@ -17,7 +17,6 @@ from Evaluation.WeightStationaryGenerator import generate_weight_stationary_base
 from Evaluation.common.BaselineProvider import (
     BASELINE_METHOD_LABELS,
     SUPPORTED_BASELINE_METHODS,
-    get_cosa_unsupported_reason,
     run_baseline,
 )
 from Evaluation.common.EvalCommon import make_accelerator, normalize_loopdim_for_solver, mip_cache_get, mip_cache_put
@@ -65,10 +64,6 @@ def get_Args():
                         type=str, default=f'ZigzagAcc', help = 'save output files in folder')
     parser.add_argument('--baseline', dest='baseline', choices=SUPPORTED_BASELINE_METHODS, required=False,
                         type=str.lower, default="zigzag", help='comparison baseline')
-    parser.add_argument('--cimloop-macro', dest='cimloop_macro', required=False,
-                        default="raella_isca_2023", help='CIMLoop macro model')
-    parser.add_argument('--cosa-map', dest='cosa_map', required=False, default=None,
-                        help='Path to a CoSA map_16.yaml file or directory; omit to generate locally.')
     args = parser.parse_args()
 
     return args
@@ -98,11 +93,6 @@ def __main__(**kwargs):
     model = f"model/{args.model}.onnx"
 
     convs, loopdims = extract_loopdims(model)
-    if args.baseline == "cosa":
-        cosa_unsupported_reason = get_cosa_unsupported_reason(args.model, loopdims=loopdims)
-        if cosa_unsupported_reason is not None:
-            Logger.error(cosa_unsupported_reason)
-            raise SystemExit(cosa_unsupported_reason)
 
     match CONST.FLAG_OPT:
         case "Latency":
@@ -184,9 +174,6 @@ def __main__(**kwargs):
                 model_name=args.model,
                 architecture=args.architecture,
                 objective=baseline_objective,
-                cimloop_macro=args.cimloop_macro,
-                cosa_map=args.cosa_map,
-                output_root=outFolder,
             )
             l_base, e_base = baseline_result.latency, baseline_result.energy
             PD_B = baseline_result.profile

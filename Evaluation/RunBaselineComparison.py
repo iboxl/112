@@ -52,10 +52,6 @@ def main():
     parser.add_argument("--mipFocus", type=int, default=1)
     parser.add_argument("--maxLayers", type=int, default=None)
     parser.add_argument("-o", "--outputdir", dest="output_dir", default=None)
-    parser.add_argument("--cimloop-macro", default="raella_isca_2023",
-                        help="CIMLoop macro model (default: raella_isca_2023)")
-    parser.add_argument("--cosa-map", default=None,
-                        help="Path to a CoSA map_16.yaml file or directory; omit to generate locally.")
     args = parser.parse_args()
 
     output_dir = make_output_dir("exp2_compare", args.output_dir)
@@ -97,9 +93,6 @@ def main():
                             model_name=model_name,
                             architecture=args.architecture,
                             objective=objective,
-                            cimloop_macro=args.cimloop_macro,
-                            cosa_map=args.cosa_map,
-                            output_root=output_dir,
                         )
                         baseline_results[baseline_method] = baseline_result
                         _accumulate(

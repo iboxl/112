@@ -32,8 +32,6 @@ def main():
     parser.add_argument("--timeLimit", type=int, default=120)
     parser.add_argument("--mipFocus", type=int, default=1)
     parser.add_argument("--baseline", choices=SUPPORTED_BASELINE_METHODS, default="zigzag")
-    parser.add_argument("--cosa-map", default=None,
-                        help="Path to a CoSA map_16.yaml file or directory; omit to generate locally.")
     parser.add_argument("--maxLayers", type=int, default=None)
     parser.add_argument("-o", "--outputdir", dest="output_dir", default=None)
     args = parser.parse_args()
@@ -63,8 +61,6 @@ def main():
                     model_name=model_name,
                     architecture=args.architecture,
                     objective="Latency",
-                    cosa_map=args.cosa_map,
-                    output_root=output_dir,
                 )
                 miredo = run_miredo_layer(
                     acc=make_accelerator(args.architecture),

@@ -29,8 +29,6 @@ def main():
     parser.add_argument("--models", nargs="+", default=["resnet18", "mobilenetV2"])
     parser.add_argument("--objectives", nargs="+", default=["Latency", "Energy", "EDP"])
     parser.add_argument("--baselines", nargs="+", choices=SUPPORTED_BASELINE_METHODS, default=["ws", "zigzag"])
-    parser.add_argument("--cosa-map", default=None,
-                        help="Path to a CoSA map_16.yaml file or directory; omit to generate locally.")
     parser.add_argument("--architecture", default="ZigzagAcc")
     parser.add_argument("--timeLimit", type=int, default=120)
     parser.add_argument("--mipFocus", type=int, default=1)
@@ -74,8 +72,6 @@ def main():
                             model_name=model_name,
                             architecture=args.architecture,
                             objective=objective,
-                            cosa_map=args.cosa_map,
-                            output_root=output_dir,
                         )
                     except Exception as exc:
                         anomalies.append({

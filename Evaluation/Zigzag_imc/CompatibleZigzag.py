@@ -6,18 +6,83 @@ from Architecture.ArchSpec import CIM_Acc
 import numpy as np
 import copy
 import math
-from typing import Dict, List, Tuple
+from typing import Callable, Dict, List, Tuple
 from collections import defaultdict
 from baseline.types import BaselineLayer
 from utils.GlobalUT import Logger
-from Evaluation.CoSA.CompatibleCoSA import (
-    _build_cosa_layer_tags,
-    _build_cosa_tag_rank,
-    align_double_buffer_flags_to_acc,
-    align_mapping_levels_to_acc,
-    convert_cosa_mp_to_loopMP,
-    fail_fast_if_capacity_mismatch,
-)
+
+
+def align_mapping_levels_to_acc(
+    mapping_dict: Dict[str, List[List[Tuple[str, int]]]],
+    mapping_array: List[List[int]],
+    *,
+    source_tag: str,
+    array_row_order: Tuple[str, ...] = ("I", "W", "O"),
+    warn: Callable[[str], None] | None = None,
+) -> Dict[str, List[List[Tuple[str, int]]]]:
+    aligned = copy.deepcopy(mapping_dict)
+    for row_idx, op in enumerate(array_row_order):
+        if op not in aligned:
+            raise ValueError(f"{source_tag}: missing operand mapping '{op}'")
+
+        allowed_levels = sum(1 for v in mapping_array[row_idx] if v == 1)
+        cur_levels = len(aligned[op])
+        if cur_levels > allowed_levels:
+            raise ValueError(
+                f"{source_tag}: operand '{op}' has {cur_levels} levels, "
+                f"but accelerator allows only {allowed_levels}"
+            )
+        if cur_levels < allowed_levels:
+            gap = allowed_levels - cur_levels
+            aligned[op] = aligned[op] + [[] for _ in range(gap)]
+            if warn is not None:
+                warn(
+                    f"{source_tag}: padded operand '{op}' with "
+                    f"{gap} empty inner level(s) ({cur_levels} -> {allowed_levels})"
+                )
+    return aligned
+
+
+def align_double_buffer_flags_to_acc(
+    double_buffer_flag: Dict[str, List[bool]],
+    mapping_array: List[List[int]],
+    *,
+    source_tag: str,
+    array_row_order: Tuple[str, ...] = ("I", "W", "O"),
+    warn: Callable[[str], None] | None = None,
+) -> Dict[str, List[bool]]:
+    aligned: Dict[str, List[bool]] = {}
+    for row_idx, op in enumerate(array_row_order):
+        raw = list(double_buffer_flag.get(op, []))
+        allowed_levels = sum(1 for v in mapping_array[row_idx] if v == 1)
+
+        if len(raw) == 0:
+            prefix = False
+            level_flags: List[bool] = []
+        elif len(raw) == allowed_levels:
+            prefix = False
+            level_flags = [bool(x) for x in raw]
+        else:
+            prefix = bool(raw[0])
+            level_flags = [bool(x) for x in raw[1:]]
+
+        if len(level_flags) > allowed_levels:
+            raise ValueError(
+                f"{source_tag}: operand '{op}' has {len(level_flags)} double-buffer flags, "
+                f"but accelerator allows only {allowed_levels}"
+            )
+        if len(level_flags) < allowed_levels:
+            gap = allowed_levels - len(level_flags)
+            level_flags.extend([False] * gap)
+            if warn is not None:
+                warn(
+                    f"{source_tag}: padded operand '{op}' double-buffer flags with "
+                    f"{gap} false level(s)"
+                )
+
+        aligned[op] = [prefix] + level_flags
+
+    return aligned
 
 
 def _pad_missing_inner_levels(levels, expected_len, fill_factory):
@@ -504,41 +569,17 @@ def convert_baseline_to_MIREDO(loops: LoopNest, baseline: BaselineLayer):
         warn=Logger.warning,
     )
 
-    if baseline.source == "cosa":
-        cosa_layer_tags = _build_cosa_layer_tags(
-            baseline=baseline,
-            aligned_mapping=temporal_aligned,
-        )
-        cosa_tag_rank = _build_cosa_tag_rank(
-            baseline=baseline,
-            layer_tags=cosa_layer_tags,
-        )
-        loops.tm = convert_cosa_mp_to_loopMP(
-            mapping_dict=temporal_aligned,
-            mappingArray=loops.acc.mappingArray,
-            mappingList=loops.tm,
-            layer_tags=cosa_layer_tags,
-            tag_rank=cosa_tag_rank,
-        )
-        loops.sm = convert_cosa_mp_to_loopMP(
-            mapping_dict=spatial_aligned,
-            mappingArray=loops.acc.mappingArray,
-            mappingList=loops.sm,
-            layer_tags=cosa_layer_tags,
-            tag_rank=cosa_tag_rank,
-        )
-    else:
-        loops.tm = convert_ZZMP_to_loopMP(
-            mapping_dict=temporal_aligned,
-            mappingArray=loops.acc.mappingArray,
-            mappingList=loops.tm,
-        )
+    loops.tm = convert_ZZMP_to_loopMP(
+        mapping_dict=temporal_aligned,
+        mappingArray=loops.acc.mappingArray,
+        mappingList=loops.tm,
+    )
 
-        loops.sm = convert_ZZMP_to_loopMP(
-            mapping_dict=spatial_aligned,
-            mappingArray=loops.acc.mappingArray,
-            mappingList=loops.sm,
-        )
+    loops.sm = convert_ZZMP_to_loopMP(
+        mapping_dict=spatial_aligned,
+        mappingArray=loops.acc.mappingArray,
+        mappingList=loops.sm,
+    )
 
     if not loops.tm:
         loops.tm.append(
@@ -566,13 +607,6 @@ def convert_baseline_to_MIREDO(loops: LoopNest, baseline: BaselineLayer):
     loops.usr_defined_double_flag = project_replay_safe_double_flag(
         loops, loops.usr_defined_double_flag
     )
-    # 外部 baseline 常见问题是 map/hardware 语义不一致；在进入 simulator 前先 fail-fast。
-    if baseline.source in ("cosa", "cimloop"):
-        fail_fast_if_capacity_mismatch(
-            loops,
-            source_tag=f"{baseline.source}:capacity_check",
-            calc_explicit_mem_usage=_calc_explicit_mem_usage,
-        )
     return loops
 
 
