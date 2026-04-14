@@ -3,7 +3,8 @@ import copy
 from typing import Callable, Dict, List, Tuple
 
 from baseline.types import BaselineLayer
-from utils.Workload import Mapping
+from utils.GlobalUT import Logger
+from utils.Workload import LoopNest, Mapping
 
 
 def convert_cosa_mp_to_loopMP(
@@ -345,3 +346,104 @@ def fail_fast_if_capacity_mismatch(
             f"{source_tag}: mapping/hardware mismatch before replay. "
             f"Capacity overflow detected -> {' | '.join(violations)}"
         )
+
+
+def _assert_mapping_unrolling_complete(loops: LoopNest, source_tag: str) -> None:
+    unrolling = [1 for _ in loops.ops.dim2Dict]
+    for mapping in loops.tm + loops.sm:
+        if mapping.dim < 0 or mapping.dim >= len(unrolling):
+            raise ValueError(
+                f"{source_tag}: illegal dimension id {mapping.dim} in mapping before replay"
+            )
+        unrolling[mapping.dim] *= int(round(mapping.dimSize))
+
+    deficits = []
+    for dim, dim_name in enumerate(loops.ops.dim2Dict):
+        bound = int(loops.ops.dim2bound[dim])
+        got = int(unrolling[dim])
+        if got < bound:
+            deficits.append(f"{dim_name}: got={got}, need={bound}")
+
+    if deficits:
+        raise ValueError(
+            f"{source_tag}: incomplete unrolling before replay -> " + "; ".join(deficits)
+        )
+
+
+def convert_cosa_baseline_to_MIREDO(loops: LoopNest, baseline: BaselineLayer) -> LoopNest:
+    """
+    CoSA-only conversion path.
+    This path is intentionally isolated from Evaluation/Zigzag_imc/CompatibleZigzag.py.
+    """
+    if baseline.source != "cosa":
+        raise ValueError(f"CoSA converter received baseline source='{baseline.source}'")
+
+    temporal_aligned = align_mapping_levels_to_acc(
+        mapping_dict=baseline.temporal_mapping,
+        mapping_array=loops.acc.mappingArray,
+        source_tag="cosa:temporal",
+        warn=Logger.warning,
+    )
+    spatial_aligned = align_mapping_levels_to_acc(
+        mapping_dict=baseline.spatial_mapping,
+        mapping_array=loops.acc.mappingArray,
+        source_tag="cosa:spatial",
+        warn=Logger.warning,
+    )
+    _ = align_double_buffer_flags_to_acc(
+        double_buffer_flag=baseline.double_buffer_flag,
+        mapping_array=loops.acc.mappingArray,
+        source_tag="cosa:double_buffer",
+        warn=Logger.warning,
+    )
+
+    temporal_layer_tags = _build_cosa_layer_tags(
+        baseline=baseline,
+        aligned_mapping=temporal_aligned,
+    )
+    temporal_tag_rank = _build_cosa_tag_rank(
+        baseline=baseline,
+        layer_tags=temporal_layer_tags,
+    )
+    loops.tm = convert_cosa_mp_to_loopMP(
+        mapping_dict=temporal_aligned,
+        mappingArray=loops.acc.mappingArray,
+        mappingList=loops.tm,
+        layer_tags=temporal_layer_tags,
+        tag_rank=temporal_tag_rank,
+    )
+
+    spatial_layer_tags = _build_cosa_layer_tags(
+        baseline=baseline,
+        aligned_mapping=spatial_aligned,
+    )
+    spatial_tag_rank = _build_cosa_tag_rank(
+        baseline=baseline,
+        layer_tags=spatial_layer_tags,
+    )
+    loops.sm = convert_cosa_mp_to_loopMP(
+        mapping_dict=spatial_aligned,
+        mappingArray=loops.acc.mappingArray,
+        mappingList=loops.sm,
+        layer_tags=spatial_layer_tags,
+        tag_rank=spatial_tag_rank,
+    )
+
+    if not loops.tm:
+        loops.tm.append(
+            Mapping(
+                dim=0,
+                dimSize=1,
+                mem=[loops.acc.Dram2mem for _ in range(3)],
+            )
+        )
+
+    _assert_mapping_unrolling_complete(loops, source_tag="cosa:unrolling_check")
+
+    # CoSA parser currently exports all-false dflags; keep explicit and safe here.
+    loops.usr_defined_double_flag = [
+        [0 for _ in range(3)] for __ in range(loops.acc.Num_mem + 1)
+    ]
+    loops.usr_defined_double_flag[loops.acc.Macro2mem][1] = loops.acc.double_Macro
+
+    return loops

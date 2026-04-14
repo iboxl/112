@@ -11,17 +11,6 @@ import uuid
 from utils.UtilsFunction.OnnxParser import extract_loopdims
 from utils.UtilsFunction.ToolFunction import prepare_save_dir
 from Simulator.Simulax import tranSimulator
-from Evaluation.Zigzag_imc.CompatibleZigzag import convert_baseline_to_MIREDO
-from baseline.zigzag_adapter import ZigzagBaselineAdapter
-from baseline.cosa_adapter import CoSABaselineAdapter
-from baseline.cimloop_adapter import CimloopBaselineAdapter
-from utils.ZigzagUtils import zigzag_cache_prefix, get_hardware_performance_zigzag, convert_Zigzag_to_MIREDO, compare_ops_cme
-from Evaluation.WeightStationaryGenerator import generate_weight_stationary_baseline
-from Evaluation.common.BaselineProvider import (
-    BASELINE_METHOD_LABELS,
-    SUPPORTED_BASELINE_METHODS,
-    run_baseline,
-)
 from Evaluation.common.EvalCommon import make_accelerator, normalize_loopdim_for_solver, mip_cache_get, mip_cache_put
 import time, copy
 from importlib import import_module
@@ -126,15 +115,17 @@ def __main__(**kwargs):
         case _:
             opt_flag = "latency"            # flagOPT = infeasible
     
-    baseline_label = BASELINE_METHOD_LABELS.get(args.baseline, args.baseline)
-    baseline_objective = args.opt if args.opt in ("Latency", "Energy", "EDP") else "Latency"
     if args.baseline == "zigzag":
+        from baseline.zigzag_adapter import ZigzagBaselineAdapter
+
         baseline_adapter = ZigzagBaselineAdapter(
             model=args.model,
             architecture=args.architecture,
             opt_flag=opt_flag,
         )
     elif args.baseline == "cosa":
+        from baseline.cosa_adapter import CoSABaselineAdapter
+
         baseline_adapter = CoSABaselineAdapter(
             model=args.model,
             architecture=args.architecture,
@@ -142,6 +133,8 @@ def __main__(**kwargs):
             output_root=outFolder,
         )
     elif args.baseline == "cimloop":
+        from baseline.cimloop_adapter import CimloopBaselineAdapter
+
         baseline_adapter = CimloopBaselineAdapter(
             model=args.model,
             architecture=args.architecture,
@@ -156,6 +149,15 @@ def __main__(**kwargs):
         )
     else:
         raise ValueError(f"Unsupported baseline provider: {args.baseline}")
+
+    if args.baseline == "cosa":
+        from Evaluation.CoSA.CompatibleCoSA import (
+            convert_cosa_baseline_to_MIREDO as baseline_to_miredo_converter,
+        )
+    else:
+        from Evaluation.Zigzag_imc.CompatibleZigzag import (
+            convert_baseline_to_MIREDO as baseline_to_miredo_converter,
+        )
 
     assert len(convs) == len(loopdims)
 
@@ -211,7 +213,7 @@ def __main__(**kwargs):
 
             loops = LoopNest(acc=accelerator,ops=ops)
             try:
-                loops = convert_baseline_to_MIREDO(loops=loops, baseline=baseline_layer)
+                loops = baseline_to_miredo_converter(loops=loops, baseline=baseline_layer)
             except ValueError as e:
                 Logger.error("Baseline-to-MIREDO consistency check failed")
                 Logger.changeFile(new_file = os.path.join(outFolder,args.log))

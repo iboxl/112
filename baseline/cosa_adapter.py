@@ -51,7 +51,7 @@ class CoSABaselineAdapter:
         self._workspace.mkdir(parents=True, exist_ok=True)
 
         repo_root = Path(__file__).resolve().parents[2]
-        self._cosa_root = repo_root / "cosa"
+        self._cosa_root = repo_root / "112" / "Evaluation" / "CoSA" / "cosa"
         self._cosa_entry = self._cosa_root / "src" / "cosa" / "cosa.py"
         self._default_mapspace_path = self._cosa_root / "src" / "cosa" / "configs" / "mapspace" / "mapspace.yaml"
         if not self._cosa_entry.is_file():
@@ -259,9 +259,14 @@ class CoSABaselineAdapter:
         cosa_src = str(self._cosa_root / "src")
         env["PYTHONPATH"] = f"{cosa_src}:{env.get('PYTHONPATH', '')}" if env.get("PYTHONPATH") else cosa_src
         if not env.get("TIMELOOP_DIR"):
-            timeloop_dir = self._cosa_root.parent / "timeloop"
-            if timeloop_dir.is_dir():
-                env["TIMELOOP_DIR"] = str(timeloop_dir.resolve())
+            timeloop_candidates = [
+                self._cosa_root.parent / "timeloop",
+                Path(__file__).resolve().parents[2] / "timeloop",
+            ]
+            for timeloop_dir in timeloop_candidates:
+                if timeloop_dir.is_dir():
+                    env["TIMELOOP_DIR"] = str(timeloop_dir.resolve())
+                    break
         proc = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
