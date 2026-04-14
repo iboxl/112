@@ -12,6 +12,7 @@ import os, sys, math, itertools, time, copy
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from Architecture.ArchSpec import CIM_Acc
+from Architecture.templates.default import default_spec
 from Evaluation.common.EvalCommon import save_experiment_json
 from utils.Workload import WorkLoad, LoopNest, Mapping
 from utils.UtilsFunction.ToolFunction import get_Spatial_Unrolling
@@ -331,9 +332,7 @@ def run_verify(acc, ops, scheme, mip_timelimit=120, log_fn=log):
     mip_dir = os.path.join("output", "#BF_mip_compare")
     prepare_save_dir(mip_dir)
 
-    from importlib import import_module
-    acc_template = import_module("Architecture.ZigzagAcc").accelerator.cores[0]
-    solver = Solver(acc=CIM_Acc(acc_template), ops=ops, tu=tu, su=scheme,
+    solver = Solver(acc=CIM_Acc.from_spec(default_spec()), ops=ops, tu=tu, su=scheme,
                     metric_ub=CONST.MAX_POS, outputdir=mip_dir)
     solver.run()
 
@@ -344,7 +343,7 @@ def run_verify(acc, ops, scheme, mip_timelimit=120, log_fn=log):
         except Exception:
             gap = -1
         logging.disable(logging.CRITICAL)
-        simu = tranSimulator(acc=CIM_Acc(acc_template), ops=ops, dataflow=solver.dataflow)
+        simu = tranSimulator(acc=CIM_Acc.from_spec(default_spec()), ops=ops, dataflow=solver.dataflow)
         mip_simu_lat, _ = simu.run()
 
         log_fn(f"\nMIP对比:")
@@ -432,16 +431,19 @@ def run_verify(acc, ops, scheme, mip_timelimit=120, log_fn=log):
 
 if __name__ == "__main__":
     import argparse
-    from importlib import import_module
 
     parser = argparse.ArgumentParser(description="绝对最优数据流穷举验证")
     parser.add_argument('--case', default='1x1_C64K64', choices=list(CASES.keys()),
                         help=f"预定义测试用例 (可选: {', '.join(CASES.keys())})")
     parser.add_argument('--timelimit', type=int, default=120, help="MIP求解时间限制(秒)")
-    parser.add_argument('--arch', default='ZigzagAcc', help="架构模块名(Architecture/目录下)")
+    parser.add_argument('--arch', default='CIM_ACC_TEMPLATE', help="架构模块名(当前仅支持 CIM_ACC_TEMPLATE 默认 Spec)")
     args = parser.parse_args()
 
-    acc_template = import_module(f"Architecture.{args.arch}").accelerator.cores[0]
+    if args.arch != 'CIM_ACC_TEMPLATE':
+        raise NotImplementedError(
+            f"VerifyBruteforce 目前仅对接 Architecture.templates.default.default_spec()；"
+            f"收到 arch={args.arch}。需要扩展 _ARCHITECTURE_SPEC_BUILDERS 注册表。"
+        )
 
     Logger.setcfg(setcritical=False, setDebug=False, STD=False, file="", nofile=True)
     import logging
@@ -457,7 +459,7 @@ if __name__ == "__main__":
 
     case = CASES[args.case]
     ops = WorkLoad(loopDim=case['ops'])
-    acc = CIM_Acc(acc_template)
+    acc = CIM_Acc.from_spec(default_spec())
 
     log(f"\n负载: {ops}")
     log(f"PE阵列: {acc.Num_core} cores × {acc.dimX}(BL) × {acc.dimY}(WL)")

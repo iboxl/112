@@ -28,7 +28,7 @@ from utils.Workload import WorkLoad
 def main():
     parser = argparse.ArgumentParser(description="EXP-1 latency accuracy validation")
     parser.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
-    parser.add_argument("--architecture", default="ZigzagAcc")
+    parser.add_argument("--architecture", default="CIM_ACC_TEMPLATE")
     parser.add_argument("--timeLimit", type=int, default=120)
     parser.add_argument("--mipFocus", type=int, default=1)
     parser.add_argument("--baseline", choices=SUPPORTED_BASELINE_METHODS, default="zigzag")

@@ -3,7 +3,7 @@ from typing import Any
 
 
 @dataclass
-class BaselineLayer:
+class ClassMapping:
     source: str
     loop_dim: dict[str, int]
     temporal_mapping: dict[str, list[list[tuple[str, int]]]]

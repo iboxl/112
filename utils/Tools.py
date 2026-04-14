@@ -3,7 +3,6 @@
 
 import os
 import struct
-import configparser
 import utils.UtilsFunction.ToolFunction as _tool_func
 import math
 import psutil
@@ -43,16 +42,6 @@ conv_im2col_info = _tool_func.func_conv_info
 
 def get_PowerOfTwo(x):
     return math.pow(2, math.ceil(math.log2(x)))
-
-def get_ConfigFile(cfgname):
-    path_cfg = os.path.join(os.getcwd(),f'Config/{cfgname}')
-    if os.path.exists(path_cfg):
-        cfg = configparser.ConfigParser()
-        cfg.read(path_cfg)
-    else:
-        Logger.error(path_cfg)
-        raise Exception('No Configuration File ! ! !')
-    return cfg
 
 def debug_get_im2col_info(FLAG_DEBUG):
     if FLAG_DEBUG:

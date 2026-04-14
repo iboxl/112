@@ -170,11 +170,33 @@ def _save_acc_cache():
         pickle.dump({"version": _ACC_CACHE_VERSION, "data": _acc_cache}, fh)
 
 
-def make_accelerator(architecture="ZigzagAcc"):
+_ARCHITECTURE_SPEC_BUILDERS = {
+    "CIM_ACC_TEMPLATE": "Architecture.templates.default",
+}
+
+
+def _try_build_from_spec(architecture):
+    """优先 HardwareSpec 路径：返回 CIM_Acc 或 None（未注册/构建失败即 None）。"""
+    module_path = _ARCHITECTURE_SPEC_BUILDERS.get(architecture)
+    if module_path is None:
+        return None
+    try:
+        spec_module = import_module(module_path)
+        spec = spec_module.default_spec()
+        return CIM_Acc.from_spec(spec)
+    except Exception as exc:
+        Logger.warning(f"HardwareSpec 路径失败({architecture}): {exc}；回退 legacy 构造")
+        return None
+
+
+def make_accelerator(architecture="CIM_ACC_TEMPLATE"):
     _ensure_acc_cache_loaded()
     if architecture not in _acc_cache:
-        acc_template = import_module(f"Architecture.{architecture}").accelerator
-        _acc_cache[architecture] = CIM_Acc(acc_template.cores[0])
+        acc = _try_build_from_spec(architecture)
+        if acc is None:
+            acc_template = import_module(f"Architecture.{architecture}").accelerator
+            acc = CIM_Acc(acc_template.cores[0])
+        _acc_cache[architecture] = acc
         _save_acc_cache()
     return copy.deepcopy(_acc_cache[architecture])
 

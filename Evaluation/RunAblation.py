@@ -63,7 +63,7 @@ def main():
     parser.add_argument("--structural", nargs="*", default=None,
                         choices=list(STRUCTURAL_VARIANTS.keys()),
                         help="Structural ablation variants to run (e.g. fixed-double-buffer)")
-    parser.add_argument("--architecture", default="ZigzagAcc")
+    parser.add_argument("--architecture", default="CIM_ACC_TEMPLATE")
     parser.add_argument("--timeLimit", type=int, default=120)
     parser.add_argument("--mipFocus", type=int, default=1)
     parser.add_argument("--maxLayers", type=int, default=None)

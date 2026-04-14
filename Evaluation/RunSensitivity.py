@@ -5,6 +5,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from Architecture.ArchSpec import CIM_Acc
+from Architecture.templates.default import default_spec
 from Evaluation.common.BaselineProvider import run_ws_baseline
 from Evaluation.common.EvalCommon import (
     hardware_spec_from_acc,
@@ -38,7 +40,7 @@ def main():
     parser = argparse.ArgumentParser(description="EXP-4 hardware sensitivity study")
     parser.add_argument("--models", nargs="+", default=["resnet18"])
     parser.add_argument("--parameters", nargs="+", default=list(DEFAULT_SWEEPS.keys()))
-    parser.add_argument("--architecture", default="ZigzagAcc")
+    parser.add_argument("--architecture", default="CIM_ACC_TEMPLATE")
     parser.add_argument("--timeLimit", type=int, default=120)
     parser.add_argument("--mipFocus", type=int, default=1)
     parser.add_argument("--maxLayers", type=int, default=None)
@@ -52,10 +54,14 @@ def main():
     anomalies = []
 
     base_acc = make_accelerator(args.architecture)
+    # sensitivity 直接在 HardwareSpec 上变异，之后 from_spec 构造 CIM_Acc，保证
+    # MIREDO / baseline 两侧同源。目前仅支持 CIM_ACC_TEMPLATE 架构的默认 Spec。
+    base_spec = default_spec()
 
     for parameter in args.parameters:
         for value in DEFAULT_SWEEPS[parameter]:
-            variant_acc = build_hardware_variant(base_acc, parameter, value)
+            variant_spec = build_hardware_variant(base_spec, parameter, value)
+            variant_acc = CIM_Acc.from_spec(variant_spec)
 
             for model_name in args.models:
                 model_layers = iter_model_layers(model_name)

@@ -2,18 +2,13 @@
 # Created by iboxl
 
 from utils.Tools import *
-from Architecture.ArchSpec import CIM_Acc
-from utils.Workload import Operands, WorkLoad, LoopNest
+from utils.Workload import WorkLoad
 from SolveMapping import SolveMapping
 import argparse
 from utils.GlobalUT import *
-import pickle
 import uuid
 from utils.UtilsFunction.OnnxParser import extract_loopdims
 from utils.UtilsFunction.ToolFunction import prepare_save_dir
-from Simulator.Simulax import tranSimulator
-from utils.ZigzagUtils import zigzag_cache_prefix, get_hardware_performance_zigzag, convert_Zigzag_to_MIREDO, compare_ops_cme
-from Evaluation.WeightStationaryGenerator import generate_weight_stationary_baseline
 from Evaluation.common.BaselineProvider import (
     BASELINE_METHOD_LABELS,
     SUPPORTED_BASELINE_METHODS,
@@ -21,7 +16,6 @@ from Evaluation.common.BaselineProvider import (
 )
 from Evaluation.common.EvalCommon import make_accelerator, normalize_loopdim_for_solver, mip_cache_get, mip_cache_put
 import time, copy
-from importlib import import_module
 
 
 def get_Args():
@@ -41,9 +35,7 @@ def get_Args():
     parser.add_argument("--NoPreSolve", nargs="?", const=True, default=False, help="dont search presolve by alpha&beta")
     parser.add_argument("--SIMU", nargs="?", const=True, default=False, help="using simulator calc")
 
-    parser.add_argument('-c', '--cfg', dest='cfg', required=False, 
-                        type=str, default='cim_template.cfg', help = 'config File Name')
-    parser.add_argument('-m', '--model', dest='model', required=False, 
+    parser.add_argument('-m', '--model', dest='model', required=False,
                         type=str, default='resnet18', help = 'NN model Name')
     parser.add_argument('-log', '--log_file', dest='log', required=False, 
                         type=str, default='112.log', help = 'Log file Name')
@@ -61,7 +53,7 @@ def get_Args():
                         type=str, default=f'test_{time.strftime("%Y%m%d_%H%M%S")}_{uuid.uuid1().hex[:8]}',
                         help = 'save output files in folder')
     parser.add_argument('-arch', '--architecture', dest='architecture', required=False,
-                        type=str, default=f'ZigzagAcc', help = 'save output files in folder')
+                        type=str, default=f'CIM_ACC_TEMPLATE', help = 'save output files in folder')
     parser.add_argument('--baseline', dest='baseline', choices=SUPPORTED_BASELINE_METHODS, required=False,
                         type=str.lower, default="zigzag", help='comparison baseline')
     args = parser.parse_args()
@@ -94,39 +86,9 @@ def __main__(**kwargs):
 
     convs, loopdims = extract_loopdims(model)
 
-    match CONST.FLAG_OPT:
-        case "Latency":
-            opt_flag = "latency" 
-        case "Energy":
-            opt_flag = "energy" 
-        case "EDP":
-            opt_flag = "EDP" 
-        case _:
-            opt_flag = "latency"            # flagOPT = infeasible
-    
     baseline_label = BASELINE_METHOD_LABELS.get(args.baseline, args.baseline)
     baseline_objective = args.opt if args.opt in ("Latency", "Energy", "EDP") else "Latency"
-    if args.baseline == "zigzag":
-        compare_filePrefix = zigzag_cache_prefix(opt_flag, args.model, args.architecture)
-        compare_pickle = compare_filePrefix.with_suffix(".pickle")
-        compare_json = compare_filePrefix.with_suffix(".json")
-        if compare_pickle.is_file() == False:     # Zigzag-CME is not exist, running ZZ-opt
-            Logger.info("Running Zigzag to generate CME-compared")
-            start_time_zz = time.time()
-            energy, latency, cmeAll = get_hardware_performance_zigzag(
-                workload = model,
-                accelerator = f"Architecture.{args.architecture}",
-                mapping = "Config.zigzag_mapping",
-                opt=opt_flag,
-                dump_filename_pattern=str(compare_json),
-                pickle_filename=str(compare_pickle)
-            )
-            end_time_zz = time.time()
-            Logger.critical(f"Zigzag solve cost time: {end_time_zz - start_time_zz}")     
-        with open(compare_pickle, 'rb') as fp:
-            cmes= pickle.load(fp)
-    else:
-        cmes = None
+    # ZigZag CME 由 BaselineProvider.run_baseline(...) 内部按需懒加载 / 生成
 
     assert len(convs) == len(loopdims)
 

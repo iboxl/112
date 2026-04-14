@@ -19,6 +19,7 @@ def log(msg):
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from Architecture.ArchSpec import CIM_Acc
+from Architecture.templates.default import default_spec
 from Evaluation.common.EvalCommon import save_experiment_json
 from utils.Workload import WorkLoad
 from utils.SolverTSS import Solver
@@ -68,7 +69,7 @@ def enumerate_factor_orderings(factors, Num_dim):
 
 def _worker(args):
     """单个子MIP求解worker（进程池调用）。"""
-    idx, ordering, acc_template, ops_dict, scheme, out_dir, timelimit = args
+    idx, ordering, spec, ops_dict, scheme, out_dir, timelimit = args
 
     CONST.FLAG_OPT = "Latency"
     CONST.TIMELIMIT = timelimit
@@ -78,7 +79,7 @@ def _worker(args):
     import logging; logging.disable(logging.CRITICAL)  # 静默子进程所有log
 
     ops = WorkLoad(loopDim=ops_dict)
-    acc = CIM_Acc(acc_template)
+    acc = CIM_Acc.from_spec(spec)
     su = scheme
     spatial = [math.prod(col) for col in zip(*su)]
     tu = [math.ceil(x / y) for x, y in zip(ops.dim2bound, spatial)]
@@ -105,8 +106,10 @@ def _worker(args):
             shutil.rmtree(sub_dir, ignore_errors=True)
 
 
-def run_enumeration(acc_template, ops_dict, scheme, timelimit=15, max_workers=None):
-    """并行枚举所有因子排列，返回全局最优latency和gap统计。"""
+def run_enumeration(spec, ops_dict, scheme, timelimit=15, max_workers=None):
+    """并行枚举所有因子排列，返回全局最优latency和gap统计。
+
+    spec: HardwareSpec —— 子进程通过 CIM_Acc.from_spec 重建 acc，避免传递非 picklable 的 ZigZag Core。"""
     ops = WorkLoad(loopDim=ops_dict)
     su = scheme
     spatial = [math.prod(col) for col in zip(*su)]
@@ -127,7 +130,7 @@ def run_enumeration(acc_template, ops_dict, scheme, timelimit=15, max_workers=No
     out_dir = os.path.join("output", "#EnumVerify_temp")
     prepare_save_dir(out_dir)
 
-    args_list = [(i, o, acc_template, ops_dict, scheme, out_dir, timelimit)
+    args_list = [(i, o, spec, ops_dict, scheme, out_dir, timelimit)
                  for i, o in enumerate(orderings)]
 
     best_lat, best_idx = CONST.MAX_POS, -1
@@ -235,7 +238,6 @@ def run_enumeration(acc_template, ops_dict, scheme, timelimit=15, max_workers=No
 
 if __name__ == "__main__":
     import argparse
-    from importlib import import_module
 
     CASES = {
         '1x1_C64K64': {
@@ -254,12 +256,12 @@ if __name__ == "__main__":
     parser.add_argument('--workers', type=int, default=None)
     args = parser.parse_args()
 
-    acc_template = import_module("Architecture.ZigzagAcc").accelerator.cores[0]
+    spec = default_spec()
     Logger.setcfg(setcritical=False, setDebug=False, STD=True, file="", nofile=True)
 
     case = CASES[args.case]
     best_lat, best_idx = run_enumeration(
-        acc_template=acc_template,
+        spec=spec,
         ops_dict=case['ops'],
         scheme=case['scheme'],
         timelimit=args.timelimit,

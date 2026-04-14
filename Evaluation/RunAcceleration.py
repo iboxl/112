@@ -46,7 +46,7 @@ def _flexfact_compression(loopdim, ops):
 def main():
     parser = argparse.ArgumentParser(description="EXP-7 acceleration effect profiling")
     parser.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
-    parser.add_argument("--architecture", default="ZigzagAcc")
+    parser.add_argument("--architecture", default="CIM_ACC_TEMPLATE")
     parser.add_argument("--objective", default="Latency", choices=["Latency", "Energy", "EDP"])
     parser.add_argument("--baselines", nargs="+", choices=SUPPORTED_BASELINE_METHODS, default=["ws", "zigzag"])
     parser.add_argument("--timeLimit", type=int, default=120)

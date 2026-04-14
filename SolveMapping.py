@@ -2,7 +2,7 @@
 # Created by iboxl
 
 from utils.Workload import WorkLoad
-from utils.Tools import get_ConfigFile, append_scheme_summary, detect_parallel_config, auto_parallel_config, SharedUB
+from utils.Tools import append_scheme_summary, detect_parallel_config, auto_parallel_config, SharedUB
 from utils.SolverTSS import Solver, SolverProfile
 import gurobipy as gp
 from Simulator.Simulax import tranSimulator
@@ -546,10 +546,9 @@ if __name__ == "__main__":
     start_time = time.time()
 
     Logger.setcfg(setcritical=False, setDebug=True, STD=False, file=os.path.join(outFolder,'112.log'), nofile=False)
-    cfg = get_ConfigFile('cim_template.cfg')
 
-    from Architecture.ZigzagAcc import accelerator as acc_zz
-    accelerator = CIM_Acc(acc_zz.cores[0])
+    from Architecture.templates.default import default_spec
+    accelerator = CIM_Acc.from_spec(default_spec())
 
     Logger.debug("Running SolveMapping for debugging and testing Solver (MIP model), only one iteration with given scheme")
 

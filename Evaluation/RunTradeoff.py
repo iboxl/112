@@ -29,7 +29,7 @@ def main():
     parser.add_argument("--models", nargs="+", default=["resnet18", "mobilenetV2"])
     parser.add_argument("--objectives", nargs="+", default=["Latency", "Energy", "EDP"])
     parser.add_argument("--baselines", nargs="+", choices=SUPPORTED_BASELINE_METHODS, default=["ws", "zigzag"])
-    parser.add_argument("--architecture", default="ZigzagAcc")
+    parser.add_argument("--architecture", default="CIM_ACC_TEMPLATE")
     parser.add_argument("--timeLimit", type=int, default=120)
     parser.add_argument("--mipFocus", type=int, default=1)
     parser.add_argument("--representativeLayers", type=int, default=3)

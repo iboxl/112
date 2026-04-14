@@ -101,8 +101,9 @@ The mainline path is:
 
 Important support files around this flow:
 
-- `Architecture/ZigzagAcc.py`: default hardware definition used by `run.py`
-- `Architecture/ArchSpec.py`: converts ZigZag hardware objects into MIREDO's `CIM_Acc`
+- `Architecture/HardwareSpec.py` + `Architecture/templates/default.py`: hardware Spec dataclass and the default template (`CIM_ACC_TEMPLATE`) used by `run.py`
+- `Architecture/ArchSpec.py`: `CIM_Acc.from_spec(spec)` constructs MIREDO's internal `CIM_Acc` from a `HardwareSpec`
+- `Evaluation/Zigzag_imc/zigzag_adapter.py`: `to_zigzag_accelerator(spec)` translates `HardwareSpec` into a ZigZag `Accelerator` for baseline comparison
 - `Simulator/Simulax.py`: simulator used to validate solver output
 - `Evaluation/Zigzag_imc/CompatibleZigzag.py`: ZigZag-to-MIREDO conversion utilities
 - `utils/UtilsFunction/OnnxParser.py`: extracts convolution loop dimensions from ONNX
@@ -133,7 +134,7 @@ Always pass `-opt` explicitly.
 The parser keeps a legacy default that is not suitable for the current mainline flow.
 
 ```bash
-python run.py -m resnet18 -arch ZigzagAcc -opt Latency -o dev_resnet18
+python run.py -m resnet18 -arch CIM_ACC_TEMPLATE -opt Latency -o dev_resnet18
 ```
 
 ### Other common runs
@@ -141,31 +142,31 @@ python run.py -m resnet18 -arch ZigzagAcc -opt Latency -o dev_resnet18
 Optimize energy:
 
 ```bash
-python run.py -m mobilenetV2 -arch ZigzagAcc -opt Energy -o dev_mbv2_energy
+python run.py -m mobilenetV2 -arch CIM_ACC_TEMPLATE -opt Energy -o dev_mbv2_energy
 ```
 
 Optimize EDP:
 
 ```bash
-python run.py -m vgg19bn -arch ZigzagAcc -opt EDP -o dev_vgg19_edp
+python run.py -m vgg19bn -arch CIM_ACC_TEMPLATE -opt EDP -o dev_vgg19_edp
 ```
 
 Change solve time limit and MIP focus:
 
 ```bash
-python run.py -m resnet50 -arch ZigzagAcc -opt Latency -t 300 -f 2 -o dev_resnet50
+python run.py -m resnet50 -arch CIM_ACC_TEMPLATE -opt Latency -t 300 -f 2 -o dev_resnet50
 ```
 
 Enable verbose debug logging:
 
 ```bash
-python run.py -m alexnet -arch ZigzagAcc -opt Latency --debug -o debug_alexnet
+python run.py -m alexnet -arch CIM_ACC_TEMPLATE -opt Latency --debug -o debug_alexnet
 ```
 
 ### Common arguments
 
 - `-m, --model`: workload name, resolved as `model/<name>.onnx`
-- `-arch, --architecture`: hardware module under `Architecture/`
+- `-arch, --architecture`: registry key in `Evaluation/common/EvalCommon.py::_ARCHITECTURE_SPEC_BUILDERS` (default `CIM_ACC_TEMPLATE` maps to `Architecture/templates/default.py`)
 - `-opt, --flag_opt`: objective, one of `Latency`, `Energy`, `EDP`
 - `-t, --time`: Gurobi time limit in seconds
 - `-f, --mipFocus`: Gurobi `MIPFocus`
@@ -217,7 +218,7 @@ When you need to understand or modify behavior, use this order:
 2. read `SolveMapping.py` to understand per-layer search and solver invocation
 3. read `utils/SolverTSS.py` to understand the optimization model
 4. read `Simulator/Simulax.py` only when you need to validate execution semantics
-5. read `Architecture/ZigzagAcc.py` and `Architecture/ArchSpec.py` when changing hardware assumptions
+5. read `Architecture/templates/default.py` (hardware numbers) + `Architecture/HardwareSpec.py` (schema) + `Architecture/ArchSpec.py` (`CIM_Acc.from_spec`) when changing hardware assumptions
 
 ## What To Ignore At First
 

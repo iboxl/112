@@ -8,7 +8,7 @@ import copy
 import math
 from typing import Callable, Dict, List, Tuple
 from collections import defaultdict
-from baseline.types import BaselineLayer
+from utils.ClassMapping import ClassMapping
 from utils.GlobalUT import Logger
 
 
@@ -516,9 +516,9 @@ def normalize_spatial_mapping(mapping):
     return mp
 
 
-def baseline_layer_from_zigzag_cme(cme) -> BaselineLayer:
+def baseMapping_from_zigzag_cme(cme) -> ClassMapping:
     cme_dim = cme.layer.loop_dim_size
-    return BaselineLayer(
+    return ClassMapping(
         source="zigzag",
         loop_dim={
             "R": cme_dim["FX"],
@@ -537,35 +537,35 @@ def baseline_layer_from_zigzag_cme(cme) -> BaselineLayer:
     )
 
 
-def convert_baseline_to_MIREDO(loops: LoopNest, baseline: BaselineLayer):
-    temporal_mapping_dic = baseline.temporal_mapping
-    spatial_mapping_dict = baseline.spatial_mapping
-    double_buffer_flag = baseline.double_buffer_flag
+def convert_baseMapping_to_MIREDO(loops: LoopNest, baseMapping: ClassMapping):
+    temporal_mapping_dic = baseMapping.temporal_mapping
+    spatial_mapping_dict = baseMapping.spatial_mapping
+    double_buffer_flag = baseMapping.double_buffer_flag
 
-    if baseline.top_r_loop_size is None:
+    if baseMapping.top_r_loop_size is None:
         temporal_processed = temporal_mapping_dic
     else:
         temporal_processed = process_top_r(
             ori_tm_dict=temporal_mapping_dic,
-            cme_top_r_loop=baseline.top_r_loop_size,
+            cme_top_r_loop=baseMapping.top_r_loop_size,
         )
 
     temporal_aligned = align_mapping_levels_to_acc(
         mapping_dict=temporal_processed,
         mapping_array=loops.acc.mappingArray,
-        source_tag=f"{baseline.source}:temporal",
+        source_tag=f"{baseMapping.source}:temporal",
         warn=Logger.warning,
     )
     spatial_aligned = align_mapping_levels_to_acc(
         mapping_dict=normalize_spatial_mapping(spatial_mapping_dict),
         mapping_array=loops.acc.mappingArray,
-        source_tag=f"{baseline.source}:spatial",
+        source_tag=f"{baseMapping.source}:spatial",
         warn=Logger.warning,
     )
     dflag_aligned = align_double_buffer_flags_to_acc(
         double_buffer_flag=double_buffer_flag,
         mapping_array=loops.acc.mappingArray,
-        source_tag=f"{baseline.source}:double_buffer",
+        source_tag=f"{baseMapping.source}:double_buffer",
         warn=Logger.warning,
     )
 
@@ -590,7 +590,7 @@ def convert_baseline_to_MIREDO(loops: LoopNest, baseline: BaselineLayer):
             )
         )
 
-    _assert_mapping_unrolling_complete(loops, source_tag=f"{baseline.source}:unrolling_check")
+    _assert_mapping_unrolling_complete(loops, source_tag=f"{baseMapping.source}:unrolling_check")
 
     try:
         loops.usr_defined_double_flag = convert_ZZ_dflag_to_doubleflag(
@@ -598,7 +598,7 @@ def convert_baseline_to_MIREDO(loops: LoopNest, baseline: BaselineLayer):
         )
     except Exception as e:
         Logger.warning(
-            f"Falling back to all-disabled double buffer flags for source={baseline.source}: {e}"
+            f"Falling back to all-disabled double buffer flags for source={baseMapping.source}: {e}"
         )
         loops.usr_defined_double_flag = [
             [0 for _ in range(3)] for __ in range(loops.acc.Num_mem + 1)
@@ -611,8 +611,8 @@ def convert_baseline_to_MIREDO(loops: LoopNest, baseline: BaselineLayer):
 
 
 def convert_Zigzag_to_MIREDO(loops: LoopNest, cme=None):
-    baseline = baseline_layer_from_zigzag_cme(cme)
-    return convert_baseline_to_MIREDO(loops=loops, baseline=baseline)
+    baseMapping = baseMapping_from_zigzag_cme(cme)
+    return convert_baseMapping_to_MIREDO(loops=loops, baseMapping=baseMapping)
 
 # def compare_ops_cme(ops:WorkLoad, cme):
 #     loop_dim = cme.layer.loop_dim_size
