@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import subprocess
 import sys
 import os
 import json
@@ -332,49 +331,201 @@ class CoSABaselineAdapter:
         with open(sidecar, "w", encoding="utf-8") as fp:
             json.dump(loop_dim, fp, indent=2, sort_keys=True)
 
+    def _ensure_cosa_runtime(self) -> None:
+        cosa_src = str((self._cosa_root / "src").resolve())
+        if cosa_src not in sys.path:
+            sys.path.insert(0, cosa_src)
+
+        def _prepend_env_path(var: str, value: str) -> None:
+            cur = os.environ.get(var, "")
+            parts = [p for p in cur.split(":") if p]
+            if value in parts:
+                return
+            os.environ[var] = f"{value}:{cur}" if cur else value
+
+        if not os.environ.get("COSA_DIR"):
+            os.environ["COSA_DIR"] = str((self._cosa_root / "src" / "cosa").resolve())
+
+        repo_112 = Path(__file__).resolve().parents[1]
+        timeloop_roots = [
+            Path(__file__).resolve().parents[2] / "timeloop",
+            repo_112 / "Evaluation" / "CIMLoop" / "timeloop-accelergy-infra" / "src" / "timeloop",
+            self._cosa_root.parent / "timeloop",
+        ]
+
+        # Some timeloop builds depend on boost libs from the base conda package cache.
+        minconda_root = Path(sys.prefix).resolve().parents[1]
+        boost_pkgs = sorted((minconda_root / "pkgs").glob("libboost-*/lib"))
+        for lib_dir in boost_pkgs:
+            if lib_dir.is_dir():
+                _prepend_env_path("LD_LIBRARY_PATH", str(lib_dir.resolve()))
+
+        selected_timeloop_root: Path | None = None
+        for root in timeloop_roots:
+            model_bin = root / "bin" / "timeloop-model"
+            if model_bin.is_file():
+                selected_timeloop_root = root
+                _prepend_env_path("PATH", str((root / "bin").resolve()))
+                if (root / "lib").is_dir():
+                    _prepend_env_path("LD_LIBRARY_PATH", str((root / "lib").resolve()))
+                break
+
+        conda_lib = Path(sys.prefix) / "lib"
+        if conda_lib.is_dir():
+            _prepend_env_path("LD_LIBRARY_PATH", str(conda_lib.resolve()))
+
+        if selected_timeloop_root is not None and not os.environ.get("TIMELOOP_DIR"):
+            os.environ["TIMELOOP_DIR"] = str(selected_timeloop_root.resolve())
+
+        if os.environ.get("TIMELOOP_DIR"):
+            return
+
+        timeloop_candidates = [
+            self._cosa_root.parent / "timeloop",
+            Path(__file__).resolve().parents[2] / "timeloop",
+        ]
+        for timeloop_dir in timeloop_candidates:
+            if timeloop_dir.is_dir():
+                os.environ["TIMELOOP_DIR"] = str(timeloop_dir.resolve())
+                return
+
+    @staticmethod
+    def _derive_global_buf_idx(arch) -> int:
+        preferred_names = ("GlobalBuffer", "Global_buffer", "global_buffer")
+        for name in preferred_names:
+            if name in arch.mem_idx:
+                return int(arch.mem_idx[name])
+
+        for name, idx in arch.mem_idx.items():
+            if "global" in str(name).lower():
+                return int(idx)
+
+        # Fallback: use the level right below DRAM.
+        return max(0, int(arch.mem_levels) - 2)
+
+    @staticmethod
+    def _derive_even_mapping_from_mapspace(mapspace, arch) -> tuple[list[list[int]], list[list[float]]]:
+        num_vars = len(mapspace.var_idx_dict)
+        num_mems = int(arch.mem_levels)
+
+        # B[var][mem] = 1 means this variable can be kept at this memory level.
+        B = [[0 for _ in range(num_mems)] for _ in range(num_vars)]
+        part_ratios: list[list[float]] = []
+
+        for mem_idx in range(num_mems):
+            keep_vars: list[int] = []
+            for _, var_idx in mapspace.var_idx_dict.items():
+                keep = int(mapspace.bypass[mem_idx][var_idx]) != 1
+                B[var_idx][mem_idx] = 1 if keep else 0
+                if keep:
+                    keep_vars.append(int(var_idx))
+
+            ratios = [0.0] * num_vars
+            if keep_vars:
+                share = 1.0 / float(len(keep_vars))
+                for var_idx in keep_vars:
+                    ratios[var_idx] = share
+            part_ratios.append(ratios)
+
+        return B, part_ratios
+
+    @staticmethod
+    def _build_prefix_z_from_b(B: list[list[int]]) -> list[list[list[int]]]:
+        Z: list[list[list[int]]] = []
+        for var in B:
+            z_var: list[list[int]] = []
+            for i, val in enumerate(var):
+                rank_arr = [0] * len(var)
+                if int(val) == 1:
+                    for j in range(i + 1):
+                        rank_arr[j] = 1
+                z_var.append(rank_arr)
+            Z.append(z_var)
+        return Z
+
     def _run_cosa_generate_map(self, prob_path: Path, output_dir: Path) -> Path:
         output_dir.mkdir(parents=True, exist_ok=True)
-        cmd = [
-            sys.executable,
-            "-m",
-            "cosa.cosa",
-            "-o",
-            str(output_dir),
-            "-ap",
-            str(self._arch_path),
-            "-mp",
-            str(self._mapspace_path),
-            "-pp",
-            str(prob_path),
-        ]
-        env = os.environ.copy()
-        cosa_src = str(self._cosa_root / "src")
-        env["PYTHONPATH"] = f"{cosa_src}:{env.get('PYTHONPATH', '')}" if env.get("PYTHONPATH") else cosa_src
-        if not env.get("TIMELOOP_DIR"):
-            timeloop_candidates = [
-                self._cosa_root.parent / "timeloop",
-                Path(__file__).resolve().parents[2] / "timeloop",
-            ]
-            for timeloop_dir in timeloop_candidates:
-                if timeloop_dir.is_dir():
-                    env["TIMELOOP_DIR"] = str(timeloop_dir.resolve())
-                    break
-        proc = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=False,
-            env=env,
+        self._ensure_cosa_runtime()
+
+        try:
+            from cosa.cosa import mip_solver
+            from cosa.cosa_constants import _A
+            from cosa.cosa_input_objs import Prob, Arch, Mapspace
+            import cosa.run_config as run_config
+        except Exception as exc:
+            raise ValueError(f"Failed to import CoSA runtime in-process: {exc}") from exc
+
+        prob = Prob(prob_path)
+        arch = Arch(self._arch_path)
+        mapspace = Mapspace(self._mapspace_path)
+        mapspace.init(prob, arch)
+
+        B, part_ratios = self._derive_even_mapping_from_mapspace(mapspace, arch)
+        global_buf_idx = self._derive_global_buf_idx(arch)
+        Z = self._build_prefix_z_from_b(B)
+
+        Logger.info(f"CoSA adapter derived global_buf_idx={global_buf_idx}")
+        Logger.info(f"CoSA adapter derived B={B}")
+        Logger.info(f"CoSA adapter derived part_ratios={part_ratios}")
+
+        prime_factors = prob.prob_factors
+        strides = [prob.prob["Wstride"], prob.prob["Hstride"]]
+        factor_config, spatial_config, outer_perm_config, _ = mip_solver(
+            prime_factors,
+            strides,
+            arch,
+            part_ratios,
+            global_buf_idx=global_buf_idx,
+            A=_A,
+            Z=Z,
+            compute_factor=10,
+            util_factor=-0.1,
+            traffic_factor=1,
         )
-        if proc.returncode != 0:
-            tail = "\n".join(proc.stdout.splitlines()[-80:])
-            raise ValueError(f"CoSA run failed (exit={proc.returncode}).\n{tail}")
+
+        update_factor_config = factor_config
+        spatial_to_factor_map: dict[int, int] = {}
+        idx = int(arch.mem_levels)
+        for i, val in enumerate(arch.S):
+            if val > 1:
+                spatial_to_factor_map[i] = idx
+                idx += 1
+
+        for j, f_j in enumerate(prob.prob_factors):
+            for n, _ in enumerate(f_j):
+                if spatial_config[j][n] == 1:
+                    mapped_level = int(factor_config[j][n])
+                    update_factor_config[j][n] = spatial_to_factor_map[mapped_level]
+
+        perm_config = mapspace.get_default_perm()
+        perm_config[global_buf_idx] = outer_perm_config
+
+        status_dict: dict = {}
+        try:
+            result = run_config.run_config(
+                mapspace,
+                None,
+                perm_config,
+                update_factor_config,
+                status_dict,
+                run_gen_map=True,
+                run_gen_tc=False,
+                run_sim_test=False,
+                output_path=str(output_dir),
+                spatial_configs=[],
+                valid_check=False,
+                outer_loopcount_limit=100,
+            )
+        except Exception as exc:
+            raise ValueError(f"CoSA run_config failed during map generation: {exc}") from exc
+
+        run_status = result.get("run_status", [0]) if isinstance(result, dict) else [0]
+        if not run_status or int(run_status[0]) != 1:
+            raise ValueError(f"CoSA run_config failed to generate valid map (run_status={run_status})")
 
         map_files = sorted(output_dir.rglob("map_16.yaml"), key=lambda p: p.stat().st_mtime, reverse=True)
         if not map_files:
-            tail = "\n".join(proc.stdout.splitlines()[-80:])
-            raise ValueError(f"CoSA generated no map_16.yaml under {output_dir}.\n{tail}")
+            raise ValueError(f"CoSA generated no map_16.yaml under {output_dir}.")
         if self._pending_loop_dim is not None:
             self._store_source_loopdim(map_files[0], self._pending_loop_dim)
         return map_files[0]
