@@ -1,6 +1,3 @@
-[submodule "utils/Cacti_wrapper"]
-	path = utils/Cacti_wrapper
-	url = git@github.com:iboxl/Cacti_wrapper.git
 [submodule "Evaluation/Zigzag_imc/zigzag-imc"]
 	path = Evaluation/Zigzag_imc/zigzag-imc
 	url = git@github.com:KULeuven-MICAS/zigzag-imc.git

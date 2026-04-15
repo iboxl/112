@@ -3,6 +3,11 @@
 # MIREDO HardwareSpec 的默认值；MIREDO 和 baseline 都从这里派生硬件实例。
 # 换技术节点或换硬件：直接修改下方 _DEFAULT_SPEC_DICT 字段
 # （memory r_cost/w_cost/leakage 需重新跑 CACTI 填入）。
+#
+# 能耗源：memory r_cost / w_cost / leakage_per_cycle_nJ 全部由
+# utils/Cacti_wrapper/ 下本地 CACTI 7.0 在 tech_node = 28nm（→ CACTI 32nm anchor
+# × 0.81 电压平方缩放）一次性跑出；Sensitivity 变体经 Evaluation/common/
+# HardwareVariants.py 重算，走同一条 CACTI 路径，不引入第二 tech node。
 
 from __future__ import annotations
 
@@ -12,7 +17,7 @@ from Architecture.HardwareSpec import HardwareSpec
 _DEFAULT_SPEC_DICT = {
     "cores": 8,
     "cycle_time_ns": None,
-    "leakage_per_cycle_nJ": 0.08538964728639328,
+    "leakage_per_cycle_nJ": 0.09727659381011521,
     "macro": {
         "dimX": 32,
         "dimY": 16,

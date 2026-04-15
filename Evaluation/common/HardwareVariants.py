@@ -22,7 +22,9 @@ def _mem_index(spec: HardwareSpec, name: str) -> int:
 
 
 def _recompute_memory_cost_pJ(spec: HardwareSpec, mem_name: str) -> MemoryLevelSpec:
-    """重跑 CACTI（或 DRAM 常量），返回更新后的 MemoryLevelSpec 副本。"""
+    """重跑 CACTI（或 DRAM 常量），返回更新后的 MemoryLevelSpec 副本。
+    tech_node 从 spec.macro.tech_params.tech_node 取，使变体与 default spec 的 r/w 数字同源。
+    """
     level = spec.memory_by_name(mem_name)
     size_bytes = max(1, int(level.size_bits / 8))
     bw = max(8, int(level.r_bw_bits_per_cycle))
@@ -31,20 +33,26 @@ def _recompute_memory_cost_pJ(spec: HardwareSpec, mem_name: str) -> MemoryLevelS
         r_pb = 7.91
         w_pb = 7.91
     else:
-        read_pj, write_pj, _, _ = cacti_power(capacity_bytes=size_bytes, bitwidth_bits=bw)
+        read_pj, write_pj, _, _ = cacti_power(
+            tech_node=spec.macro.tech_params.tech_node,
+            capacity_bytes=size_bytes,
+            bitwidth_bits=bw,
+        )
         r_pb = read_pj / bw
         w_pb = write_pj / bw
     return replace(level, r_cost_per_bit_pJ=r_pb, w_cost_per_bit_pJ=w_pb)
 
 
 def _leakage_per_cycle_nJ(spec: HardwareSpec) -> float:
-    """对齐 legacy CIM_Acc.__init__ 的 leakage 累加逻辑：
-    DRAM + Global + (Output/Input_buffer) × cores + Macro(SRAM) × cores。
-    OReg/IReg 不计入（遵循 legacy 行为）。
+    """累加 leakage：DRAM + Global + (Output/Input_buffer) × cores + Macro(SRAM) × cores。
+    OReg/IReg 不计入。SRAM 部分走本地 CACTI，tech_node 取自 spec，与 r/w 能耗同源。
     """
+    tech = spec.macro.tech_params.tech_node
+
     def _sram_leak_pJ(mem_name: str) -> float:
         level = spec.memory_by_name(mem_name)
         _, _, leak_pJ, _ = cacti_power(
+            tech_node=tech,
             capacity_bytes=max(1, int(level.size_bits / 8)),
             bitwidth_bits=max(8, int(level.r_bw_bits_per_cycle)),
         )
@@ -66,6 +74,7 @@ def _leakage_per_cycle_nJ(spec: HardwareSpec) -> float:
     macro = spec.memory_by_name("Macro")
     W = spec.macro.precision.W
     _, _, macro_leak_pJ, _ = cacti_power(
+        tech_node=tech,
         capacity_bytes=(macro.size_bits / 8) * spec.macro.dimX * spec.macro.dimY,
         bitwidth_bits=max(8, spec.macro.dimY * W),
     )

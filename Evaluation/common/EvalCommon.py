@@ -140,7 +140,7 @@ def save_experiment_json(output_dir, file_name, experiment_id, script_path, conf
     return json_path
 
 
-_ACC_CACHE_VERSION = 1
+_ACC_CACHE_VERSION = 2  # bumped: default spec leakage 14nm→28nm; old caches must miss
 _acc_cache = None
 _acc_cache_path = None
 
@@ -194,8 +194,10 @@ def make_accelerator(architecture="CIM_ACC_TEMPLATE"):
     if architecture not in _acc_cache:
         acc = _try_build_from_spec(architecture)
         if acc is None:
-            acc_template = import_module(f"Architecture.{architecture}").accelerator
-            acc = CIM_Acc(acc_template.cores[0])
+            raise ValueError(
+                f"Architecture {architecture!r} not found in _ARCHITECTURE_SPEC_BUILDERS; "
+                "register a default_spec() in Architecture/templates/."
+            )
         _acc_cache[architecture] = acc
         _save_acc_cache()
     return copy.deepcopy(_acc_cache[architecture])
