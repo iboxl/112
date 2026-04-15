@@ -18,10 +18,11 @@ from Evaluation.common.EvalCommon import objective_to_opt_flag, repo_root
 from Evaluation.WeightStationaryGenerator import generate_weight_stationary_baseline
 
 
-SUPPORTED_BASELINE_METHODS = ("zigzag", "ws")
+SUPPORTED_BASELINE_METHODS = ("zigzag", "ws", "cimloop")
 BASELINE_METHOD_LABELS = {
     "zigzag": "ZigZag_IMC",
     "ws": "WS",
+    "cimloop": "CIMLoop",
 }
 
 
@@ -42,6 +43,7 @@ class BaselineRunResult:
 
 _ZIGZAG_CME_CACHE = {}
 _DEFAULT_FP_CACHE = {}
+_CIMLOOP_OUTPUTS_CACHE = {}
 
 
 def _spec_fingerprint(spec) -> str:
@@ -177,6 +179,146 @@ def run_ws_baseline(acc, ops, objective):
     )
 
 
+def _cimloop_cache_root(architecture: str, objective: str, model_name: str, spec) -> 'Path':
+    from pathlib import Path
+    suffix = "" if spec is None else _cimloop_spec_suffix(architecture, spec)
+    base = repo_root() / "Evaluation" / "CIMLoop" / "output"
+    dirname = f"{objective.lower()}_{model_name}_{architecture}{suffix}"
+    return base / dirname
+
+
+def _cimloop_spec_suffix(architecture: str, spec) -> str:
+    fp = _spec_fingerprint(spec)
+    default_fp = _default_spec_fingerprint(architecture)
+    if default_fp is not None and fp == default_fp:
+        return ""
+    return f"_{fp}"
+
+
+def _load_cimloop_outputs(model_name, architecture, objective, spec=None):
+    """Lazy per-layer cache. Returns a dict layer_fp → CIMLoopLayerOutput, loaded
+    from index.pickle if present. Mapper runs on demand per missing layer.
+    """
+    import pickle
+    if spec is None:
+        spec = _resolve_default_spec(architecture)
+
+    cache_root = _cimloop_cache_root(architecture, objective, model_name, spec)
+    index_path = cache_root / "index.pickle"
+    cache_key = (model_name, architecture, objective, _spec_fingerprint(spec) if spec is not None else "legacy")
+
+    if cache_key in _CIMLOOP_OUTPUTS_CACHE:
+        return _CIMLOOP_OUTPUTS_CACHE[cache_key], cache_root, index_path
+
+    outputs: dict = {}
+    if index_path.is_file():
+        with open(index_path, "rb") as fp_handle:
+            outputs = pickle.load(fp_handle)
+    _CIMLOOP_OUTPUTS_CACHE[cache_key] = outputs
+    return outputs, cache_root, index_path
+
+
+def _save_cimloop_index(index_path, outputs):
+    import pickle
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(index_path, "wb") as fp_handle:
+        pickle.dump(outputs, fp_handle)
+
+
+def _parse_art_summary_estimators(art_path) -> dict:
+    """从 ART_summary.yaml 的 table_summary 构造 {component_name: [estimator, ...]}。
+    这让评审能审查：每个 storage/compute 组件的能耗是由哪个 accelergy plug-in 估的，
+    论文立论依赖的是 NeuroSim/CACTI 真实模型而非 dummy 回退。"""
+    import yaml
+    if not art_path or not art_path.is_file():
+        return {"_error": f"ART_summary missing at {art_path}"}
+    try:
+        with open(art_path) as fh:
+            art = yaml.safe_load(fh)
+    except Exception as e:
+        return {"_error": f"ART_summary parse failed: {type(e).__name__}: {e}"}
+    table = (art or {}).get("ART_summary", {}).get("table_summary", [])
+    sources = {}
+    for entry in table:
+        raw_name = str(entry.get("name", ""))
+        # 剥 "[1..N]" 后缀（内含 "..."，必须先去后缀再按 "." 拆父路径），再取最后一个 "." 后的组件名
+        name = raw_name
+        if "[" in name:
+            name = name.split("[", 1)[0]
+        if "." in name:
+            name = name.rsplit(".", 1)[-1]
+        pe = entry.get("primitive_estimations")
+        if isinstance(pe, list) and pe:
+            sources[name] = [p.get("estimator", "?") for p in pe if isinstance(p, dict)]
+        elif isinstance(pe, str):
+            sources[name] = [pe]
+        # primitive_estimations: [] 的条目（inter_*_spatial / dummy_top 等 fanout 占位）
+        # 不记录 — 它们不是能耗源。
+    return sources
+
+
+def run_cimloop_baseline(acc, ops, loopdim, model_name, architecture, objective):
+    from Evaluation.CIMLoop.cimloop_adapter import (
+        loopdim_fingerprint,
+        run_cimloop_mapper_for_layer,
+    )
+    from Evaluation.CIMLoop.CompatibleCIMLoop import convert_CIMLoop_to_MIREDO
+
+    spec = getattr(acc, "source_spec", None)
+    if spec is None:
+        spec = _resolve_default_spec(architecture)
+
+    outputs, cache_root, index_path = _load_cimloop_outputs(
+        model_name=model_name,
+        architecture=architecture,
+        objective=objective,
+        spec=spec,
+    )
+    layer_fp = loopdim_fingerprint(loopdim)
+
+    if layer_fp not in outputs:
+        if spec is None:
+            raise RuntimeError(
+                f"run_cimloop_baseline: no HardwareSpec resolved for architecture={architecture!r}; "
+                "CIMLoop adapter requires a registered default_spec()"
+            )
+        work_dir = cache_root / "per_layer" / layer_fp
+        outputs[layer_fp] = run_cimloop_mapper_for_layer(
+            spec=spec,
+            loopdim=loopdim,
+            objective=objective,
+            work_dir=work_dir,
+        )
+        _save_cimloop_index(index_path, outputs)
+
+    out = outputs[layer_fp]
+    loops = LoopNest(acc=acc, ops=ops)
+    loops = convert_CIMLoop_to_MIREDO(loops=loops, out=out)
+    loops.usr_defined_double_flag[acc.Macro2mem][1] = acc.double_Macro
+    simulator = tranSimulator(acc=copy.deepcopy(acc), ops=ops, dataflow=loops)
+    latency, energy = simulator.run()
+
+    energy_sources = _parse_art_summary_estimators(getattr(out, "art_summary_path", None))
+
+    return BaselineRunResult(
+        method="cimloop",
+        objective=objective,
+        latency=latency,
+        energy=energy,
+        profile=simulator.PD,
+        dataflow=loops,
+        metadata={
+            "policy": "cimloop_mapper",
+            "model": model_name,
+            "architecture": architecture,
+            "spec_fingerprint": _spec_fingerprint(spec) if spec is not None else "legacy",
+            "optimization_metric": list(out.optimization_metric),
+            "mapper_runtime_s": out.runtime_s,
+            "energy_sources": energy_sources,
+        },
+    )
+
+
 def run_baseline(method, acc, ops, loopdim, model_name, architecture, objective):
     method = method.lower()
     if method == "zigzag":
@@ -190,4 +332,13 @@ def run_baseline(method, acc, ops, loopdim, model_name, architecture, objective)
         )
     if method == "ws":
         return run_ws_baseline(acc=acc, ops=ops, objective=objective)
+    if method == "cimloop":
+        return run_cimloop_baseline(
+            acc=acc,
+            ops=ops,
+            loopdim=loopdim,
+            model_name=model_name,
+            architecture=architecture,
+            objective=objective,
+        )
     raise ValueError(f"Unsupported baseline method: {method}")

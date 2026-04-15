@@ -1,0 +1,70 @@
+# Extension of CIMLoop's workspace/models/components/smartbuffer_SRAM.yaml:
+# adds a `datawidth` attribute so arch-level per-operand precision (I=8, W=8,
+# psum=16, O_final=8) can flow through to the inner SRAM. The stock smartbuffer_sram
+# compound omits datawidth from its attribute list; unknown attributes passed from
+# outside are dropped. Without this, the inner SRAM defaults to datawidth=1 and the
+# mapper's tile-capacity check is off by a factor of up to 16x — triggering MIREDO
+# tranSimulator OverSize errors.
+#
+# Structure is otherwise identical to smartbuffer_sram: storage (class: SRAM) +
+# address_generator (class: intadder, 2 instances for read/write). Accelergy still
+# estimates via CactiSRAM + Neurosim Plug-In (address_generator as intadder), keeping
+# the bank + port energy that the stock smartbuffer models.
+#
+# Kept out of the CIMLoop submodule tree so the submodule stays pristine —
+# only public timeloopfe.v4 interface is used.
+
+compound_components:
+  version: 0.4
+  classes:
+  - name: MIREDO_smartbuffer_sram
+    attributes:
+      technology: "must_specify"
+      width: "must_specify"
+      depth: "must_specify"
+      datawidth: "must_specify"
+      n_rw_ports: 1
+      global_cycle_seconds: "must_specify"
+
+    subcomponents:
+    - name: storage
+      class: SRAM
+      attributes:
+        width: width
+        depth: depth
+        datawidth: datawidth
+        n_rw_ports: n_rw_ports
+        technology: technology
+        global_cycle_seconds: global_cycle_seconds
+
+    - name: address_generator
+      class: intadder
+      attributes:
+        n_instances: 2
+        n_bits: max(1, ceil(log2(depth))) if depth >= 1 else 1
+        precision: max(1, ceil(log2(depth))) if depth >= 1 else 1
+        datawidth: max(1, ceil(log2(depth))) if depth >= 1 else 1
+        global_cycle_seconds: global_cycle_seconds
+
+    actions:
+    - &write_action
+      name: write
+      subcomponents:
+      - name: storage
+        actions: [{name: write}]
+      - name: address_generator
+        actions: [{name: add}]
+    - name: read
+      subcomponents:
+      - name: storage
+        actions: [{name: read}]
+      - name: address_generator
+        actions: [{name: add}]
+    - name: leak
+      subcomponents:
+      - name: storage
+        actions: [{name: leak}]
+      - name: address_generator
+        actions: [{name: leak}]
+    - name: update
+      << : *write_action

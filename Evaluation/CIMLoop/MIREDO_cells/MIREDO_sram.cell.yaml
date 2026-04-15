@@ -1,0 +1,42 @@
+# MIREDO SRAM bitcell model for CIMLoop baseline v2.
+#
+# Fields inherited verbatim from cimloop/workspace/models/memory_cells/
+# sram_colonnade_jssc_2021.cell.yaml. MIREDO HardwareSpec has no cell geometry
+# fields (CellArea F^2 / transistor widths / MinSenseVoltage), so we track
+# Colonnade's JSSC 2021 digital SRAM CiM cell calibration. Scaling to 28nm is
+# done by NeuroSim via 22↔32nm interpolation (cycle-level, not per-cell).
+#
+# Global params (voltage / technology / threshold_voltage / read_pulse_width)
+# are injected by the arch's cim_component_attributes — not this file.
+
+# Device type
+-MemCellType: SRAM
+-DeviceRoadmap -1LP 1HP 2LSTP: 1
+
+# Device size (F^2 units; scale by technology^2 inside NeuroSim)
+-CellArea (F^2): 130
+-CellAspectRatio: 1
+
+# Calibration parameters
+-CellReadLeakEnergyMultiplier: 4.5
+-CellWriteEnergyMultiplier: 1
+-CellCapacitanceMultiplier: 1
+-CellCapacitanceAdjust (F): 0
+
+# SRAM-only
+-AccessCMOSWidth (F): 7
+-SRAMCellNMOSWidth (F): 5
+-SRAMCellPMOSWidth (F): 5
+-MinSenseVoltage (mV): 20
+-ReadMode: voltage
+
+# RRAM-only (unused when MemCellType=SRAM; kept for NeuroSim schema completeness)
+-ResistanceOn (ohm): 1000
+-ResistanceOff (ohm): 100000
+-SetVoltage (V): 2
+-SetPulse (ns): 10
+-ReadVoltage (V): 0.2
+-ReadPulse (ns): 2
+-AccessType: None
+-AccessTransistorResistance (ohm): 1000
+-AccessVoltage (V): 0.2
