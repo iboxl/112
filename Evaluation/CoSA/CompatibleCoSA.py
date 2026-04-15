@@ -370,6 +370,101 @@ def _assert_mapping_unrolling_complete(loops: LoopNest, source_tag: str) -> None
         )
 
 
+def _compute_unrolling(loops: LoopNest) -> list[int]:
+    unrolling = [1 for _ in loops.ops.dim2Dict]
+    for mapping in loops.tm + loops.sm:
+        if mapping.dim < 0 or mapping.dim >= len(unrolling):
+            continue
+        unrolling[mapping.dim] *= int(round(mapping.dimSize))
+    return unrolling
+
+
+def _build_raw_dim_totals_from_cosa_map(baseline: BaselineLayer) -> Dict[str, int] | None:
+    if baseline.source != "cosa" or not hasattr(baseline, "raw"):
+        return None
+    ir = baseline.raw
+    targets = getattr(ir, "targets", None)
+    if targets is None:
+        return None
+
+    totals = {"R": 1, "S": 1, "P": 1, "Q": 1, "C": 1, "K": 1, "N": 1}
+    for target in targets.values():
+        for entry in target.temporal + target.spatial:
+            for dim in totals:
+                totals[dim] *= int(entry.factors.get(dim, 1))
+    return totals
+
+
+def _patch_missing_unrolling_from_raw_map(
+    loops: LoopNest,
+    baseline: BaselineLayer,
+    *,
+    source_tag: str,
+) -> None:
+    raw_totals = _build_raw_dim_totals_from_cosa_map(baseline)
+    if raw_totals is None:
+        return
+
+    dim_alias = {"B": "N", "G": "N"}
+    current = _compute_unrolling(loops)
+    appended: List[Tuple[str, int]] = []
+
+    recover_mem = []
+    for op in range(3):
+        valid = [m for m in range(loops.acc.Num_mem) if int(loops.acc.mappingArray[op][m]) == 1]
+        if not valid:
+            recover_mem.append(int(loops.acc.Dram2mem))
+            continue
+        valid_sorted = sorted(valid)
+        chosen = int(valid_sorted[-1])
+        if chosen == int(loops.acc.Dram2mem) and len(valid_sorted) > 1:
+            chosen = int(valid_sorted[-2])
+        recover_mem.append(chosen)
+
+    for dim, dim_name in enumerate(loops.ops.dim2Dict):
+        need = int(loops.ops.dim2bound[dim])
+        got = int(current[dim])
+        if got >= need:
+            continue
+
+        raw_dim_name = dim_alias.get(dim_name, dim_name)
+        raw_total = int(raw_totals.get(raw_dim_name, 1))
+        if raw_total < need:
+            continue
+
+        if need % max(1, got) != 0:
+            continue
+
+        missing_factor = int(need // max(1, got))
+        if missing_factor <= 1:
+            continue
+
+        mem_for_fix = list(recover_mem)
+        # Missing factors often originate from bypass-only WeightBuffer levels.
+        # Put recovered factors at DRAM in spatial mapping so they do not
+        # inflate inner-memory footprints (IReg/Macro/Output_buffer).
+        if dim_name in ("R", "S", "P", "Q", "C", "K"):
+            mem_for_fix[0] = int(loops.acc.Dram2mem)
+            mem_for_fix[1] = int(loops.acc.Dram2mem)
+            mem_for_fix[2] = int(loops.acc.Dram2mem)
+
+        loops.sm.append(
+            Mapping(
+                dim=dim,
+                dimSize=missing_factor,
+                mem=mem_for_fix,
+            )
+        )
+        current[dim] *= missing_factor
+        appended.append((dim_name, missing_factor))
+
+    if appended:
+        detail = ", ".join([f"{d}x{f}" for d, f in appended])
+        Logger.warning(
+            f"{source_tag}: recovered missing unrolling factors from CoSA raw map: {detail}"
+        )
+
+
 def convert_cosa_baseline_to_MIREDO(loops: LoopNest, baseline: BaselineLayer) -> LoopNest:
     """
     CoSA-only conversion path.
@@ -438,6 +533,11 @@ def convert_cosa_baseline_to_MIREDO(loops: LoopNest, baseline: BaselineLayer) ->
             )
         )
 
+    _patch_missing_unrolling_from_raw_map(
+        loops,
+        baseline,
+        source_tag="cosa:unrolling_recover",
+    )
     _assert_mapping_unrolling_complete(loops, source_tag="cosa:unrolling_check")
 
     # CoSA parser currently exports all-false dflags; keep explicit and safe here.

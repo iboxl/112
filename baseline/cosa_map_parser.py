@@ -36,6 +36,7 @@ class CoSAMapIR:
     targets: dict[str, CoSATargetMapping]
     operand_paths_outer_to_inner: dict[str, list[str]]
     raw: dict[str, Any]
+    source_loop_dim: dict[str, Any] | None = None
 
 
 def _parse_factors(factors_expr: str) -> dict[str, int]:
@@ -181,7 +182,16 @@ def _infer_loop_dim(ir: CoSAMapIR) -> dict[str, int]:
         "Q": totals["Q"],
         "C": totals["C"],
         "K": totals["K"],
+        "B": totals["N"],
+        # CoSA map_16 does not carry group metadata explicitly in this parser path.
         "G": 1,
+        "StrideH": 1,
+        "StrideW": 1,
+        "DilationH": 1,
+        "DilationW": 1,
+        # Keep legacy aliases used by older code paths.
+        "Stride": 1,
+        "Dilation": 1,
     }
 
 
@@ -195,9 +205,16 @@ def ir_to_baseline_layer(ir: CoSAMapIR) -> BaselineLayer:
         "O": [False] + [False] * len(temporal_mapping["O"]),
     }
 
+    # Prioritize source_loop_dim to preserve original G/Stride/Dilation semantics.
+    # If unavailable, fall back to inferred dimensions from map_16.yaml.
+    if ir.source_loop_dim is not None:
+        loop_dim = dict(ir.source_loop_dim)
+    else:
+        loop_dim = _infer_loop_dim(ir)
+
     return BaselineLayer(
         source="cosa",
-        loop_dim=_infer_loop_dim(ir),
+        loop_dim=loop_dim,
         temporal_mapping=temporal_mapping,
         spatial_mapping=spatial_mapping,
         double_buffer_flag=double_buffer_flag,
