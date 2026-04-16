@@ -1,15 +1,15 @@
 # Axis-constrained CoSA MIP fork.
 #
-# Forks three functions from cosa.cosa (mip_solver / cosa / run_timeloop) and
-# injects per-axis spatial-dimension constraints derived from a MIREDO
-# HardwareSpec.  Everything else is imported directly from the CoSA submodule.
+# Forks two functions from cosa.cosa (mip_solver / cosa) and injects per-axis
+# spatial-dimension constraints derived from a MIREDO HardwareSpec.  Everything
+# else is imported directly from the CoSA submodule.
 #
 # Why fork rather than patch:
 #   cosa.cosa has `from gurobipy import *` and check_timeloop_version() at
-#   module-level, making it unsafe to import as a dependency.  The three
+#   module-level, making it unsafe to import as a dependency.  The two
 #   functions below are the only ones that touch Gurobi; all other CoSA objects
-#   (Prob, Arch, Mapspace, run_config, utils, constants) have no Gurobi
-#   dependency and are imported directly.
+#   (Prob, Arch, Mapspace, utils, constants) have no Gurobi dependency and are
+#   imported directly.
 #
 # Constraint semantics:
 #   CoSA MIP allocates spatial factors freely across levels, subject only to
@@ -41,7 +41,7 @@ import numpy as np
 from Architecture.HardwareSpec import HardwareSpec
 
 # ---------------------------------------------------------------------------
-# Submodule path bootstrap (mirrors cosa_adapter._load_cosa_run_timeloop)
+# Submodule path bootstrap (mirrors cosa_adapter._load_cosa_module)
 # ---------------------------------------------------------------------------
 
 _THIS_FILE = Path(__file__).resolve()
@@ -66,8 +66,7 @@ def _import_cosa_deps():
     if _cosa_imports_done:
         return
     _ensure_cosa_importable()
-    global run_config, _A, _B, Prob, Arch, Mapspace, utils, GRB, Model, max_
-    import cosa.run_config as run_config  # noqa: F841
+    global _A, _B, Prob, Arch, Mapspace, utils, GRB, Model, max_
     from cosa.cosa_constants import _A, _B  # noqa: F841
     from cosa.cosa_input_objs import Prob, Arch, Mapspace  # noqa: F841
     import cosa.utils as utils  # noqa: F841
@@ -558,7 +557,7 @@ def constrained_cosa(prob, arch, A, B, part_ratios, global_buf_idx,
 
 
 # ---------------------------------------------------------------------------
-# Public entry point (replaces cosa.cosa.run_timeloop)
+# Public entry point
 # ---------------------------------------------------------------------------
 
 def run_constrained_timeloop(
@@ -567,28 +566,24 @@ def run_constrained_timeloop(
     mapspace_path,
     output_path,
     spec: HardwareSpec,
-) -> dict:
-    """Axis-constrained replacement for cosa.cosa.run_timeloop.
+) -> None:
+    """Run the axis-constrained MIP and write the resulting mapping YAML.
 
-    Derives per-axis spatial-dimension constraints from spec, then runs the
-    constrained MIP.  Everything else (Prob/Arch/Mapspace construction,
-    spatial_to_factor_map encoding, run_config.run_config call) is identical
-    to the original run_timeloop.
+    Derives per-axis spatial-dimension constraints from spec, runs the
+    constrained MIP, and writes map_16.yaml directly (no timeloop-model
+    subprocess — performance evaluation is done by MIREDO's Simulax).
     """
     _import_cosa_deps()
 
     prob_path = Path(prob_path)
     arch_path = Path(arch_path)
     mapspace_path = Path(mapspace_path)
-    output_path = str(output_path)
+    output_path = Path(output_path)
 
     prob = Prob(prob_path)
     arch = Arch(arch_path)
     mapspace = Mapspace(mapspace_path)
     mapspace.init(prob, arch)
-
-    B = _B
-    Z = None
 
     part_ratios = [
         [1, 0, 0],
@@ -600,14 +595,14 @@ def run_constrained_timeloop(
     ]
 
     axis_constraints = _derive_axis_constraints(spec)
-    debug_lp = Path(output_path) / "debug_constrained.lp"
+    debug_lp = output_path / "debug_constrained.lp"
 
-    factor_config, spatial_config, outer_perm_config, run_time = constrained_cosa(
-        prob, arch, _A, B, part_ratios, global_buf_idx=4,
-        Z=Z, axis_constraints=axis_constraints, debug_lp_path=debug_lp,
+    factor_config, spatial_config, outer_perm_config, _ = constrained_cosa(
+        prob, arch, _A, _B, part_ratios, global_buf_idx=4,
+        Z=None, axis_constraints=axis_constraints, debug_lp_path=debug_lp,
     )
 
-    update_factor_config = factor_config
+    # Encode spatial mapping (mirrors cosa.cosa.run_timeloop)
     spatial_to_factor_map = {}
     idx = arch.mem_levels
     for i, val in enumerate(arch.S):
@@ -618,22 +613,15 @@ def run_constrained_timeloop(
     for j, f_j in enumerate(prob.prob_factors):
         for n, f_jn in enumerate(f_j):
             if spatial_config[j][n] == 1:
-                update_factor_config[j][n] = spatial_to_factor_map[factor_config[j][n]]
+                factor_config[j][n] = spatial_to_factor_map[factor_config[j][n]]
 
     perm_config = mapspace.get_default_perm()
     perm_config[4] = outer_perm_config
 
-    status_dict = {}
-    try:
-        spatial_configs = []
-        run_config.run_config(
-            mapspace, None, perm_config, update_factor_config, status_dict,
-            run_gen_map=True, run_gen_tc=False, run_sim_test=False,
-            output_path=output_path,
-            spatial_configs=spatial_configs, valid_check=False,
-            outer_loopcount_limit=100,
-        )
-    except Exception:
-        pass  # mirrors original's bare except + logger.error
+    # Generate and write mapping YAML directly (no timeloop-model)
+    mapspace.reset_mapspace(None, [])
+    mapspace.update_mapspace(perm_config, factor_config)
+    mapping = mapspace.generate_mapping()
 
-    return status_dict
+    map_path = output_path / "map_16.yaml"
+    utils.store_yaml(str(map_path), mapping)

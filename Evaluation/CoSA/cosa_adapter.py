@@ -4,7 +4,7 @@
 # WeightBuffer / InputBuffer / GlobalBuffer / DRAM) and a cnn-layer problem
 # (R, S, P, Q, C, K, N + stride/dilation). It runs a Gurobi MIP to pick the
 # tile factors + spatial/temporal split + outer permutation, then emits a
-# timeloop-compatible map_16.yaml that is validated with timeloop-model.
+# map_16.yaml mapping file.
 #
 # We fold MIREDO's 7-level hierarchy into simba:
 #   Registers          ← Macro (weights); entries=1 blocks the MIP from
@@ -24,9 +24,7 @@
 # spatial fanout from `inner_instances / cur_instances` (see
 # cosa_input_objs.Arch.gen_spatial_constraint), so the sequence
 # [4096, 128, 128, 8, 1, 1] yields per-level S = [1, 32, 1, 16, 8, 1]
-# which matches MIREDO's [cores=8 × dimX=32 × dimY=16] axes. cluster-size
-# values are only consumed by timeloop-model for topology validation; they
-# don't affect the MIP but must be consistent with the instances ratios.
+# which matches MIREDO's [cores=8 × dimX=32 × dimY=16] axes.
 #
 # CoSA's MIP does not respect MIREDO's per-axis allowed_loops (cores→PQKG,
 # dimX→RSC, dimY→K). Mapping legality is therefore enforced downstream by
@@ -34,8 +32,8 @@
 # inflates OReg/IReg tiles and raises Dataflow Over MemSize Error, which
 # the baseline-comparison runner records as an anomaly.
 #
-# timeloop-model is invoked in-process by cosa.run_timeloop; we reuse the
-# CIMLoop adapter's timeloop submodule via _timeloop_runtime_env.
+# Only the MIP solver is invoked from the CoSA submodule; timeloop-model is
+# not called (performance evaluation is done by MIREDO's Simulax).
 
 from __future__ import annotations
 
@@ -45,7 +43,6 @@ import json
 import os
 import sys
 import time
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -61,52 +58,31 @@ _THIS_FILE = Path(__file__).resolve()
 _COSA_ADAPTER_DIR = _THIS_FILE.parent
 _COSA_REPO = _COSA_ADAPTER_DIR / "cosa"
 _COSA_SRC = _COSA_REPO / "src"
-_CIMLOOP_ADAPTER_DIR = _COSA_ADAPTER_DIR.parent / "CIMLoop"
-_TIMELOOP_SUBMODULE_ROOT = _CIMLOOP_ADAPTER_DIR / "timeloop-accelergy-infra" / "src" / "timeloop"
-_TIMELOOP_SUBMODULE_BIN = _TIMELOOP_SUBMODULE_ROOT / "bin"
-_TIMELOOP_SUBMODULE_LIB = _TIMELOOP_SUBMODULE_ROOT / "lib"
-
-_CONDA_PREFIX = os.environ.get("CONDA_PREFIX") or sys.prefix
-_CONDA_LIB = Path(_CONDA_PREFIX) / "lib"
 
 
 # ---------------------------------------------------------------------------
-# Runtime environment helpers
+# CoSA submodule loader
 # ---------------------------------------------------------------------------
 
-@contextmanager
-def _timeloop_runtime_env():
-    """Prepend the CIMLoop-submodule timeloop bin/lib to PATH/LD_LIBRARY_PATH
-    so CoSA's `utils.run_timeloop` subprocess call picks up the pinned
-    timeloop-model binary."""
-    old_path = os.environ.get("PATH", "")
-    old_ld = os.environ.get("LD_LIBRARY_PATH", "")
-    try:
-        os.environ["PATH"] = f"{_TIMELOOP_SUBMODULE_BIN}:{old_path}"
-        parts = [str(_TIMELOOP_SUBMODULE_LIB)]
-        if _CONDA_LIB.is_dir():
-            parts.append(str(_CONDA_LIB))
-        if old_ld:
-            parts.append(old_ld)
-        os.environ["LD_LIBRARY_PATH"] = ":".join(parts)
-        yield
-    finally:
-        os.environ["PATH"] = old_path
-        if old_ld:
-            os.environ["LD_LIBRARY_PATH"] = old_ld
-        else:
-            os.environ.pop("LD_LIBRARY_PATH", None)
+_cosa_module = None
 
 
-def _load_cosa_run_timeloop():
-    """Import cosa.cosa.run_timeloop from the submodule. Ensures COSA_DIR env
-    var is set so CoSA's module-level paths resolve relative to the submodule."""
+def _load_cosa_module():
+    """Import the cosa.cosa module from the submodule (deferred to first call).
+
+    Returns the module object; callers access cosa(), Prob, Arch, Mapspace,
+    _A, _B, utils as module attributes.  Importing the module triggers
+    Gurobi's licence check and check_timeloop_version() (warning only).
+    """
+    global _cosa_module
+    if _cosa_module is not None:
+        return _cosa_module
     cosa_src = str(_COSA_SRC)
     if cosa_src not in sys.path:
         sys.path.insert(0, cosa_src)
     os.environ.setdefault("COSA_DIR", str(_COSA_REPO))
-    cosa_module = importlib.import_module("cosa.cosa")
-    return cosa_module.run_timeloop
+    _cosa_module = importlib.import_module("cosa.cosa")
+    return _cosa_module
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +116,6 @@ class CoSALayerOutput:
     loopdim: Dict[str, int]
     objective: str
     map_yaml_path: Path
-    stats_xml_path: Optional[Path]
     simba_level_names: List[str]
     simba_to_miredo: Dict[str, Optional[str]]
     runtime_s: float
@@ -196,10 +171,8 @@ def _render_arch_yaml(spec: HardwareSpec) -> str:
     input_entries = _bits_to_entries(ibuf.size_bits, input_bits)
     global_entries = _bits_to_entries(glb.size_bits, input_bits)
 
-    # cluster-size: only consumed by timeloop-model topology, not by CoSA's
-    # MIP. Pick values consistent with the fanout so timeloop accepts the
-    # arch. Registers cluster spans dimX×dimY within a core. Accumulation
-    # cluster spans dimY within a core.
+    # cluster-size values are not used by the MIP but must be consistent with
+    # the instances ratios.
     registers_cluster = dim_x * dim_y
     accum_cluster = dim_y
 
@@ -341,16 +314,66 @@ def loopdim_fingerprint(loopdim: Dict[str, int]) -> str:
 # Mapper invocation
 # ---------------------------------------------------------------------------
 
+def _run_cosa_mip_and_write_mapping(cm, prob_path, arch_path, mapspace_path, work_dir):
+    """Run CoSA's MIP solver and write the resulting mapping YAML.
+
+    Replicates the orchestration from cosa.cosa.run_timeloop() but skips the
+    redundant timeloop-model subprocess call — performance evaluation is done
+    downstream by MIREDO's Simulax.
+
+    Returns the path to the written map_16.yaml.
+    """
+    prob = cm.Prob(prob_path)
+    arch = cm.Arch(arch_path)
+    mapspace = cm.Mapspace(mapspace_path)
+    mapspace.init(prob, arch)
+
+    part_ratios = [
+        [1, 0, 0],
+        [0, 0, 1],
+        [1, 0, 0],
+        [0, 1, 0],
+        [0, 0.5, 0.5],
+        [0.33, 0.33, 0.33],
+    ]
+    factor_config, spatial_config, outer_perm_config, _ = cm.cosa(
+        prob, arch, cm._A, cm._B, part_ratios, global_buf_idx=4, Z=None,
+    )
+
+    # Encode spatial mapping (mirrors cosa.cosa.run_timeloop)
+    spatial_to_factor_map = {}
+    idx = arch.mem_levels
+    for i, val in enumerate(arch.S):
+        if val > 1:
+            spatial_to_factor_map[i] = idx
+            idx += 1
+    for j, f_j in enumerate(prob.prob_factors):
+        for n, f_jn in enumerate(f_j):
+            if spatial_config[j][n] == 1:
+                factor_config[j][n] = spatial_to_factor_map[factor_config[j][n]]
+
+    perm_config = mapspace.get_default_perm()
+    perm_config[4] = outer_perm_config
+
+    # Generate and write mapping YAML directly (no timeloop-model)
+    mapspace.reset_mapspace(None, [])
+    mapspace.update_mapspace(perm_config, factor_config)
+    mapping = mapspace.generate_mapping()
+
+    map_path = work_dir / "map_16.yaml"
+    cm.utils.store_yaml(str(map_path), mapping)
+    return map_path
+
+
 def run_cosa_mapper_for_layer(
     spec: HardwareSpec,
     loopdim: Dict[str, int],
     objective: str,
     work_dir: Path,
 ) -> CoSALayerOutput:
-    """Generate arch/mapspace/prob yamls, invoke cosa.run_timeloop, locate the
-    resulting map_16.yaml + timeloop-model.map+stats.xml. `objective` is
-    recorded but not passed to CoSA — CoSA's MIP objective is fixed (weighted
-    compute/util/traffic); cross-objective differentiation is not available."""
+    """Generate arch/mapspace/prob yamls, run CoSA's MIP solver, and write the
+    resulting map_16.yaml.  `objective` is recorded but not passed to CoSA —
+    CoSA's MIP objective is fixed (weighted compute/util/traffic)."""
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -363,33 +386,24 @@ def run_cosa_mapper_for_layer(
 
     layer_fp = loopdim_fingerprint(loopdim)
 
-    run_timeloop = _load_cosa_run_timeloop()
+    cm = _load_cosa_module()
     t0 = time.time()
-    with _timeloop_runtime_env():
-        run_timeloop(
-            prob_path=prob_path,
-            arch_path=arch_path,
-            mapspace_path=mapspace_path,
-            output_path=str(work_dir),
-        )
+    map_yaml = _run_cosa_mip_and_write_mapping(
+        cm, prob_path, arch_path, mapspace_path, work_dir,
+    )
     runtime_s = time.time() - t0
 
-    map_candidates = sorted(work_dir.rglob("map_16.yaml"))
-    if not map_candidates:
+    if not map_yaml.is_file():
         raise RuntimeError(
             f"CoSA did not produce a map_16.yaml under {work_dir}; the MIP may "
-            "have returned infeasible or timeloop-model rejected the mapping."
+            "have returned infeasible."
         )
-    map_yaml = map_candidates[0]
-    xml_candidates = sorted(work_dir.rglob("timeloop-model.map+stats.xml"))
-    stats_xml = xml_candidates[0] if xml_candidates else None
 
     return CoSALayerOutput(
         layer_fp=layer_fp,
         loopdim=dict(loopdim),
         objective=objective,
         map_yaml_path=map_yaml,
-        stats_xml_path=stats_xml,
         simba_level_names=list(_SIMBA_INNER_TO_OUTER),
         simba_to_miredo=dict(_SIMBA_TO_MIREDO),
         runtime_s=runtime_s,
@@ -424,32 +438,27 @@ def run_cosa_constrained_mapper_for_layer(
     layer_fp = loopdim_fingerprint(loopdim)
 
     t0 = time.time()
-    with _timeloop_runtime_env():
-        run_constrained_timeloop(
-            prob_path=prob_path,
-            arch_path=arch_path,
-            mapspace_path=mapspace_path,
-            output_path=str(work_dir),
-            spec=spec,
-        )
+    run_constrained_timeloop(
+        prob_path=prob_path,
+        arch_path=arch_path,
+        mapspace_path=mapspace_path,
+        output_path=str(work_dir),
+        spec=spec,
+    )
     runtime_s = time.time() - t0
 
-    map_candidates = sorted(work_dir.rglob("map_16.yaml"))
-    if not map_candidates:
+    map_yaml = work_dir / "map_16.yaml"
+    if not map_yaml.is_file():
         raise RuntimeError(
             f"CoSA constrained did not produce a map_16.yaml under {work_dir}; "
-            "the MIP may have returned infeasible or timeloop-model rejected the mapping."
+            "the MIP may have returned infeasible."
         )
-    map_yaml = map_candidates[0]
-    xml_candidates = sorted(work_dir.rglob("timeloop-model.map+stats.xml"))
-    stats_xml = xml_candidates[0] if xml_candidates else None
 
     return CoSALayerOutput(
         layer_fp=layer_fp,
         loopdim=dict(loopdim),
         objective=objective,
         map_yaml_path=map_yaml,
-        stats_xml_path=stats_xml,
         simba_level_names=list(_SIMBA_INNER_TO_OUTER),
         simba_to_miredo=dict(_SIMBA_TO_MIREDO),
         runtime_s=runtime_s,
