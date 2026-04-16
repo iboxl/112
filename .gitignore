@@ -6,6 +6,7 @@
 *.txt
 *.log
 *.ilp
+*.lp
 *.xlsx
 *.pkl
 *.pickle
@@ -16,7 +17,11 @@ model/*
 Evaluation/Zigzag_imc/output/*
 !Evaluation/Zigzag_imc/output/.gitkeep
 Evaluation/CIMLoop/output/*
-Evaluation/CIMLoop/output/.gitkeep
+!Evaluation/CIMLoop/output/.gitkeep
+Evaluation/CoSA/output/*
+!Evaluation/CoSA/output/.gitkeep
+Evaluation/CoSA/output_constrained/*
+!Evaluation/CoSA/output_constrained/.gitkeep
 
 **cache**
 

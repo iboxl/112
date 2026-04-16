@@ -274,6 +274,28 @@ def baseMapping_from_cimloop_output(out: CIMLoopLayerOutput) -> ClassMapping:
     )
 
 
-def convert_CIMLoop_to_MIREDO(loops: LoopNest, out: CIMLoopLayerOutput) -> LoopNest:
+def convert_CIMLoop_to_MIREDO(loops: LoopNest, out: CIMLoopLayerOutput,
+                              spec=None, loopdim=None):
+    """Convert a CIMLoop mapping to a MIREDO LoopNest.
+
+    If *spec* and *loopdim* are provided, runs capacity legalization on the
+    ClassMapping before conversion (same logic as the CoSA path) and returns
+    ``(LoopNest, legalization_meta)``.  Otherwise returns just the LoopNest
+    for backward compatibility.
+    """
     baseMapping = baseMapping_from_cimloop_output(out)
+
+    if spec is not None and loopdim is not None:
+        from Evaluation.common.CapacityLegalization import legalize_capacity
+        capacity_demoted = legalize_capacity(
+            baseMapping.temporal_mapping, baseMapping.spatial_mapping,
+            spec, loopdim,
+        )
+        legalization_meta = {
+            "capacity_demoted_count": len(capacity_demoted),
+            "capacity_demoted": capacity_demoted,
+        }
+        loops = convert_baseMapping_to_MIREDO(loops=loops, baseMapping=baseMapping)
+        return loops, legalization_meta
+
     return convert_baseMapping_to_MIREDO(loops=loops, baseMapping=baseMapping)

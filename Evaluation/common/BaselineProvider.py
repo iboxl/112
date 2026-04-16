@@ -18,11 +18,13 @@ from Evaluation.common.EvalCommon import objective_to_opt_flag, repo_root
 from Evaluation.WeightStationaryGenerator import generate_weight_stationary_baseline
 
 
-SUPPORTED_BASELINE_METHODS = ("zigzag", "ws", "cimloop")
+SUPPORTED_BASELINE_METHODS = ("zigzag", "ws", "cimloop", "cosa", "cosa-constrained")
 BASELINE_METHOD_LABELS = {
     "zigzag": "ZigZag_IMC",
     "ws": "WS",
     "cimloop": "CIMLoop",
+    "cosa": "CoSA",
+    "cosa-constrained": "CoSA-Constr",
 }
 
 
@@ -44,6 +46,8 @@ class BaselineRunResult:
 _ZIGZAG_CME_CACHE = {}
 _DEFAULT_FP_CACHE = {}
 _CIMLOOP_OUTPUTS_CACHE = {}
+_COSA_OUTPUTS_CACHE = {}
+_COSA_CONSTRAINED_OUTPUTS_CACHE = {}
 
 
 def _spec_fingerprint(spec) -> str:
@@ -257,6 +261,223 @@ def _parse_art_summary_estimators(art_path) -> dict:
     return sources
 
 
+def _cosa_cache_root(architecture: str, objective: str, model_name: str, spec) -> 'Path':
+    from pathlib import Path
+    suffix = "" if spec is None else _cimloop_spec_suffix(architecture, spec)
+    base = repo_root() / "Evaluation" / "CoSA" / "output"
+    dirname = f"{objective.lower()}_{model_name}_{architecture}{suffix}"
+    return base / dirname
+
+
+def _load_cosa_outputs(model_name, architecture, objective, spec=None):
+    import pickle
+    if spec is None:
+        spec = _resolve_default_spec(architecture)
+    cache_root = _cosa_cache_root(architecture, objective, model_name, spec)
+    index_path = cache_root / "index.pickle"
+    cache_key = (model_name, architecture, objective, _spec_fingerprint(spec) if spec is not None else "legacy")
+    if cache_key in _COSA_OUTPUTS_CACHE:
+        return _COSA_OUTPUTS_CACHE[cache_key], cache_root, index_path
+    outputs: dict = {}
+    if index_path.is_file():
+        with open(index_path, "rb") as fp_handle:
+            outputs = pickle.load(fp_handle)
+    _COSA_OUTPUTS_CACHE[cache_key] = outputs
+    return outputs, cache_root, index_path
+
+
+def _save_cosa_index(index_path, outputs):
+    import pickle
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(index_path, "wb") as fp_handle:
+        pickle.dump(outputs, fp_handle)
+
+
+def run_cosa_baseline(acc, ops, loopdim, model_name, architecture, objective):
+    g = int(max(1, loopdim.get("G", 1)))
+    if g != 1:
+        raise NotImplementedError(
+            f"CoSA baseline: grouped convolution (G={g}) not supported; "
+            "CoSA's cnn-layer problem shape has no G dimension. Layer excluded "
+            "from CoSA comparison."
+        )
+
+    from Evaluation.CoSA.cosa_adapter import loopdim_fingerprint, run_cosa_mapper_for_layer
+    from Evaluation.CoSA.CompatibleCoSA import convert_CoSA_to_MIREDO
+
+    spec = getattr(acc, "source_spec", None)
+    if spec is None:
+        spec = _resolve_default_spec(architecture)
+
+    outputs, cache_root, index_path = _load_cosa_outputs(
+        model_name=model_name,
+        architecture=architecture,
+        objective=objective,
+        spec=spec,
+    )
+    layer_fp = loopdim_fingerprint(loopdim)
+
+    if layer_fp not in outputs:
+        if spec is None:
+            raise RuntimeError(
+                f"run_cosa_baseline: no HardwareSpec resolved for architecture={architecture!r}; "
+                "CoSA adapter requires a registered default_spec()"
+            )
+        work_dir = cache_root / "per_layer" / layer_fp
+        outputs[layer_fp] = run_cosa_mapper_for_layer(
+            spec=spec,
+            loopdim=loopdim,
+            objective=objective,
+            work_dir=work_dir,
+        )
+        _save_cosa_index(index_path, outputs)
+
+    out = outputs[layer_fp]
+    loops = LoopNest(acc=acc, ops=ops)
+    loops, legalization_meta = convert_CoSA_to_MIREDO(loops=loops, out=out, spec=spec)
+    loops.usr_defined_double_flag[acc.Macro2mem][1] = acc.double_Macro
+    simulator = tranSimulator(acc=copy.deepcopy(acc), ops=ops, dataflow=loops)
+    latency, energy = simulator.run()
+
+    return BaselineRunResult(
+        method="cosa",
+        objective=objective,
+        latency=latency,
+        energy=energy,
+        profile=simulator.PD,
+        dataflow=loops,
+        metadata={
+            "policy": "cosa_mip",
+            "model": model_name,
+            "architecture": architecture,
+            "spec_fingerprint": _spec_fingerprint(spec) if spec is not None else "legacy",
+            "mapper_runtime_s": out.runtime_s,
+            "stats_xml_path": str(out.stats_xml_path) if out.stats_xml_path else None,
+            "legalization_demoted_count": legalization_meta["demoted_count"],
+            "legalization_demoted": legalization_meta["demoted"],
+            "capacity_demoted_count": legalization_meta.get("capacity_demoted_count", 0),
+            "capacity_demoted": legalization_meta.get("capacity_demoted", []),
+        },
+    )
+
+
+def _cosa_constrained_cache_root(architecture: str, objective: str, model_name: str, spec) -> 'Path':
+    from pathlib import Path
+    suffix = "" if spec is None else _cimloop_spec_suffix(architecture, spec)
+    base = repo_root() / "Evaluation" / "CoSA" / "output_constrained"
+    dirname = f"{objective.lower()}_{model_name}_{architecture}{suffix}"
+    return base / dirname
+
+
+def _load_cosa_constrained_outputs(model_name, architecture, objective, spec=None):
+    import pickle
+    if spec is None:
+        spec = _resolve_default_spec(architecture)
+    cache_root = _cosa_constrained_cache_root(architecture, objective, model_name, spec)
+    index_path = cache_root / "index.pickle"
+    cache_key = (model_name, architecture, objective, _spec_fingerprint(spec) if spec is not None else "legacy")
+    if cache_key in _COSA_CONSTRAINED_OUTPUTS_CACHE:
+        return _COSA_CONSTRAINED_OUTPUTS_CACHE[cache_key], cache_root, index_path
+    outputs: dict = {}
+    if index_path.is_file():
+        with open(index_path, "rb") as fp_handle:
+            outputs = pickle.load(fp_handle)
+    _COSA_CONSTRAINED_OUTPUTS_CACHE[cache_key] = outputs
+    return outputs, cache_root, index_path
+
+
+def _save_cosa_constrained_index(index_path, outputs):
+    import pickle
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(index_path, "wb") as fp_handle:
+        pickle.dump(outputs, fp_handle)
+
+
+def run_cosa_constrained_baseline(acc, ops, loopdim, model_name, architecture, objective):
+    """CoSA baseline with axis constraints injected into the Gurobi MIP.
+
+    Uses a minimal fork of CoSA's mip_solver that adds x[(i,j,n,0)]==0
+    constraints for dims not allowed at each physical spatial axis (dimX→RSC,
+    dimY→K, cores→PQKG).  The resulting mapping is already axis-legal, so
+    legalization demoted_count should be 0.
+
+    G>1 (grouped conv) is not supported, same as the unconstrained path.
+
+    OverSize risk: the constrained MIP allocates factors to different levels
+    than unconstrained CoSA.  CoSA's simplified capacity model (single
+    word-bits + part_ratios) may accept tile distributions that Simulax's
+    per-operand precision check rejects.  Callers should catch
+    ValueError('Dataflow Over MemSize Error') and record it as an anomaly.
+    """
+    g = int(max(1, loopdim.get("G", 1)))
+    if g != 1:
+        raise NotImplementedError(
+            f"CoSA-constrained baseline: grouped convolution (G={g}) not supported; "
+            "CoSA's cnn-layer problem shape has no G dimension. Layer excluded."
+        )
+
+    from Evaluation.CoSA.cosa_adapter import (
+        loopdim_fingerprint,
+        run_cosa_constrained_mapper_for_layer,
+    )
+    from Evaluation.CoSA.CompatibleCoSA import convert_CoSA_to_MIREDO
+
+    spec = getattr(acc, "source_spec", None)
+    if spec is None:
+        spec = _resolve_default_spec(architecture)
+
+    outputs, cache_root, index_path = _load_cosa_constrained_outputs(
+        model_name=model_name,
+        architecture=architecture,
+        objective=objective,
+        spec=spec,
+    )
+    layer_fp = loopdim_fingerprint(loopdim)
+
+    if layer_fp not in outputs:
+        if spec is None:
+            raise RuntimeError(
+                f"run_cosa_constrained_baseline: no HardwareSpec resolved for "
+                f"architecture={architecture!r}; CoSA adapter requires a registered default_spec()"
+            )
+        work_dir = cache_root / "per_layer" / layer_fp
+        outputs[layer_fp] = run_cosa_constrained_mapper_for_layer(
+            spec=spec,
+            loopdim=loopdim,
+            objective=objective,
+            work_dir=work_dir,
+        )
+        _save_cosa_constrained_index(index_path, outputs)
+
+    out = outputs[layer_fp]
+    loops = LoopNest(acc=acc, ops=ops)
+    loops, legalization_meta = convert_CoSA_to_MIREDO(loops=loops, out=out, spec=spec)
+    loops.usr_defined_double_flag[acc.Macro2mem][1] = acc.double_Macro
+    simulator = tranSimulator(acc=copy.deepcopy(acc), ops=ops, dataflow=loops)
+    latency, energy = simulator.run()
+
+    return BaselineRunResult(
+        method="cosa-constrained",
+        objective=objective,
+        latency=latency,
+        energy=energy,
+        profile=simulator.PD,
+        dataflow=loops,
+        metadata={
+            "policy": "cosa_constrained_mip",
+            "model": model_name,
+            "architecture": architecture,
+            "spec_fingerprint": _spec_fingerprint(spec) if spec is not None else "legacy",
+            "mapper_runtime_s": out.runtime_s,
+            "stats_xml_path": str(out.stats_xml_path) if out.stats_xml_path else None,
+            "legalization_demoted_count": legalization_meta["demoted_count"],
+            "legalization_demoted": legalization_meta["demoted"],
+            "capacity_demoted_count": legalization_meta.get("capacity_demoted_count", 0),
+            "capacity_demoted": legalization_meta.get("capacity_demoted", []),
+        },
+    )
+
+
 def run_cimloop_baseline(acc, ops, loopdim, model_name, architecture, objective):
     from Evaluation.CIMLoop.cimloop_adapter import (
         loopdim_fingerprint,
@@ -293,7 +514,9 @@ def run_cimloop_baseline(acc, ops, loopdim, model_name, architecture, objective)
 
     out = outputs[layer_fp]
     loops = LoopNest(acc=acc, ops=ops)
-    loops = convert_CIMLoop_to_MIREDO(loops=loops, out=out)
+    loops, legalization_meta = convert_CIMLoop_to_MIREDO(
+        loops=loops, out=out, spec=spec, loopdim=loopdim,
+    )
     loops.usr_defined_double_flag[acc.Macro2mem][1] = acc.double_Macro
     simulator = tranSimulator(acc=copy.deepcopy(acc), ops=ops, dataflow=loops)
     latency, energy = simulator.run()
@@ -315,6 +538,8 @@ def run_cimloop_baseline(acc, ops, loopdim, model_name, architecture, objective)
             "optimization_metric": list(out.optimization_metric),
             "mapper_runtime_s": out.runtime_s,
             "energy_sources": energy_sources,
+            "capacity_demoted_count": legalization_meta.get("capacity_demoted_count", 0),
+            "capacity_demoted": legalization_meta.get("capacity_demoted", []),
         },
     )
 
@@ -334,6 +559,24 @@ def run_baseline(method, acc, ops, loopdim, model_name, architecture, objective)
         return run_ws_baseline(acc=acc, ops=ops, objective=objective)
     if method == "cimloop":
         return run_cimloop_baseline(
+            acc=acc,
+            ops=ops,
+            loopdim=loopdim,
+            model_name=model_name,
+            architecture=architecture,
+            objective=objective,
+        )
+    if method == "cosa":
+        return run_cosa_baseline(
+            acc=acc,
+            ops=ops,
+            loopdim=loopdim,
+            model_name=model_name,
+            architecture=architecture,
+            objective=objective,
+        )
+    if method == "cosa-constrained":
+        return run_cosa_constrained_baseline(
             acc=acc,
             ops=ops,
             loopdim=loopdim,
