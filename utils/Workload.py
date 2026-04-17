@@ -235,6 +235,17 @@ class LoopNest():
         for m in output_mems:
             self.psum_flag.setdefault(m, False)
 
+        self._prec_table = {}
+        for mem in range(self.acc.Num_mem + 1):
+            for op in range(3):
+                if op == 2:
+                    if self.psum_flag is not None and self.psum_flag.get(mem, False):
+                        self._prec_table[(mem, op)] = self.acc.precision_psum
+                    else:
+                        self._prec_table[(mem, op)] = self.acc.precision_final
+                else:
+                    self._prec_table[(mem, op)] = self.acc.precision[mem, op] if (mem, op) in self.acc.precision else 0
+
         for i,_ in enumerate(self.ops.dim2Dict):
             if abs(unrollingSize[i]-self.ops.dim2bound[i]) > 1:
                 Logger.warning(f"Dataflow LoopNest used greedy mapping ({unrollingSize[i]}) for dimension {self.ops.dim2Dict[i]}({self.ops.dim2bound[i]})")  
@@ -267,6 +278,9 @@ class LoopNest():
         return self.acc.precision_final
 
     def get_precision(self, mem, op):
+        table = getattr(self, "_prec_table", None)
+        if table is not None:
+            return table[(mem, op)]
         if op == 2:
             return self.get_output_precision(mem)
         return self.acc.precision[mem, op]

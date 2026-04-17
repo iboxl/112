@@ -354,8 +354,255 @@ class tranSimulator():
 
                 self.memCost[mem_cur[op]].t += Cons[op]
 
+    # ------------------------------------------------------------------
+    # Analytical evaluation path.
+    #
+    # 动机：CoSA / CIMLoop 产生的 mapping 经常把大的 trip count 放在内层，
+    # 每层 `for i in range(N)` 展开后 leaf 调用数会放大成全部 MAC 事件数（VGG 单层
+    # 可到 1e9 量级），原 tile-walk `loopExecution` 会跑数小时。
+    #
+    # 策略：对每个非叶层 loopExecution(loopidx) 的 N 次循环做如下等价展开
+    #   iter0 显式执行（跳过 `if i > 0` 分支）
+    #   iter1 显式执行（带 `if i > 0` 分支）
+    #   iter2 显式执行；记录 (状态before→after) 作稳态 delta
+    #   对 (N-3) 次追加迭代按稳态 delta 线性累加
+    #   flush（若 dflag[O]==1）
+    # 其中 iter0/iter1/iter2 都递归调用 `loopExecutionAnalytical(loopidx+1)`，
+    # 因此 child 每层被调用 3 次。总调用复杂度  O(3^len(tm))，对典型 baseline
+    # （len(tm) ≤ ~15）在秒级。
+    #
+    # 为什么需要 3 个显式 iter（而非 2 个）：
+    #   iter0 消化初始 transient；iter1 消化 child analytical 内部 max-absorb 的
+    #   次级 transient（child 对两次不同 entry 的 inner iter0 可能产生不同 delta，
+    #   它在 parent 眼中表现为 iter1 delta ≠ iter2 delta）。iter2 及以后 entry
+    #   pattern 稳定，child delta 固定，可做线性外推。
+    #
+    # bit-exact 前提（与 run() 逐字段一致）：
+    #   (a) pre-read 累加项（transfer_cycles / mode_switch / mismatch / memCost）
+    #       每迭代贡献恒定，直接线性 × (N-3)。
+    #   (b) `if i > 0` 分支（lines 297-312 in run()）从 iter1 起每轮执行一次；
+    #       它已包含在 iter1/iter2 body 内。
+    #   (c) flush（lines 339-355，仅 dflag[O]==1）在 N 次循环之后执行一次。
+    #   (d) timer 的 `max(t, t_nxt)` 递推从 iter2 起达到稳态 delta。
+    # 若某种特殊 mapping 破坏 (d)，会在 Verify_simulax_equivalence 上暴露为非 bit-exact
+    # — 当作 bug 修复而不是近似。能耗/memCost 因浮点累加顺序会有 ≤1e-12 相对误差，属
+    # 可接受的 FP 噪声而非语义偏差。
+    # ------------------------------------------------------------------
+
+    def loopExecutionAnalytical(self, loopidx:int):
+        uppmem = self.dataflow.uppermem
+        nxtmem = self.dataflow.nxtmem
+        xMem   = self.dataflow.xMem
+
+        if loopidx == len(self.dataflow.tm):
+            mac_mem = self.acc.Num_mem
+            data_input_rdy = max(self.timer[mac_mem, op] for op in range(3))
+            data_output_rdy = self.timer[mac_mem, 2]
+            for op in range(3):
+                self.timer[mac_mem, op] = max(data_input_rdy + self.acc.t_MAC, data_output_rdy)
+            for op in range(3):
+                if self.dataflow.usr_defined_double_flag[uppmem[mac_mem, op]][op] == 0:
+                    self.timer[uppmem[mac_mem, op], op] = self.timer[mac_mem, op]
+            self.count_mac += 1
+            return
+
+        mem_cur = [self.dataflow.tm[loopidx].mem[op] for op in range(3)]
+        mem_nxt = [nxtmem[mem_cur[op], op] for op in range(3)]
+
+        nxtSize = [self.dataSize[mem_nxt[op], op] if xMem[loopidx, op] == 1 else 0 for op in range(3)]
+        tileSize = [self.tileSize[mem_cur[op], op] if xMem[loopidx, op] == 1 else 0 for op in range(3)]
+
+        trans = [math.ceil(tileSize[op] * self._prec(mem_cur[op], op) / self.acc.bw[mem_cur[op]]) for op in range(3)]
+        for op in range(3):
+            if mem_cur[op] == self.lastMappingMem[op] and self.lastMemReg[op] is False:
+                trans[op] += 1
+        if mem_cur[1] == self.acc.Macro2mem:
+            trans[1] = 0
+        Cons = [(trans[op] if xMem[loopidx, op] == 1 else 0) for op in range(3)]
+
+        dflag = [self.dataflow.usr_defined_double_flag[mem_nxt[op]][op] for op in range(3)]
+
+        N = self.dataflow.tm[loopidx].dimSize
+        if N == 0:
+            return
+
+        # === iter 0 === （跳过 i>0 分支）
+        self._analytical_iter_body(
+            loopidx=loopidx, i_gt_0=False,
+            mem_cur=mem_cur, mem_nxt=mem_nxt,
+            tileSize=tileSize, nxtSize=nxtSize,
+            Cons=Cons, dflag=dflag,
+        )
+
+        if N == 1:
+            self._analytical_flush(
+                loopidx=loopidx,
+                mem_cur=mem_cur, mem_nxt=mem_nxt,
+                tileSize=tileSize, nxtSize=nxtSize,
+                Cons=Cons, dflag=dflag,
+            )
+            return
+
+        # iter 1 带 i>0 分支
+        self._analytical_iter_body(
+            loopidx=loopidx, i_gt_0=True,
+            mem_cur=mem_cur, mem_nxt=mem_nxt,
+            tileSize=tileSize, nxtSize=nxtSize,
+            Cons=Cons, dflag=dflag,
+        )
+
+        if N == 2:
+            self._analytical_flush(
+                loopidx=loopidx,
+                mem_cur=mem_cur, mem_nxt=mem_nxt,
+                tileSize=tileSize, nxtSize=nxtSize,
+                Cons=Cons, dflag=dflag,
+            )
+            return
+
+        # === iter 2 === snapshot 在前，取 iter2 delta 作为稳态（由 iter1 已收敛到稳定
+        # 的相对 gap；iter2 的 max-pattern 与 iter1 相同，作为线性外推基准）
+        snap_timer = dict(self.timer)
+        snap_mem_r = {m: self.memCost[m].r for m in self.memCost}
+        snap_mem_w = {m: self.memCost[m].w for m in self.memCost}
+        snap_mem_t = {m: self.memCost[m].t for m in self.memCost}
+        snap_tc = list(self.PD.transfer_cycles)
+        snap_ms = list(self.PD.mismatch_cycles)
+        snap_mode = list(self.PD.mode_switch_cycles)
+        snap_owb = self.PD.output_writeback_cycles
+        snap_cm = self.count_mac
+
+        self._analytical_iter_body(
+            loopidx=loopidx, i_gt_0=True,
+            mem_cur=mem_cur, mem_nxt=mem_nxt,
+            tileSize=tileSize, nxtSize=nxtSize,
+            Cons=Cons, dflag=dflag,
+        )
+
+        scale = N - 3
+        if scale > 0:
+            for k in snap_timer:
+                self.timer[k] += scale * (self.timer[k] - snap_timer[k])
+            for m in snap_mem_r:
+                self.memCost[m].r += scale * (self.memCost[m].r - snap_mem_r[m])
+                self.memCost[m].w += scale * (self.memCost[m].w - snap_mem_w[m])
+                self.memCost[m].t += scale * (self.memCost[m].t - snap_mem_t[m])
+            for op in range(3):
+                self.PD.transfer_cycles[op]    += scale * (self.PD.transfer_cycles[op]    - snap_tc[op])
+                self.PD.mismatch_cycles[op]    += scale * (self.PD.mismatch_cycles[op]    - snap_ms[op])
+                self.PD.mode_switch_cycles[op] += scale * (self.PD.mode_switch_cycles[op] - snap_mode[op])
+            self.PD.output_writeback_cycles += scale * (self.PD.output_writeback_cycles - snap_owb)
+            self.count_mac += scale * (self.count_mac - snap_cm)
+
+        self._analytical_flush(
+            loopidx=loopidx,
+            mem_cur=mem_cur, mem_nxt=mem_nxt,
+            tileSize=tileSize, nxtSize=nxtSize,
+            Cons=Cons, dflag=dflag,
+        )
+
+
+    def _analytical_iter_body(self, loopidx, i_gt_0, mem_cur, mem_nxt,
+                              tileSize, nxtSize, Cons, dflag):
+        # pre-read (与 loopExecution lines 267-290 对齐)
+        for op in range(3):
+            if dflag[op] == 1:
+                self.timer[mem_cur[op], op] = self.timer[mem_cur[op], op] + Cons[op]
+                stall = max(0, max(self.timer[mem_nxt[op], op], self.timer[mem_cur[op], op]) - self.timer[mem_nxt[op], op])
+                self.timer[mem_nxt[op], op] = max(self.timer[mem_nxt[op], op], self.timer[mem_cur[op], op])
+                self.PD.transfer_cycles[op] += Cons[op]
+                self.PD.mismatch_cycles[op] += stall
+            else:
+                self.timer[mem_cur[op], op] = max(self.timer[mem_cur[op], op], self.timer[mem_nxt[op], op]) + Cons[op]
+                self.timer[mem_nxt[op], op] = self.timer[mem_cur[op], op]
+                stall = Cons[op]
+                self.PD.transfer_cycles[op] += Cons[op]
+                self.PD.mode_switch_cycles[op] += Cons[op]
+            self.memCost[mem_cur[op]].t += stall
+
+            if mem_cur[op] == self.lastMappingMem[op] and self.lastMemReg[op] is False:
+                self.memCost[self.lastMappingMem[op]].r += self.acc.cost_r[self.lastMappingMem[op]] * tileSize[op] * self._prec(self.lastMappingMem[op], op)
+                self.memCost[self.acc.lastMem[op]].w += self.acc.cost_w[self.acc.lastMem[op]] * nxtSize[op] * self._prec(self.acc.lastMem[op], op)
+                self.memCost[self.acc.lastMem[op]].r += self.acc.cost_r[self.acc.lastMem[op]] * nxtSize[op] * self._prec(self.acc.lastMem[op], op)
+                self.memCost[mem_nxt[op]].w += self.acc.cost_w[mem_nxt[op]] * nxtSize[op] * self._prec(mem_nxt[op], op)
+            else:
+                self.memCost[mem_cur[op]].r += self.acc.cost_r[mem_cur[op]] * tileSize[op] * self._prec(mem_cur[op], op)
+                self.memCost[mem_nxt[op]].w += self.acc.cost_w[mem_nxt[op]] * nxtSize[op] * self._prec(mem_nxt[op], op)
+
+        # double-buffer O 的 pre-child write（仅 i > 0；lines 297-312）
+        op = 2
+        if i_gt_0 and Cons[op] > 0 and dflag[op] == 1:
+            self.timer[mem_cur[op], op] = max(self.timer[mem_cur[op], op], self.timer[mem_nxt[op], op]) + Cons[op]
+            self.PD.transfer_cycles[op] += Cons[op]
+            self.PD.output_writeback_cycles += Cons[op]
+
+            if mem_cur[op] == self.lastMappingMem[op] and self.lastMemReg[op] is False:
+                self.memCost[mem_nxt[op]].r += self.acc.cost_r[mem_nxt[op]] * nxtSize[op] * self._prec(mem_nxt[op], op)
+                self.memCost[self.acc.lastMem[op]].w += self.acc.cost_w[self.acc.lastMem[op]] * nxtSize[op] * self._prec(self.acc.lastMem[op], op)
+                self.memCost[self.acc.lastMem[op]].r += self.acc.cost_r[self.acc.lastMem[op]] * nxtSize[op] * self._prec(self.acc.lastMem[op], op)
+                self.memCost[mem_cur[op]].w += self.acc.cost_w[mem_cur[op]] * tileSize[op] * self._prec(mem_cur[op], op)
+            else:
+                self.memCost[mem_nxt[op]].r += self.acc.cost_r[mem_nxt[op]] * nxtSize[op] * self._prec(mem_nxt[op], op)
+                self.memCost[mem_cur[op]].w += self.acc.cost_w[mem_cur[op]] * tileSize[op] * self._prec(mem_cur[op], op)
+
+            self.memCost[mem_cur[op]].t += Cons[op]
+
+        # child 递归一次
+        self.loopExecutionAnalytical(loopidx=loopidx + 1)
+
+        # 单缓冲 O 的 post-child write（每 iter 都跑；lines 317-334）
+        op = 2
+        if dflag[op] != 1:
+            self.timer[mem_nxt[op], op] = max(self.timer[mem_cur[op], op], self.timer[mem_nxt[op], op]) + Cons[op]
+            self.timer[mem_cur[op], op] = self.timer[mem_nxt[op], op]
+            self.PD.transfer_cycles[op] += Cons[op]
+            self.PD.output_writeback_cycles += Cons[op]
+
+            if mem_cur[op] == self.lastMappingMem[op] and self.lastMemReg[op] is False:
+                self.memCost[mem_nxt[op]].r += self.acc.cost_r[mem_nxt[op]] * nxtSize[op] * self._prec(mem_nxt[op], op)
+                self.memCost[self.acc.lastMem[op]].w += self.acc.cost_w[self.acc.lastMem[op]] * nxtSize[op] * self._prec(self.acc.lastMem[op], op)
+                self.memCost[self.acc.lastMem[op]].r += self.acc.cost_r[self.acc.lastMem[op]] * nxtSize[op] * self._prec(self.acc.lastMem[op], op)
+                self.memCost[mem_cur[op]].w += self.acc.cost_w[mem_cur[op]] * tileSize[op] * self._prec(mem_cur[op], op)
+            else:
+                self.memCost[mem_nxt[op]].r += self.acc.cost_r[mem_nxt[op]] * nxtSize[op] * self._prec(mem_nxt[op], op)
+                self.memCost[mem_cur[op]].w += self.acc.cost_w[mem_cur[op]] * tileSize[op] * self._prec(mem_cur[op], op)
+
+            self.memCost[mem_cur[op]].t += Cons[op]
+
+
+    def _analytical_flush(self, loopidx, mem_cur, mem_nxt,
+                          tileSize, nxtSize, Cons, dflag):
+        # double-buffer O 末尾 flush（lines 339-355）
+        op = 2
+        N = self.dataflow.tm[loopidx].dimSize
+        if N > 0 and Cons[op] > 0 and dflag[op] == 1:
+            self.timer[mem_cur[op], op] = max(self.timer[mem_cur[op], op], self.timer[mem_nxt[op], op]) + Cons[op]
+            self.PD.transfer_cycles[op] += Cons[op]
+            self.PD.output_writeback_cycles += Cons[op]
+
+            if mem_cur[op] == self.lastMappingMem[op] and self.lastMemReg[op] is False:
+                self.memCost[mem_nxt[op]].r += self.acc.cost_r[mem_nxt[op]] * nxtSize[op] * self._prec(mem_nxt[op], op)
+                self.memCost[self.acc.lastMem[op]].w += self.acc.cost_w[self.acc.lastMem[op]] * nxtSize[op] * self._prec(self.acc.lastMem[op], op)
+                self.memCost[self.acc.lastMem[op]].r += self.acc.cost_r[self.acc.lastMem[op]] * nxtSize[op] * self._prec(self.acc.lastMem[op], op)
+                self.memCost[mem_cur[op]].w += self.acc.cost_w[mem_cur[op]] * tileSize[op] * self._prec(mem_cur[op], op)
+            else:
+                self.memCost[mem_nxt[op]].r += self.acc.cost_r[mem_nxt[op]] * nxtSize[op] * self._prec(mem_nxt[op], op)
+                self.memCost[mem_cur[op]].w += self.acc.cost_w[mem_cur[op]] * tileSize[op] * self._prec(mem_cur[op], op)
+
+            self.memCost[mem_cur[op]].t += Cons[op]
+
+
+    def run_analytical(self):
+        return self._run_impl(use_analytical=True)
+
+
     def run(self):
-        Logger.critical("Evaluation by running translation simulator") 
+        return self._run_impl(use_analytical=False)
+
+
+    def _run_impl(self, use_analytical: bool):
+        Logger.critical("Evaluation by running translation simulator"
+                        + (" [analytical]" if use_analytical else ""))
 
         self.firstMemDram = {}
         self.firstMappingMem = {}
@@ -378,7 +625,10 @@ class tranSimulator():
                 self.timer[self.firstMappingMem[op], op] += bootstrap_cycles
                 self.PD.bootstrap_cycles += bootstrap_cycles
 
-        self.loopExecution(0)
+        if use_analytical:
+            self.loopExecutionAnalytical(0)
+        else:
+            self.loopExecution(0)
 
         for op, op_name in enumerate(['I','W','O']):
             if op_name == 'O' and self.firstMemDram[op] is False:

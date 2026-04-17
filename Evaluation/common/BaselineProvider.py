@@ -337,7 +337,11 @@ def run_cosa_baseline(acc, ops, loopdim, model_name, architecture, objective):
     loops, legalization_meta = convert_CoSA_to_MIREDO(loops=loops, out=out, spec=spec)
     loops.usr_defined_double_flag[acc.Macro2mem][1] = acc.double_Macro
     simulator = tranSimulator(acc=copy.deepcopy(acc), ops=ops, dataflow=loops)
-    latency, energy = simulator.run()
+    # CoSA / CIMLoop baseline 会产出把大 trip count 堆进单层的 mapping（总 MAC 轻松
+    # 上 1e9 级），走 tile-walk run() 单层动辄数小时；用解析路径在秒级完成、和 run()
+    # 在 latency/MAC bit-exact（能耗仅浮点累加顺序 ≤1e-12 相对误差，目标由
+    # Verify_simulax_equivalence.py 断言）。
+    latency, energy = simulator.run_analytical()
 
     return BaselineRunResult(
         method="cosa",
@@ -453,7 +457,7 @@ def run_cosa_constrained_baseline(acc, ops, loopdim, model_name, architecture, o
     loops, legalization_meta = convert_CoSA_to_MIREDO(loops=loops, out=out, spec=spec)
     loops.usr_defined_double_flag[acc.Macro2mem][1] = acc.double_Macro
     simulator = tranSimulator(acc=copy.deepcopy(acc), ops=ops, dataflow=loops)
-    latency, energy = simulator.run()
+    latency, energy = simulator.run_analytical()
 
     return BaselineRunResult(
         method="cosa-constrained",
@@ -517,7 +521,7 @@ def run_cimloop_baseline(acc, ops, loopdim, model_name, architecture, objective)
     )
     loops.usr_defined_double_flag[acc.Macro2mem][1] = acc.double_Macro
     simulator = tranSimulator(acc=copy.deepcopy(acc), ops=ops, dataflow=loops)
-    latency, energy = simulator.run()
+    latency, energy = simulator.run_analytical()
 
     energy_sources = _parse_art_summary_estimators(getattr(out, "art_summary_path", None))
 
