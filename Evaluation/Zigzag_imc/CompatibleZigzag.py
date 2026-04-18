@@ -447,6 +447,41 @@ def convert_ZZMP_to_loopMP(
     return mappingList
 
 
+def _find_preprogress_orphans(tm: List[Mapping]) -> List[Tuple[int, int, int]]:
+    # preprogress() requires: for each op, every tm[i].mem[op] either equals
+    # tm[-1].mem[op] or has some j>i with tm[j].mem[op] > tm[i].mem[op]. Entries
+    # that satisfy neither are "orphans" and trigger KeyError in nxtmem lookup.
+    orphans: List[Tuple[int, int, int]] = []
+    if not tm:
+        return orphans
+    n = len(tm)
+    for op in range(3):
+        tail = tm[-1].mem[op]
+        for i in range(n - 1):
+            M = tm[i].mem[op]
+            if M == tail:
+                continue
+            if not any(tm[j].mem[op] > M for j in range(i + 1, n)):
+                orphans.append((i, op, M))
+    return orphans
+
+
+def _enforce_tm_preprogress_invariant(tm: List[Mapping], *, source_tag: str) -> None:
+    # convert_ZZMP_to_loopMP groups tups by per-operand kept-level index, so
+    # when operands have different kept chains the emitted tm can break the
+    # per-op next-greater invariant that preprogress() relies on. Stable sort
+    # by max(m.mem) restores outer→inner order on the dominant physical level
+    # and is a no-op on already-monotone tm (e.g. MIREDO's own MIP output).
+    tm.sort(key=lambda m: max(m.mem))
+    orphans = _find_preprogress_orphans(tm)
+    if orphans:
+        head = ", ".join(f"(i={i}, op={op}, level={M})" for i, op, M in orphans[:4])
+        Logger.warning(
+            f"{source_tag}: {len(orphans)} tm orphan level(s) remain after "
+            f"monotonicity pass [{head}]; preprogress safety-net will engage."
+        )
+
+
 def fix_all_memHierarchy(acc:CIM_Acc, tm:list[Mapping]):
     tm_first = tm[0]
     tm_last = tm[-1]
@@ -574,6 +609,7 @@ def convert_baseMapping_to_MIREDO(loops: LoopNest, baseMapping: ClassMapping):
         mappingArray=loops.acc.mappingArray,
         mappingList=loops.tm,
     )
+    _enforce_tm_preprogress_invariant(loops.tm, source_tag=baseMapping.source)
 
     loops.sm = convert_ZZMP_to_loopMP(
         mapping_dict=spatial_aligned,

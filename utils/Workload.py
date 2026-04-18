@@ -184,6 +184,17 @@ class LoopNest():
                         nxtmem[tm[i].mem[op],op] = tm[j].mem[op]
                         break
             nxtmem[tm[-1].mem[op],op] = self.acc.Num_mem
+        # Safety net: orphan levels (used but lack a strict greater successor
+        # and not equal to tm[-1].mem[op]) get promoted to DRAM-equivalent.
+        # MIREDO's own mappings never trigger this; adapter-produced tm may.
+        for op, op_name in enumerate(['I','W','O']):
+            for mem in range(self.acc.Num_mem+1):
+                if bypassMem[mem][op] == 0 and (mem, op) not in nxtmem:
+                    Logger.warning(
+                        f"preprogress: orphan tm level mem={mem} op={op_name}; "
+                        f"defaulting nxtmem to Num_mem={self.acc.Num_mem}"
+                    )
+                    nxtmem[mem, op] = self.acc.Num_mem
         for op, op_name in enumerate(['I','W','O']):
             for mem in range(self.acc.Num_mem+1):
                 if bypassMem[mem][op] == 0:

@@ -305,7 +305,11 @@ def loopdim_fingerprint(loopdim: Dict[str, int]) -> str:
         "R", "S", "P", "Q", "C", "K", "G",
         "H", "W", "Stride", "Padding", "Dilation", "B",
     )
-    canon = {k: int(loopdim.get(k, 1)) for k in canon_keys}
+    # ONNX dynamic-batch inputs carry B=None in loopdim; treat None as 1 but
+    # keep numeric 0 intact so Padding=0 layers don't collide with Padding=1.
+    def _coerce(v):
+        return 1 if v is None else int(v)
+    canon = {k: _coerce(loopdim.get(k)) for k in canon_keys}
     raw = json.dumps(canon, sort_keys=True)
     return hashlib.sha256(raw.encode()).hexdigest()[:12]
 
