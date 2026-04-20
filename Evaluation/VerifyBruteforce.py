@@ -329,7 +329,7 @@ def run_verify(acc, ops, scheme, mip_timelimit=120, log_fn=log):
 
     spatial = [math.prod(col) for col in zip(*scheme)]
     tu = [math.ceil(x / y) for x, y in zip(ops.dim2bound, spatial)]
-    mip_dir = os.path.join("output", "#BF_mip_compare")
+    mip_dir = os.path.join(os.path.dirname(__file__), '..', 'output', "#BF_mip_compare")
     prepare_save_dir(mip_dir)
 
     solver = Solver(acc=CIM_Acc.from_spec(default_spec()), ops=ops, tu=tu, su=scheme,

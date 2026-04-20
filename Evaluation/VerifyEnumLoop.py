@@ -127,7 +127,7 @@ def run_enumeration(spec, ops_dict, scheme, timelimit=15, max_workers=None):
     if max_workers is None:
         max_workers = max(1, mp.cpu_count() - 2)
 
-    out_dir = os.path.join("output", "#EnumVerify_temp")
+    out_dir = os.path.join(os.path.dirname(__file__), '..', 'output', "#EnumVerify_temp")
     prepare_save_dir(out_dir)
 
     args_list = [(i, o, spec, ops_dict, scheme, out_dir, timelimit)
