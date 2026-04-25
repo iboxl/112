@@ -31,6 +31,19 @@ DEFAULT_MODELS = [
     "EfficientNet-B0",
 ]
 
+# Transformer/attention-class models — parsed with allow_matmul=True so
+# MatMul/Gemm nodes become workload layers. CNN models stay on the legacy
+# Conv-only path (FC classifier excluded per paper policy).
+TRANSFORMER_MODELS = {
+    "vit_b_16",
+    "bert_base",
+}
+
+
+def model_allows_matmul(model_name: str) -> bool:
+    """Whether iter_model_layers should emit MatMul/Gemm layers for this model."""
+    return model_name in TRANSFORMER_MODELS
+
 
 def repo_root():
     return pathlib.Path(__file__).resolve().parent.parent.parent
@@ -140,7 +153,7 @@ def save_experiment_json(output_dir, file_name, experiment_id, script_path, conf
     return json_path
 
 
-_ACC_CACHE_VERSION = 2  # bumped: default spec leakage 14nm→28nm; old caches must miss
+_ACC_CACHE_VERSION = 3  # bumped: 20260420 clean-slate rerun; old caches must miss
 _acc_cache = None
 _acc_cache_path = None
 
@@ -172,6 +185,7 @@ def _save_acc_cache():
 
 _ARCHITECTURE_SPEC_BUILDERS = {
     "CIM_ACC_TEMPLATE": "Architecture.templates.default",
+    "CIM_ACC_TEMPLATE_TRANSFORMER": "Architecture.templates.transformer",
 }
 
 
@@ -213,7 +227,7 @@ def hardware_spec_from_acc(acc):
             "shared": acc.shareMemory[mem],
             "operands": [op for op, enabled in zip(["I", "W", "O"], [acc.mappingArray[t][mem] for t in range(3)]) if enabled],
         })
-    return {
+    spec_dict = {
         "num_core": acc.Num_core,
         "dimX": acc.dimX,
         "dimY": acc.dimY,
@@ -225,6 +239,12 @@ def hardware_spec_from_acc(acc):
         "leakage_per_cycle": acc.leakage_per_cycle,
         "memories": memories,
     }
+    src = getattr(acc, "source_spec", None)
+    if src is not None:
+        depth = getattr(src.macro, "compartment_depth", None)
+        if depth is not None:
+            spec_dict["compartment_depth"] = int(depth)
+    return spec_dict
 
 
 def classify_layer_type(loopdim):
@@ -243,7 +263,8 @@ def classify_layer_family(loopdim):
 
 def iter_model_layers(model_name):
     model_path = repo_root() / "model" / f"{model_name}.onnx"
-    convs, loopdims = extract_loopdims(str(model_path))
+    allow_matmul = model_allows_matmul(model_name)
+    convs, loopdims = extract_loopdims(str(model_path), allow_matmul=allow_matmul)
     layers = []
     for layer_name, loopdim in zip(convs, loopdims):
         layers.append({
@@ -302,7 +323,7 @@ def temporary_runtime_config(objective="Latency", time_limit=120, mip_focus=1,
 
 import hashlib
 
-_CACHE_VERSION = 2
+_CACHE_VERSION = 3  # bumped: 20260420 clean-slate rerun; old caches must miss
 _mip_cache = None
 _cache_path = None
 

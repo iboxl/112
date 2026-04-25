@@ -17,10 +17,11 @@ from Architecture.HardwareSpec import HardwareSpec
 _DEFAULT_SPEC_DICT = {
     "cores": 8,
     "cycle_time_ns": None,
-    "leakage_per_cycle_nJ": 0.09727659381011521,
+    "leakage_per_cycle_nJ": 0.09727659377110834,
     "macro": {
         "dimX": 32,
         "dimY": 16,
+        "compartment_depth": 8,
         "input_bit_per_cycle": 1,
         "precision": {"I": 8, "W": 8, "psum": 16, "O_final": 8},
         "logic_energies_pJ": {

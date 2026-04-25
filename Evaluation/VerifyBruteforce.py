@@ -291,10 +291,24 @@ CASES = {
         'ops': {'R':3,'S':3,'C':256,'K':256,'P':7,'Q':7,'G':1,'B':1,'H':7,'W':7,'Stride':1,'Padding':1},
         'scheme': [[1,1,1,1,1,1,8,1],[1,1,1,1,1,32,1,1],[1,1,1,1,1,1,16,1]],
     },
+    # QK^T tile (seq=d_head=32, heads=2) for HW-Transformer. Matmul enters the
+    # solver as a degenerate conv (R=S=Q=1); scheme respects HW-Transformer's
+    # allowed_loops (cores∈{P,Q,K,G}, dimX∈{R,S,C}, dimY∈{K}), which is why K
+    # goes on dimY and C on dimX rather than the other way around.
+    'attention_tiny': {
+        'ops': {'R':1,'S':1,'C':32,'K':32,'P':32,'Q':1,'G':2,'B':1,'H':32,'W':1,'Stride':1,'Padding':0},
+        'scheme': [[1,1,1,8,1,1,1,2],[1,1,1,1,1,32,1,1],[1,1,1,1,1,1,16,1]],
+    },
 }
 
 
-def run_verify(acc, ops, scheme, mip_timelimit=120, log_fn=log):
+def run_verify(acc, ops, scheme, mip_timelimit=120, log_fn=log, arch_spec=None):
+    """
+    arch_spec: 可选的 HardwareSpec 实例；若为 None 则回退 Architecture.templates.default.default_spec()。
+    用于支持 HW-Transformer 等非默认架构下的 bruteforce 对比。
+    """
+    if arch_spec is None:
+        arch_spec = default_spec()
     """完整的穷举验证流程：穷举搜索 + MIP对比。
     可被外部脚本直接调用以验证任意(acc, ops, scheme)组合。"""
 
@@ -332,7 +346,7 @@ def run_verify(acc, ops, scheme, mip_timelimit=120, log_fn=log):
     mip_dir = os.path.join(os.path.dirname(__file__), '..', 'output', "#BF_mip_compare")
     prepare_save_dir(mip_dir)
 
-    solver = Solver(acc=CIM_Acc.from_spec(default_spec()), ops=ops, tu=tu, su=scheme,
+    solver = Solver(acc=CIM_Acc.from_spec(arch_spec), ops=ops, tu=tu, su=scheme,
                     metric_ub=CONST.MAX_POS, outputdir=mip_dir)
     solver.run()
 
@@ -343,7 +357,7 @@ def run_verify(acc, ops, scheme, mip_timelimit=120, log_fn=log):
         except Exception:
             gap = -1
         logging.disable(logging.CRITICAL)
-        simu = tranSimulator(acc=CIM_Acc.from_spec(default_spec()), ops=ops, dataflow=solver.dataflow)
+        simu = tranSimulator(acc=CIM_Acc.from_spec(arch_spec), ops=ops, dataflow=solver.dataflow)
         mip_simu_lat, _ = simu.run()
 
         log_fn(f"\nMIP对比:")
@@ -436,14 +450,20 @@ if __name__ == "__main__":
     parser.add_argument('--case', default='1x1_C64K64', choices=list(CASES.keys()),
                         help=f"预定义测试用例 (可选: {', '.join(CASES.keys())})")
     parser.add_argument('--timelimit', type=int, default=120, help="MIP求解时间限制(秒)")
-    parser.add_argument('--arch', default='CIM_ACC_TEMPLATE', help="架构模块名(当前仅支持 CIM_ACC_TEMPLATE 默认 Spec)")
+    parser.add_argument('--arch', default='CIM_ACC_TEMPLATE',
+                        help="架构注册名：CIM_ACC_TEMPLATE（默认 HW-Small）或 CIM_ACC_TEMPLATE_TRANSFORMER（HW-Transformer）")
     args = parser.parse_args()
 
-    if args.arch != 'CIM_ACC_TEMPLATE':
+    # 通过架构注册表解析 spec；未注册则抛出明确错误
+    from importlib import import_module
+    from Evaluation.common.EvalCommon import _ARCHITECTURE_SPEC_BUILDERS
+    arch_module_path = _ARCHITECTURE_SPEC_BUILDERS.get(args.arch)
+    if arch_module_path is None:
         raise NotImplementedError(
-            f"VerifyBruteforce 目前仅对接 Architecture.templates.default.default_spec()；"
-            f"收到 arch={args.arch}。需要扩展 _ARCHITECTURE_SPEC_BUILDERS 注册表。"
+            f"Architecture {args.arch!r} 未在 _ARCHITECTURE_SPEC_BUILDERS 注册。"
+            f"已注册: {list(_ARCHITECTURE_SPEC_BUILDERS.keys())}"
         )
+    _arch_spec = import_module(arch_module_path).default_spec()
 
     Logger.setcfg(setcritical=False, setDebug=False, STD=False, file="", nofile=True)
     import logging
@@ -454,14 +474,15 @@ if __name__ == "__main__":
         f.write("")
 
     log("=" * 60)
-    log(f"绝对最优数据流穷举搜索（含双缓冲）- Case: {args.case}")
+    log(f"绝对最优数据流穷举搜索（含双缓冲）- Case: {args.case} on {args.arch}")
     log("=" * 60)
 
     case = CASES[args.case]
     ops = WorkLoad(loopDim=case['ops'])
-    acc = CIM_Acc.from_spec(default_spec())
+    acc = CIM_Acc.from_spec(_arch_spec)
+    _verify_arch_spec = _arch_spec  # used below in the run_verify call
 
     log(f"\n负载: {ops}")
     log(f"PE阵列: {acc.Num_core} cores × {acc.dimX}(BL) × {acc.dimY}(WL)")
 
-    run_verify(acc, ops, case['scheme'], mip_timelimit=args.timelimit)
+    run_verify(acc, ops, case['scheme'], mip_timelimit=args.timelimit, arch_spec=_arch_spec)

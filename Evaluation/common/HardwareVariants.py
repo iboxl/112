@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-import copy
-import math
 from dataclasses import replace
 from typing import List
 
@@ -99,26 +97,30 @@ def _on_chip_buffer_names(spec: HardwareSpec) -> List[str]:
     return ["Global_buffer", "Output_buffer", "Input_buffer"]
 
 
-def scale_core_count(spec: HardwareSpec, factor: float) -> HardwareSpec:
-    new_cores = max(1, int(round(spec.cores * factor)))
-    # 更新 cores 轴的 size
+def set_core_count(spec: HardwareSpec, count: int) -> HardwareSpec:
+    count = max(1, int(count))
     new_axes = []
     for a in spec.macro.spatial_axes:
         if a.name == "cores":
-            new_axes.append(replace(a, size=new_cores))
+            new_axes.append(replace(a, size=count))
         else:
             new_axes.append(a)
     new_macro = replace(spec.macro, spatial_axes=new_axes)
-    new_spec = replace(spec, cores=new_cores, macro=new_macro)
+    new_spec = replace(spec, cores=count, macro=new_macro)
     new_spec = replace(new_spec, leakage_per_cycle_nJ=_leakage_per_cycle_nJ(new_spec))
     return new_spec
 
 
-def scale_buffer_capacity(spec: HardwareSpec, factor: float) -> HardwareSpec:
+def set_gbuf_capacity_kb(spec: HardwareSpec, gbuf_kb: int) -> HardwareSpec:
+    gbuf_kb = max(1, int(gbuf_kb))
+    target_gbuf_bits = gbuf_kb * 8 * 1024
+    old_gbuf = spec.memory_by_name("Global_buffer")
+    factor = target_gbuf_bits / max(1, old_gbuf.size_bits)
+
     new_spec = spec
     for name in _on_chip_buffer_names(spec):
         old = new_spec.memory_by_name(name)
-        new_size = max(8, int(math.ceil(old.size_bits * factor)))
+        new_size = max(8, int(round(old.size_bits * factor)))
         new_spec = _replace_memory_level(new_spec, name, size_bits=new_size)
         updated_level = _recompute_memory_cost_pJ(new_spec, name)
         new_spec = _replace_memory_level(
@@ -130,13 +132,13 @@ def scale_buffer_capacity(spec: HardwareSpec, factor: float) -> HardwareSpec:
     return new_spec
 
 
-def scale_global_buffer_bandwidth(spec: HardwareSpec, factor: float) -> HardwareSpec:
+def set_gbuf_bandwidth(spec: HardwareSpec, bw_bits_per_cycle: int) -> HardwareSpec:
+    bw = max(8, int(bw_bits_per_cycle))
     old = spec.memory_by_name("Global_buffer")
-    new_bw = max(8, int(math.ceil(old.r_bw_bits_per_cycle * factor)))
     new_spec = _replace_memory_level(
         spec, "Global_buffer",
-        r_bw_bits_per_cycle=new_bw,
-        w_bw_bits_per_cycle=new_bw,
+        r_bw_bits_per_cycle=bw,
+        w_bw_bits_per_cycle=bw,
     )
     updated = _recompute_memory_cost_pJ(new_spec, "Global_buffer")
     new_spec = _replace_memory_level(
@@ -148,28 +150,44 @@ def scale_global_buffer_bandwidth(spec: HardwareSpec, factor: float) -> Hardware
     return new_spec
 
 
-def scale_macro_input_precision(spec: HardwareSpec, input_bits: int) -> HardwareSpec:
-    input_bits = int(input_bits)
+def set_compartment_depth(spec: HardwareSpec, depth: int) -> HardwareSpec:
+    depth = int(depth)
+    if depth < 1:
+        raise ValueError(f"compartment_depth ({depth}) must be >= 1.")
     W = spec.macro.precision.W
-    new_precision = replace(
-        spec.macro.precision,
-        I=input_bits,
-        psum=input_bits + W,
-        O_final=input_bits,
-    )
-    new_macro = replace(spec.macro, precision=new_precision)
+    new_macro_bits = depth * W
+    old_macro = spec.memory_by_name("Macro")
+    old_depth = max(1, spec.macro.compartment_depth)
+
+    new_macro = replace(spec.macro, compartment_depth=depth)
     new_spec = replace(spec, macro=new_macro)
+    new_spec = _replace_memory_level(new_spec, "Macro", size_bits=new_macro_bits)
+
+    scale = depth / old_depth
+    new_w_cost = old_macro.w_cost_per_bit_pJ * scale
+    new_spec = _replace_memory_level(
+        new_spec, "Macro",
+        w_cost_per_bit_pJ=new_w_cost,
+    )
+
     new_spec = replace(new_spec, leakage_per_cycle_nJ=_leakage_per_cycle_nJ(new_spec))
     return new_spec
 
 
 def build_hardware_variant(spec: HardwareSpec, parameter: str, value) -> HardwareSpec:
     if parameter == "core_count":
-        return scale_core_count(spec, value)
+        return set_core_count(spec, int(value))
     if parameter == "buffer_capacity":
-        return scale_buffer_capacity(spec, value)
+        return set_gbuf_capacity_kb(spec, int(value))
     if parameter == "gbuf_core_bw":
-        return scale_global_buffer_bandwidth(spec, value)
-    if parameter == "macro_input_precision":
-        return scale_macro_input_precision(spec, int(value))
+        return set_gbuf_bandwidth(spec, int(value))
+    if parameter == "compartment_depth":
+        return set_compartment_depth(spec, int(value))
     raise ValueError(f"Unsupported sensitivity parameter: {parameter}")
+
+DEFAULT_SWEEPS = {
+    "core_count": [4, 8, 16, 32],
+    "buffer_capacity": [64, 128, 256, 512],
+    "gbuf_core_bw": [64, 128, 256, 512],
+    "compartment_depth": [1, 2, 4, 8, 16],
+}

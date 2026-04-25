@@ -80,6 +80,7 @@ class MacroSpec:
     logic_energies_pJ: LogicEnergies
     tech_params: TechParams
     spatial_axes: List[SpatialAxisSpec]
+    compartment_depth: int = 8
 
     @classmethod
     def from_dict(cls, d: dict) -> "MacroSpec":
@@ -91,6 +92,7 @@ class MacroSpec:
             logic_energies_pJ=LogicEnergies.from_dict(d["logic_energies_pJ"]),
             tech_params=TechParams.from_dict(d["tech_params"]),
             spatial_axes=[SpatialAxisSpec.from_dict(a) for a in d["spatial_axes"]],
+            compartment_depth=d.get("compartment_depth", 8),
         )
 
 

@@ -10,9 +10,7 @@ from Evaluation.common.BaselineProvider import (
     run_baseline,
 )
 from Evaluation.common.EvalCommon import (
-    DEFAULT_MODELS,
     hardware_spec_from_acc,
-    iter_model_layers,
     make_accelerator,
     make_output_dir,
     run_miredo_layer,
@@ -20,6 +18,7 @@ from Evaluation.common.EvalCommon import (
     setup_experiment_logger,
 )
 from Evaluation.common.ProfileAnalysis import summarize_dataflow_decisions
+from Evaluation.common.CaseLayerShapes import layer_selection_config, select_model_layers
 from utils.UtilsFunction.ToolFunction import prepare_save_dir
 from utils.Workload import WorkLoad
 
@@ -34,6 +33,8 @@ def main():
     parser.add_argument("--mipFocus", type=int, default=1)
     parser.add_argument("--representativeLayers", type=int, default=3)
     parser.add_argument("--maxLayers", type=int, default=None)
+    parser.add_argument("--layers", nargs="+", default=None,
+                        help="Optional layer subset: exact names/aliases, 1-based positions, idx:N, or model:<selector>.")
     parser.add_argument("-o", "--outputdir", dest="output_dir", default=None)
     args = parser.parse_args()
 
@@ -45,9 +46,9 @@ def main():
     anomalies = []
 
     for model_name in args.models:
-        model_layers = iter_model_layers(model_name)
-        if args.maxLayers is not None:
-            model_layers = model_layers[:args.maxLayers]
+        model_layers = select_model_layers(
+            model_name, layer_selectors=args.layers, max_layers=args.maxLayers,
+        )
 
         decision_by_layer = {}
         latency_ranking = []
@@ -144,6 +145,9 @@ def main():
             "time_limit": args.timeLimit,
             "objective": args.objectives,
             "baselines_evaluated": args.baselines,
+            "layer_selection": layer_selection_config(
+                layer_selectors=args.layers, max_layers=args.maxLayers,
+            ),
         },
         results={
             "tradeoff_points": tradeoff_points,

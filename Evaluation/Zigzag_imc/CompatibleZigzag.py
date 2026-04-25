@@ -358,10 +358,10 @@ def convert_ZZMP_to_loopMP(
     # ---------------- 0. 参数 / 默认 -----------------
     if dim_code is None:
         dim_code = {
-            "FX": 1,
-            "FY": 2,
-            "OX": 3,
-            "OY": 4,
+            "FX": 2,
+            "FY": 1,
+            "OX": 4,
+            "OY": 3,
             "R": 1,
             "S": 2,
             "P": 3,
@@ -556,10 +556,10 @@ def baseMapping_from_zigzag_cme(cme) -> ClassMapping:
     return ClassMapping(
         source="zigzag",
         loop_dim={
-            "R": cme_dim["FX"],
-            "S": cme_dim["FY"],
-            "P": cme_dim["OX"],
-            "Q": cme_dim["OY"],
+            "R": cme_dim["FY"],
+            "S": cme_dim["FX"],
+            "P": cme_dim["OY"],
+            "Q": cme_dim["OX"],
             "C": cme_dim["C"],
             "K": cme_dim["K"],
             "G": cme_dim["G"],
@@ -668,14 +668,14 @@ def compare_ops_cme(loopDim, cme):
     if len(cme_dim) < 6:
         return False
     return (
-        loopDim['R'] == cme_dim['FX'] and
-        loopDim['S'] == cme_dim['FY'] and
-        loopDim['P'] == cme_dim['OX'] and
-        loopDim['Q'] == cme_dim['OY'] and
+        loopDim['R'] == cme_dim['FY'] and
+        loopDim['S'] == cme_dim['FX'] and
+        loopDim['P'] == cme_dim['OY'] and
+        loopDim['Q'] == cme_dim['OX'] and
         loopDim['C'] == cme_dim['C']  and
         loopDim['K'] == cme_dim['K']  and
         loopDim['G'] == cme_dim['G']
-    ) 
+    )
 
 def get_dim_from_cme(cme):
     # Not Use

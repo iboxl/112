@@ -783,3 +783,79 @@ def run_cimloop_mapper_for_layer(
         runtime_s=runtime_s,
         art_summary_path=art_summary if art_summary.is_file() else None,
     )
+
+from typing import Optional as _Optional
+
+
+def supports_loopdim(loopdim: Dict[str, int]) -> _Optional[str]:
+    return None
+
+
+def run_for_layer(acc, ops, loopdim, model_name, architecture, objective):
+    import copy as _copy
+    from Simulator.Simulax import tranSimulator
+    from utils.Workload import LoopNest
+    from Evaluation.CIMLoop.CompatibleCIMLoop import convert_CIMLoop_to_MIREDO
+    from Evaluation.common.BaselineProvider import (
+        BaselineRunResult,
+        _resolve_default_spec,
+        _spec_fingerprint,
+        _load_cimloop_outputs,
+        _save_cimloop_index,
+        _parse_art_summary_estimators,
+    )
+
+    spec = getattr(acc, "source_spec", None)
+    if spec is None:
+        spec = _resolve_default_spec(architecture)
+
+    outputs, cache_root, index_path = _load_cimloop_outputs(
+        model_name=model_name,
+        architecture=architecture,
+        objective=objective,
+        spec=spec,
+    )
+    layer_fp = loopdim_fingerprint(loopdim)
+
+    if layer_fp not in outputs:
+        if spec is None:
+            raise RuntimeError(
+                f"cimloop_adapter.run_for_layer: no HardwareSpec resolved for "
+                f"architecture={architecture!r}; CIMLoop requires registered default_spec()"
+            )
+        work_dir = cache_root / "per_layer" / layer_fp
+        outputs[layer_fp] = run_cimloop_mapper_for_layer(
+            spec=spec, loopdim=loopdim, objective=objective, work_dir=work_dir,
+        )
+        _save_cimloop_index(index_path, outputs)
+
+    out = outputs[layer_fp]
+    loops = LoopNest(acc=acc, ops=ops)
+    loops, legalization_meta = convert_CIMLoop_to_MIREDO(
+        loops=loops, out=out, spec=spec, loopdim=loopdim,
+    )
+    loops.usr_defined_double_flag[acc.Macro2mem][1] = acc.double_Macro
+    simulator = tranSimulator(acc=_copy.deepcopy(acc), ops=ops, dataflow=loops)
+    latency, energy = simulator.run_analytical()
+
+    energy_sources = _parse_art_summary_estimators(getattr(out, "art_summary_path", None))
+
+    return BaselineRunResult(
+        method="cimloop",
+        objective=objective,
+        latency=latency,
+        energy=energy,
+        profile=simulator.PD,
+        dataflow=loops,
+        metadata={
+            "policy": "cimloop_mapper",
+            "model": model_name,
+            "architecture": architecture,
+            "spec_fingerprint": _spec_fingerprint(spec) if spec is not None else "legacy",
+            "optimization_metric": list(out.optimization_metric),
+            "mapper_runtime_s": out.runtime_s,
+            "energy_sources": energy_sources,
+            "capacity_demoted_count": legalization_meta.get("capacity_demoted_count", 0),
+            "capacity_demoted": legalization_meta.get("capacity_demoted", []),
+        },
+    )

@@ -104,6 +104,17 @@ class CIM_Acc():
         self.Dram2mem  = 1
         self.Global2mem = self._mem2dict.index("Global_buffer")
 
+        depth = spec.macro.compartment_depth
+        if depth < 1:
+            raise ValueError(f"compartment_depth ({depth}) must be >= 1.")
+        expected_macro_bits = depth * W
+        if self.memSize[self.Macro2mem] != expected_macro_bits:
+            raise ValueError(
+                f"Macro memory level size_bits ({self.memSize[self.Macro2mem]}) "
+                f"!= compartment_depth * W ({depth} * {W} = {expected_macro_bits}). "
+                f"These must be consistent; update default.py / spec dict."
+            )
+
         self.lastMem = {0: self.IReg2mem, 1: self.Macro2mem, 2: self.OReg2mem}
 
         self.double_Macro = 0

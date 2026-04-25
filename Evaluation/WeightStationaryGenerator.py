@@ -11,6 +11,9 @@ from utils.Workload import LoopNest, Mapping, WorkLoad
 from utils.factorization import flexible_factorization
 
 
+# Matmul/Gemm/attention 工作负载以退化卷积形式进入（R=S=1, Q=1），下列 priority 列表
+# 对此自动兼容：R/S/Q 维在 divisor 搜索中取 1，被优先级循环 trivially 跳过，C/K/G/P
+# 按卷积语义继续驱动分配。无需分支。
 DEFAULT_WS_TEMPORAL_ORDER = ("G", "K", "C", "R", "S", "P", "Q")
 DEFAULT_WS_AXIS0_PRIORITY = ("K", "G", "P", "Q")
 DEFAULT_WS_AXIS1_PRIORITY = ("C", "R", "S")
@@ -301,4 +304,27 @@ def generate_weight_stationary_baseline(acc: CIM_Acc, ops: WorkLoad, quiet=True,
         profile=pd,
         scheme=scheme,
         policy=policy,
+    )
+
+from typing import Optional as _Optional, Dict as _Dict
+import copy as _copy
+
+
+def supports_loopdim(loopdim: _Dict[str, int]) -> _Optional[str]:
+    return None
+
+
+def run_for_layer(acc, ops, loopdim, model_name, architecture, objective):
+    from Evaluation.common.BaselineProvider import BaselineRunResult
+    result = generate_weight_stationary_baseline(acc=_copy.deepcopy(acc), ops=ops)
+    return BaselineRunResult(
+        method="ws",
+        objective=objective,
+        latency=result.latency,
+        energy=result.energy,
+        profile=result.profile,
+        dataflow=result.dataflow,
+        metadata={
+            "policy": result.policy,
+        },
     )

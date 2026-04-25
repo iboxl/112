@@ -9,7 +9,6 @@ from Evaluation.common.EvalCommon import (
     DEFAULT_MODELS,
     classify_layer_family,
     hardware_spec_from_acc,
-    iter_model_layers,
     make_accelerator,
     make_output_dir,
     run_miredo_layer,
@@ -17,6 +16,7 @@ from Evaluation.common.EvalCommon import (
     setup_experiment_logger,
 )
 from Evaluation.common.ProfileAnalysis import dominant_stall_type
+from Evaluation.common.CaseLayerShapes import layer_selection_config, select_model_layers
 from utils.UtilsFunction.ToolFunction import prepare_save_dir
 
 
@@ -34,6 +34,8 @@ def main():
     parser.add_argument("--timeLimit", type=int, default=120)
     parser.add_argument("--mipFocus", type=int, default=1)
     parser.add_argument("--maxLayers", type=int, default=None)
+    parser.add_argument("--layers", nargs="+", default=None,
+                        help="Optional layer subset: exact names/aliases, 1-based positions, idx:N, or model:<selector>.")
     parser.add_argument("-o", "--outputdir", dest="output_dir", default=None)
     args = parser.parse_args()
 
@@ -44,9 +46,9 @@ def main():
     anomalies = []
 
     for model_name in args.models:
-        layers = iter_model_layers(model_name)
-        if args.maxLayers is not None:
-            layers = layers[:args.maxLayers]
+        layers = select_model_layers(
+            model_name, layer_selectors=args.layers, max_layers=args.maxLayers,
+        )
 
         for layer in layers:
             layer_dir = output_dir / model_name / layer["layer"]
@@ -153,6 +155,9 @@ def main():
             "objective": "Latency",
             "time_limit": args.timeLimit,
             "mip_focus": args.mipFocus,
+            "layer_selection": layer_selection_config(
+                layer_selectors=args.layers, max_layers=args.maxLayers,
+            ),
         },
         results={
             "per_layer": per_layer,

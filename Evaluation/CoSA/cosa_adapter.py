@@ -413,6 +413,85 @@ def run_cosa_mapper_for_layer(
         runtime_s=runtime_s,
     )
 
+from typing import Optional as _Optional
+
+
+def supports_loopdim(loopdim: Dict[str, int]) -> _Optional[str]:
+    if (int(loopdim.get('R', 1)) == 1 and
+        int(loopdim.get('S', 1)) == 1 and
+        int(loopdim.get('Q', 1)) == 1):
+        return ("CoSA cnn-layer problem shape is conv-only; "
+                "matmul/Gemm (R=S=1, Q=1) not supported")
+    g = int(loopdim.get('G', 1) or 1)
+    if g > 1:
+        return f"CoSA cnn-layer has no G dimension (G={g} > 1)"
+    return None
+
+
+def run_for_layer(acc, ops, loopdim, model_name, architecture, objective):
+    import copy as _copy
+    from Simulator.Simulax import tranSimulator
+    from utils.Workload import LoopNest
+    from Evaluation.CoSA.CompatibleCoSA import convert_CoSA_to_MIREDO
+    from Evaluation.common.BaselineProvider import (
+        BaselineRunResult,
+        _resolve_default_spec,
+        _spec_fingerprint,
+        _load_cosa_outputs,
+        _save_cosa_index,
+    )
+
+    spec = getattr(acc, "source_spec", None)
+    if spec is None:
+        spec = _resolve_default_spec(architecture)
+
+    outputs, cache_root, index_path = _load_cosa_outputs(
+        model_name=model_name,
+        architecture=architecture,
+        objective=objective,
+        spec=spec,
+    )
+    layer_fp = loopdim_fingerprint(loopdim)
+
+    if layer_fp not in outputs:
+        if spec is None:
+            raise RuntimeError(
+                f"cosa_adapter.run_for_layer: no HardwareSpec resolved for "
+                f"architecture={architecture!r}; CoSA requires registered default_spec()"
+            )
+        work_dir = cache_root / "per_layer" / layer_fp
+        outputs[layer_fp] = run_cosa_mapper_for_layer(
+            spec=spec, loopdim=loopdim, objective=objective, work_dir=work_dir,
+        )
+        _save_cosa_index(index_path, outputs)
+
+    out = outputs[layer_fp]
+    loops = LoopNest(acc=acc, ops=ops)
+    loops, legalization_meta = convert_CoSA_to_MIREDO(loops=loops, out=out, spec=spec)
+    loops.usr_defined_double_flag[acc.Macro2mem][1] = acc.double_Macro
+    simulator = tranSimulator(acc=_copy.deepcopy(acc), ops=ops, dataflow=loops)
+    latency, energy = simulator.run_analytical()
+
+    return BaselineRunResult(
+        method="cosa",
+        objective=objective,
+        latency=latency,
+        energy=energy,
+        profile=simulator.PD,
+        dataflow=loops,
+        metadata={
+            "policy": "cosa_mip",
+            "model": model_name,
+            "architecture": architecture,
+            "spec_fingerprint": _spec_fingerprint(spec) if spec is not None else "legacy",
+            "mapper_runtime_s": out.runtime_s,
+            "legalization_demoted_count": legalization_meta["demoted_count"],
+            "legalization_demoted": legalization_meta["demoted"],
+            "capacity_demoted_count": legalization_meta.get("capacity_demoted_count", 0),
+            "capacity_demoted": legalization_meta.get("capacity_demoted", []),
+        },
+    )
+
 
 def run_cosa_constrained_mapper_for_layer(
     spec: HardwareSpec,
@@ -466,4 +545,72 @@ def run_cosa_constrained_mapper_for_layer(
         simba_level_names=list(_SIMBA_INNER_TO_OUTER),
         simba_to_miredo=dict(_SIMBA_TO_MIREDO),
         runtime_s=runtime_s,
+    )
+
+def supports_loopdim_constrained(loopdim: Dict[str, int]) -> _Optional[str]:
+    return supports_loopdim(loopdim)
+
+
+def run_for_layer_constrained(acc, ops, loopdim, model_name, architecture, objective):
+    import copy as _copy
+    from Simulator.Simulax import tranSimulator
+    from utils.Workload import LoopNest
+    from Evaluation.CoSA.CompatibleCoSA import convert_CoSA_to_MIREDO
+    from Evaluation.common.BaselineProvider import (
+        BaselineRunResult,
+        _resolve_default_spec,
+        _spec_fingerprint,
+        _load_cosa_constrained_outputs,
+        _save_cosa_constrained_index,
+    )
+
+    spec = getattr(acc, "source_spec", None)
+    if spec is None:
+        spec = _resolve_default_spec(architecture)
+
+    outputs, cache_root, index_path = _load_cosa_constrained_outputs(
+        model_name=model_name,
+        architecture=architecture,
+        objective=objective,
+        spec=spec,
+    )
+    layer_fp = loopdim_fingerprint(loopdim)
+
+    if layer_fp not in outputs:
+        if spec is None:
+            raise RuntimeError(
+                f"cosa_adapter.run_for_layer_constrained: no HardwareSpec resolved for "
+                f"architecture={architecture!r}; CoSA requires registered default_spec()"
+            )
+        work_dir = cache_root / "per_layer" / layer_fp
+        outputs[layer_fp] = run_cosa_constrained_mapper_for_layer(
+            spec=spec, loopdim=loopdim, objective=objective, work_dir=work_dir,
+        )
+        _save_cosa_constrained_index(index_path, outputs)
+
+    out = outputs[layer_fp]
+    loops = LoopNest(acc=acc, ops=ops)
+    loops, legalization_meta = convert_CoSA_to_MIREDO(loops=loops, out=out, spec=spec)
+    loops.usr_defined_double_flag[acc.Macro2mem][1] = acc.double_Macro
+    simulator = tranSimulator(acc=_copy.deepcopy(acc), ops=ops, dataflow=loops)
+    latency, energy = simulator.run_analytical()
+
+    return BaselineRunResult(
+        method="cosa-constrained",
+        objective=objective,
+        latency=latency,
+        energy=energy,
+        profile=simulator.PD,
+        dataflow=loops,
+        metadata={
+            "policy": "cosa_constrained_mip",
+            "model": model_name,
+            "architecture": architecture,
+            "spec_fingerprint": _spec_fingerprint(spec) if spec is not None else "legacy",
+            "mapper_runtime_s": out.runtime_s,
+            "legalization_demoted_count": legalization_meta["demoted_count"],
+            "legalization_demoted": legalization_meta["demoted"],
+            "capacity_demoted_count": legalization_meta.get("capacity_demoted_count", 0),
+            "capacity_demoted": legalization_meta.get("capacity_demoted", []),
+        },
     )

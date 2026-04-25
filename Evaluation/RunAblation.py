@@ -7,13 +7,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from Evaluation.common.EvalCommon import (
     hardware_spec_from_acc,
-    iter_model_layers,
     make_accelerator,
     make_output_dir,
     run_miredo_layer,
     save_experiment_json,
     setup_experiment_logger,
 )
+from Evaluation.common.CaseLayerShapes import layer_selection_config, select_model_layers
 from utils.UtilsFunction.ToolFunction import prepare_save_dir
 
 
@@ -67,6 +67,8 @@ def main():
     parser.add_argument("--timeLimit", type=int, default=120)
     parser.add_argument("--mipFocus", type=int, default=1)
     parser.add_argument("--maxLayers", type=int, default=None)
+    parser.add_argument("--layers", nargs="+", default=None,
+                        help="Optional layer subset: exact names/aliases, 1-based positions, idx:N, or model:<selector>.")
     parser.add_argument("-o", "--outputdir", dest="output_dir", default=None)
     args = parser.parse_args()
 
@@ -78,9 +80,9 @@ def main():
     full_totals_by_model = {}
 
     for model_name in args.models:
-        model_layers = iter_model_layers(model_name)
-        if args.maxLayers is not None:
-            model_layers = model_layers[:args.maxLayers]
+        model_layers = select_model_layers(
+            model_name, layer_selectors=args.layers, max_layers=args.maxLayers,
+        )
 
         totals_by_objective = {}
 
@@ -136,9 +138,9 @@ def main():
         for variant_name in args.structural:
             ablation_flags = STRUCTURAL_VARIANTS[variant_name]
             for model_name in args.models:
-                model_layers = iter_model_layers(model_name)
-                if args.maxLayers is not None:
-                    model_layers = model_layers[:args.maxLayers]
+                model_layers = select_model_layers(
+                    model_name, layer_selectors=args.layers, max_layers=args.maxLayers,
+                )
 
                 totals = _empty_total()
                 for layer in model_layers:
@@ -189,6 +191,9 @@ def main():
             "time_limit": args.timeLimit,
             "mip_focus": args.mipFocus,
             "structural_variants": args.structural or [],
+            "layer_selection": layer_selection_config(
+                layer_selectors=args.layers, max_layers=args.maxLayers,
+            ),
         },
         results={
             "ablation_results": ablation_results,
