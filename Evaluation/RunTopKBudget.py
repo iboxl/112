@@ -97,6 +97,11 @@ def main():
         "--skip-cache-reset", action="store_true",
         help="Skip moving the MIP cache (for debugging/resume only)",
     )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="Load existing rows from --output-json and skip any already-completed "
+             "(layer_id, budget_sec, top_k) cell. Implies --skip-cache-reset.",
+    )
     args = parser.parse_args()
 
     # ── Normalise top-k list ───────────────────────────────────────────────
@@ -110,11 +115,38 @@ def main():
     output_dir = make_output_dir("exp7f_topk_budget", None)
     print(f"Output directory: {output_dir}", flush=True)
 
+    # ── Resume: preload existing rows and build skip-set ─────────────────
+    results = []
+    completed = set()
+    if args.resume and os.path.isfile(args.output_json):
+        try:
+            with open(args.output_json) as fh:
+                prior = json.load(fh)
+            results = list(prior.get("results", []))
+            for r in results:
+                key = (r.get("layer_id"), int(r.get("budget_sec")),
+                       "all" if r.get("top_k") in ("all", None) else int(r.get("top_k")))
+                completed.add(key)
+            print(
+                f"[resume] preloaded {len(results)} existing rows from {args.output_json} "
+                f"({len(completed)} unique cells will be skipped)",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"[resume] failed to load existing JSON: {exc}; starting fresh", flush=True)
+            results = []
+            completed = set()
+
     # ── Cold-cache policy ─────────────────────────────────────────────────
     # Each cell uses a unique (acc, loopdim, objective, time_limit, ablation_flags)
     # key so cells never cross-contaminate.  We additionally move the on-disk
     # cache before the run to guarantee no residual state from earlier experiments.
-    if not args.skip_cache_reset:
+    if args.resume:
+        # Resume implies skip-cache-reset: prior cells already poisoned the cache
+        # with completed (key, time_limit, ablation_flags) entries, but those keys
+        # are unique per cell so they cannot contaminate remaining cells.
+        print("[resume] not resetting MIP cache (cell keys are unique).", flush=True)
+    elif not args.skip_cache_reset:
         _reset_mip_cache()
 
     prov = get_provenance("Evaluation/RunTopKBudget.py")
@@ -122,11 +154,15 @@ def main():
         "mip_cache cleared/moved at script start; each cell has unique "
         "(time_limit, ablation_flags) key so no inter-cell reuse is possible"
     )
+    if args.resume:
+        prov["resume_run"] = {
+            "preloaded_rows": len(results),
+            "preloaded_at": datetime.datetime.now().astimezone().isoformat(),
+        }
 
     acc_template = make_accelerator("CIM_ACC_TEMPLATE")
     spec_by_id = {s["id"]: s for s in CASE_LAYERS_DETAILS}
 
-    results = []
     total_cells = len(args.layer_ids) * len(args.budgets) * len(top_ks)
     cell_idx = 0
 
@@ -142,6 +178,13 @@ def main():
             for top_k in top_ks:
                 cell_idx += 1
                 k_label = "all" if top_k == "all" else str(top_k)
+                key = (layer_id, int(budget), top_k if top_k == "all" else int(top_k))
+                if key in completed:
+                    print(
+                        f"\n=== [{cell_idx}/{total_cells}] {layer_id} / budget={budget}s / K={k_label} -- SKIP (already in JSON) ===",
+                        flush=True,
+                    )
+                    continue
                 print(
                     f"\n=== [{cell_idx}/{total_cells}] {layer_id} / budget={budget}s / K={k_label} ===",
                     flush=True,
