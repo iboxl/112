@@ -26,6 +26,7 @@ class MappingRunProfile:
     num_schemes_initial: int = 0
     num_schemes_after_dominance: int = 0
     num_schemes_after_static_lb: int = 0
+    num_schemes_after_top_k: int = 0
     num_schemes_dynamic_lb_pruned: int = 0
     num_schemes_after_dynamic_lb: int = 0
     num_schemes_submitted: int = 0
@@ -87,7 +88,7 @@ def solve_scheme_worker(count:int, origin_index:int, scheme, acc:CIM_Acc, ops:Wo
         effective_ub = min(effective_ub, shared_ub.value)
     lat_lb, eng_lb, edp_lb = scheme_objective_lb(acc, ops, scheme, temporal_unrolling)
     obj_lb = {"Latency": lat_lb, "Energy": eng_lb, "EDP": edp_lb}.get(CONST.FLAG_OPT)
-    if obj_lb is not None and obj_lb > effective_ub:
+    if not getattr(FLAG, "ABLATION_DISABLE_LB_PRUNING", False) and obj_lb is not None and obj_lb > effective_ub:
         if _shm_handle is not None:
             _shm_handle.close()
         return {
@@ -312,7 +313,8 @@ def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str, singl
         # Discard schemes whose provable LB exceeds the initial internal metric UB.
         # The dynamic version in solve_scheme_worker re-checks against the
         # live shared_ub during parallel execution.
-        if _finite_metric_bound(best_metric):
+        # When ABLATION_DISABLE_LB_PRUNING is set, skip both static and dynamic screening.
+        if not getattr(FLAG, "ABLATION_DISABLE_LB_PRUNING", False) and _finite_metric_bound(best_metric):
             before = len(scheme_records)
             survived = []
             for rec in scheme_records:
@@ -325,6 +327,18 @@ def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str, singl
                 scheme_records = survived
         run_profile.num_schemes_after_static_lb = len(scheme_records)
         run_profile.timing_scoring_pruning_sec = time.time() - pruning_begin
+
+    # ── Optional top-K truncation (EXP-7f knob) ───────────────────────────
+    # Applied AFTER analytical-LB screening (static LB stage) and BEFORE
+    # scout/sweep dispatch.  Activates only when FLAG.ACCEL_TOP_K is a
+    # positive integer; None/0/unset leaves the pipeline byte-identical.
+    # Relies on the utilization-LB sort already done at line 309 — the
+    # highest-utility candidates are at the front of scheme_records.
+    _top_k = getattr(FLAG, "ACCEL_TOP_K", None)
+    if _top_k and isinstance(_top_k, int) and _top_k > 0 and len(scheme_records) > _top_k:
+        Logger.info(f"Top-K truncation: {len(scheme_records)} -> {_top_k} schemes (ACCEL_TOP_K={_top_k}).")
+        scheme_records = scheme_records[:_top_k]
+    run_profile.num_schemes_after_top_k = len(scheme_records)
 
     if singleIter:
         run_profile.timing_enumeration_sec = 0.0

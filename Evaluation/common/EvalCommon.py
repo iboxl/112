@@ -37,6 +37,8 @@ DEFAULT_MODELS = [
 TRANSFORMER_MODELS = {
     "vit_b_16",
     "bert_base",
+    "gpt2_medium_block",
+    "tinyllama_block",
 }
 
 
@@ -298,6 +300,9 @@ def temporary_runtime_config(objective="Latency", time_limit=120, mip_focus=1,
         "FLAG.PRESOLVE_SEARCH": FLAG.PRESOLVE_SEARCH,
         "FLAG.ABLATION_FIXED_DOUBLE_BUFFER": FLAG.ABLATION_FIXED_DOUBLE_BUFFER,
         "FLAG.ABLATION_SIMPLIFIED_PIPELINE": FLAG.ABLATION_SIMPLIFIED_PIPELINE,
+        "FLAG.ABLATION_DISABLE_LB_PRUNING": FLAG.ABLATION_DISABLE_LB_PRUNING,
+        "FLAG.ABLATION_DISABLE_FLEXFACT": FLAG.ABLATION_DISABLE_FLEXFACT,
+        "FLAG.ACCEL_TOP_K": FLAG.ACCEL_TOP_K,
     }
     try:
         CONST.FLAG_OPT = objective
@@ -319,6 +324,9 @@ def temporary_runtime_config(objective="Latency", time_limit=120, mip_focus=1,
         FLAG.PRESOLVE_SEARCH = old_state["FLAG.PRESOLVE_SEARCH"]
         FLAG.ABLATION_FIXED_DOUBLE_BUFFER = old_state["FLAG.ABLATION_FIXED_DOUBLE_BUFFER"]
         FLAG.ABLATION_SIMPLIFIED_PIPELINE = old_state["FLAG.ABLATION_SIMPLIFIED_PIPELINE"]
+        FLAG.ABLATION_DISABLE_LB_PRUNING = old_state["FLAG.ABLATION_DISABLE_LB_PRUNING"]
+        FLAG.ABLATION_DISABLE_FLEXFACT = old_state["FLAG.ABLATION_DISABLE_FLEXFACT"]
+        FLAG.ACCEL_TOP_K = old_state["FLAG.ACCEL_TOP_K"]
 
 
 import hashlib

@@ -85,8 +85,15 @@ class _constraint_flag_config():
         self.OUTPUT_STATIONARY = False                      # 部分和累加在固定的位置完成-即一个output只存在于local OR global
 
         self.ABLATION_FIXED_DOUBLE_BUFFER = False       # 消融：禁用双缓冲决策（强制全部单缓冲）
-        
+
         self.ABLATION_SIMPLIFIED_PIPELINE = False       # 消融：移除流水线重叠建模（传输与计算永远串行）
+
+        self.ABLATION_DISABLE_LB_PRUNING = False    # 消融：禁用静态+动态分析下界剪枝（验证无损性）
+
+        self.ABLATION_DISABLE_FLEXFACT = False      # 消融：禁用柔性分解（强制素因子分解，验证无损性）
+
+        self.ACCEL_TOP_K = None                     # EXP-7f knob: after static-LB screening, keep only the top-K
+                                                    # candidates (sorted by utilization score). None/0 = disabled.
 
         self.PRESOLVE_SEARCH =    False                  # 预搜索MN寻找简单初始解
 
