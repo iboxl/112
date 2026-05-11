@@ -35,6 +35,10 @@ class ProfilingDetail():
     mismatch_stall:float = 0
     writeback_stall:float = 0
     idle_cycles:float = 0
+    count_mac: int = 0
+    peak_mac_per_cycle: int = 0
+    bytes_read: list = field(default_factory=list)    # per memory level, in bytes
+    bytes_written: list = field(default_factory=list) # per memory level, in bytes
 
 class tranSimulator():
     def __init__(self, acc:CIM_Acc, ops:WorkLoad, dataflow:LoopNest, DEBUG_SIMU=False):
@@ -705,6 +709,23 @@ class tranSimulator():
             - self.PD.mismatch_stall
             - self.PD.writeback_stall,
         )
+
+        self.PD.count_mac = self.count_mac
+        self.PD.peak_mac_per_cycle = self.acc.Num_core * self.acc.dimX * self.acc.dimY
+
+        # Fallback byte accumulation: derive from memCost energy / cost_per_bit.
+        # Direct per-access accumulation would require touching all 30+ memCost +=
+        # sites; energy-inversion is bit-exact for constant cost_r/cost_w per level.
+        # Guard against zero cost (CIM Macro read is zeroed at line ~659).
+        self.PD.bytes_read = []
+        self.PD.bytes_written = []
+        for m in range(1, self.acc.Num_mem):
+            cr = self.acc.cost_r[m]
+            cw = self.acc.cost_w[m]
+            br = (self.memCost[m].r / cr / 8) if cr and cr > 0 else 0.0
+            bw = (self.memCost[m].w / cw / 8) if cw and cw > 0 else 0.0
+            self.PD.bytes_read.append(br)
+            self.PD.bytes_written.append(bw)
 
         return res_Latency, res_Energy
 

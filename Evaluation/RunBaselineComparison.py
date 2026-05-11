@@ -110,7 +110,7 @@ def main():
                                 "mode_switch_stall": 0,
                                 "mismatch_stall": 0,
                                 "writeback_stall": 0,
-                                "idle_cycles": 0,
+                                "unattributed_cycles": 0,
                                 "total_latency": baseline_result.latency,
                             }
                         stall_rows.append({

@@ -29,6 +29,7 @@ class WSBaselineResult:
     profile: object
     scheme: list
     policy: str = "canonical_cim_ws"
+    mapper_wall_sec: float = 0.0
 
     @property
     def edp(self):
@@ -272,14 +273,26 @@ def _simulate_ws(acc, ops, scheme, enable_double_buffer):
 
 
 def generate_weight_stationary_baseline(acc: CIM_Acc, ops: WorkLoad, quiet=True, enable_double_buffer=True):
+    import copy as _copy
+    import time as _time
     previous_level = Logger.level
     previous_disable = logging.root.manager.disable
     if quiet:
         Logger.setLevel(logging.ERROR)
         logging.disable(logging.CRITICAL)
 
+    # Mapper-only wall: rule-derived spatial scheme + one rule-driven loop-nest
+    # construction. Excludes the DB-vs-no-DB simulator evaluations below, which
+    # are policy selection through tranSimulator, not part of the rule itself.
+    _mapper_t0 = _time.time()
+    scheme = derive_weight_stationary_spatial_scheme(acc=acc, ops=ops)
+    _ = build_weight_stationary_dataflow(
+        acc=_copy.deepcopy(acc), ops=ops, scheme=scheme,
+        enable_double_buffer=enable_double_buffer,
+    )
+    mapper_wall_sec = _time.time() - _mapper_t0
+
     try:
-        scheme = derive_weight_stationary_spatial_scheme(acc=acc, ops=ops)
         if enable_double_buffer:
             loops_db, lat_db, eng_db, pd_db = _simulate_ws(acc, ops, scheme, True)
             loops_no, lat_no, eng_no, pd_no = _simulate_ws(acc, ops, scheme, False)
@@ -304,6 +317,7 @@ def generate_weight_stationary_baseline(acc: CIM_Acc, ops: WorkLoad, quiet=True,
         profile=pd,
         scheme=scheme,
         policy=policy,
+        mapper_wall_sec=mapper_wall_sec,
     )
 
 from typing import Optional as _Optional, Dict as _Dict
@@ -314,7 +328,7 @@ def supports_loopdim(loopdim: _Dict[str, int]) -> _Optional[str]:
     return None
 
 
-def run_for_layer(acc, ops, loopdim, model_name, architecture, objective):
+def run_for_layer(acc, ops, loopdim, model_name, architecture, objective, use_cache: bool = True):
     from Evaluation.common.BaselineProvider import BaselineRunResult
     result = generate_weight_stationary_baseline(acc=_copy.deepcopy(acc), ops=ops)
     return BaselineRunResult(
@@ -326,5 +340,6 @@ def run_for_layer(acc, ops, loopdim, model_name, architecture, objective):
         dataflow=result.dataflow,
         metadata={
             "policy": result.policy,
+            "mapper_wall_sec": result.mapper_wall_sec,
         },
     )

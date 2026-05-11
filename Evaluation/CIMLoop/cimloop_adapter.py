@@ -791,7 +791,7 @@ def supports_loopdim(loopdim: Dict[str, int]) -> _Optional[str]:
     return None
 
 
-def run_for_layer(acc, ops, loopdim, model_name, architecture, objective):
+def run_for_layer(acc, ops, loopdim, model_name, architecture, objective, use_cache: bool = True):
     import copy as _copy
     from Simulator.Simulax import tranSimulator
     from utils.Workload import LoopNest
@@ -853,7 +853,7 @@ def run_for_layer(acc, ops, loopdim, model_name, architecture, objective):
             "architecture": architecture,
             "spec_fingerprint": _spec_fingerprint(spec) if spec is not None else "legacy",
             "optimization_metric": list(out.optimization_metric),
-            "mapper_runtime_s": out.runtime_s,
+            "mapper_wall_sec": out.runtime_s,
             "energy_sources": energy_sources,
             "capacity_demoted_count": legalization_meta.get("capacity_demoted_count", 0),
             "capacity_demoted": legalization_meta.get("capacity_demoted", []),

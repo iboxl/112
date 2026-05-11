@@ -150,6 +150,41 @@ def set_gbuf_bandwidth(spec: HardwareSpec, bw_bits_per_cycle: int) -> HardwareSp
     return new_spec
 
 
+def _set_macro_axis_size(spec: HardwareSpec, axis_name: str, size: int) -> HardwareSpec:
+    """更新 macro.spatial_axes 中 name=axis_name 的 size 字段;不动 allowed_loops 与 source_memory_per_operand。
+    leakage 重算延后:由调用方在所有 axis/depth 调整完成后统一 _leakage_per_cycle_nJ 一次。
+    """
+    size = max(1, int(size))
+    new_axes = []
+    for a in spec.macro.spatial_axes:
+        if a.name == axis_name:
+            new_axes.append(replace(a, size=size))
+        else:
+            new_axes.append(a)
+    new_macro = replace(spec.macro, spatial_axes=new_axes)
+    return replace(spec, macro=new_macro)
+
+
+def set_macro_dimX(spec: HardwareSpec, dimX: int) -> HardwareSpec:
+    """设置 macro 的 reduction-axis 宽度(允许 R/S/C);单独使用时 leakage 重算。"""
+    new_spec = _set_macro_axis_size(spec, "dimX", dimX)
+    return replace(new_spec, leakage_per_cycle_nJ=_leakage_per_cycle_nJ(new_spec))
+
+
+def set_macro_dimY(spec: HardwareSpec, dimY: int) -> HardwareSpec:
+    """设置 macro 的 K-axis 宽度;单独使用时 leakage 重算。"""
+    new_spec = _set_macro_axis_size(spec, "dimY", dimY)
+    return replace(new_spec, leakage_per_cycle_nJ=_leakage_per_cycle_nJ(new_spec))
+
+
+def set_macro_spec(spec: HardwareSpec, dimX: int, dimY: int, depth: int) -> HardwareSpec:
+    """复合设置 macro 内部 (D1, D2, D3) 三轴;只在末尾通过 set_compartment_depth 重算 leakage 一次,
+    避免分别 set 三次的中间不一致。"""
+    new_spec = _set_macro_axis_size(spec, "dimX", dimX)
+    new_spec = _set_macro_axis_size(new_spec, "dimY", dimY)
+    return set_compartment_depth(new_spec, depth)
+
+
 def set_compartment_depth(spec: HardwareSpec, depth: int) -> HardwareSpec:
     depth = int(depth)
     if depth < 1:
@@ -183,11 +218,27 @@ def build_hardware_variant(spec: HardwareSpec, parameter: str, value) -> Hardwar
         return set_gbuf_bandwidth(spec, int(value))
     if parameter == "compartment_depth":
         return set_compartment_depth(spec, int(value))
+    if parameter == "macro_spec":
+        # value: (name, D1, D2, D3) 4-tuple — name 仅作 label,actual config 是后三项
+        if not (isinstance(value, (tuple, list)) and len(value) == 4):
+            raise ValueError(
+                f"macro_spec value must be (name, D1, D2, D3) 4-tuple, got: {value}"
+            )
+        _, dimX, dimY, depth = value
+        return set_macro_spec(spec, int(dimX), int(dimY), int(depth))
     raise ValueError(f"Unsupported sensitivity parameter: {parameter}")
 
+# macro_spec 5 命名 config:Wide/Tall vs Default 隔离 compute / residency,ZZIMC 是 ZigZag-IMC 公开 reference,Tiny 是 lower bound
 DEFAULT_SWEEPS = {
     "core_count": [4, 8, 16, 32],
     "buffer_capacity": [64, 128, 256, 512],
     "gbuf_core_bw": [64, 128, 256, 512],
     "compartment_depth": [1, 2, 4, 8, 16],
+    "macro_spec": [
+        ("Tiny", 16, 8, 1),
+        ("ZZIMC", 32, 16, 4),
+        ("Default", 32, 16, 8),
+        ("Tall", 32, 16, 16),
+        ("Wide", 64, 32, 8),
+    ],
 }

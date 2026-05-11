@@ -13,7 +13,7 @@ from gurobipy import GRB, quicksum
 from dataclasses import dataclass
 from utils.GlobalUT import *
 from utils.UtilsFunction.SolverFunction import *
-from utils.factorization import flexible_factorization
+from utils.factorization import flexible_factorization, prime_factors
 from utils.UtilsFunction.ToolFunction import getDivisors, getUniqueFactors
 import copy
 
@@ -105,7 +105,10 @@ class Solver():
             soft_mem_limit_gb=self.soft_mem_limit_gb,
         )
 
-        self.FACTORS = [flexible_factorization(_) for _ in self.tu]
+        if getattr(FLAG, "ABLATION_DISABLE_FLEXFACT", False):
+            self.FACTORS = [(prime_factors(_) if _ >= 2 else [_]) for _ in self.tu]
+        else:
+            self.FACTORS = [flexible_factorization(_) for _ in self.tu]
         self.spatial_unrolling = [math.prod(col) for col in zip(*su)]
         self.MAX_TRANS = [ max([math.ceil(min(ops.size[op] * (acc.precision_psum if op == 2 else acc.precision[m,op]), acc.memSize[m]) / acc.bw[m]) / CONST.SCALE_LATENCY
                                 for m in range(1, acc.Num_mem) if acc.mappingArray[op][m]] 

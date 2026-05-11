@@ -258,7 +258,7 @@ def _get_adapter(method: str):
 
 
 def run_baseline(method, acc, ops, loopdim, model_name, architecture, objective,
-                 raise_on_unsupported=True):
+                 raise_on_unsupported=True, use_cache: bool = True):
     method = method.lower()
     run_for_layer, supports_loopdim = _get_adapter(method)
     reason = supports_loopdim(loopdim)
@@ -269,4 +269,5 @@ def run_baseline(method, acc, ops, loopdim, model_name, architecture, objective,
     return run_for_layer(
         acc=acc, ops=ops, loopdim=loopdim,
         model_name=model_name, architecture=architecture, objective=objective,
+        use_cache=use_cache,
     )

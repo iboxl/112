@@ -22,6 +22,15 @@ CASE_LAYERS_DETAILS = [
             "C": 128, "K": 128, "G": 1, "B": 1,
             "H": 28, "W": 28, "Stride": 1, "Padding": 1,
         },
+        # Tensor sizes assume 8-bit I/W/O (matches default.py); KB = bytes / 1024
+        # weight = K·C·R·S, input = G·C·H·W, output = G·K·P·Q, mac = G·K·C·R·S·P·Q
+        "signature": {
+            "weight_KB": 144.0,    # 128·128·9 / 1024
+            "input_KB": 98.0,      # 128·28·28 / 1024
+            "output_KB": 98.0,     # 128·28·28 / 1024
+            "mac_M": 115.6,        # 128·128·9·784 / 1e6
+            "dominant_operand": "balanced",
+        },
     },
     {
         "id": "L2",
@@ -35,11 +44,18 @@ CASE_LAYERS_DETAILS = [
             "C": 256, "K": 512, "G": 1, "B": 1,
             "H": 7, "W": 7, "Stride": 1, "Padding": 0,
         },
+        "signature": {
+            "weight_KB": 128.0,    # 512·256 / 1024
+            "input_KB": 12.25,     # 256·49 / 1024
+            "output_KB": 24.5,     # 512·49 / 1024
+            "mac_M": 6.42,         # 512·256·49 / 1e6
+            "dominant_operand": "weight-heavy",
+        },
     },
     {
         "id": "L3",
         "label": "Depthwise 3x3",
-        "source": "MobileNet-v2 depthwise (C=K=G=144)",
+        "source": "MobileNet-v2 depthwise C-K-G-144",
         "mechanism_role": "G=C breaks weight reuse across groups; per-group "
                           "body small; partial-sum and mismatch decisions "
                           "dominate. Tests beta differential value.",
@@ -48,11 +64,18 @@ CASE_LAYERS_DETAILS = [
             "C": 1, "K": 1, "G": 144, "B": 1,
             "H": 14, "W": 14, "Stride": 1, "Padding": 1,
         },
+        "signature": {
+            "weight_KB": 1.27,     # 144·1·1·9 / 1024
+            "input_KB": 27.56,     # 144·1·196 / 1024
+            "output_KB": 27.56,    # 144·1·196 / 1024
+            "mac_M": 0.254,        # 144·9·196 / 1e6
+            "dominant_operand": "depthwise, low compute",
+        },
     },
     {
         "id": "L4",
         "label": "Imbalanced 1x1 expansion",
-        "source": "EfficientNet-B0 MBConv expansion (C=80, K=480)",
+        "source": "EfficientNet-B0 MBConv expansion C-80 K-480",
         "mechanism_role": "Channel-asymmetric, small spatial. Identified in "
                           "5.7 as fidelity worst case + ranking residual; "
                           "sensitivity probes the conditional regime.",
@@ -60,6 +83,13 @@ CASE_LAYERS_DETAILS = [
             "R": 1, "S": 1, "P": 14, "Q": 14,
             "C": 80, "K": 480, "G": 1, "B": 1,
             "H": 14, "W": 14, "Stride": 1, "Padding": 0,
+        },
+        "signature": {
+            "weight_KB": 37.5,     # 480·80 / 1024
+            "input_KB": 15.31,     # 80·196 / 1024
+            "output_KB": 91.88,    # 480·196 / 1024
+            "mac_M": 7.53,         # 480·80·196 / 1e6
+            "dominant_operand": "imbalanced, output-heavy",
         },
     },
 ]

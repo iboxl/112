@@ -105,12 +105,20 @@ def main():
             variant_spec = build_hardware_variant(base_spec, parameter, value)
             variant_acc = CIM_Acc.from_spec(variant_spec)
 
+            # 复合 sweep(macro_spec)的 value 是 (name, D1, D2, D3) tuple — 用 name 作 label
+            if isinstance(value, (tuple, list)) and len(value) == 4 and isinstance(value[0], str):
+                value_label = value[0]
+                value_tuple = list(value[1:])
+            else:
+                value_label = str(value)
+                value_tuple = None
+
             for group_name, selected_layers in layer_groups:
                 for layer in selected_layers:
                     layer_id = layer.get("layer_id", layer["layer"])
                     loopdim = copy.deepcopy(layer["loopdim"])
                     ops = WorkLoad(loopDim=loopdim)
-                    layer_dir = output_dir / parameter / str(value) / group_name / layer["layer"]
+                    layer_dir = output_dir / parameter / value_label / group_name / layer["layer"]
 
                     try:
                         miredo = run_miredo_layer(
@@ -124,7 +132,7 @@ def main():
                     except Exception as exc:
                         anomalies.append({
                             "model": group_name, "layer": layer["layer"],
-                            "layer_id": layer_id, "parameter": parameter, "value": value,
+                            "layer_id": layer_id, "parameter": parameter, "value": value_label,
                             "kind": "miredo_error", "message": str(exc),
                         })
                         continue
@@ -142,7 +150,7 @@ def main():
                                 anomalies.append({
                                     "model": group_name, "layer": layer["layer"],
                                     "layer_id": layer_id, "parameter": parameter,
-                                    "value": value, "baseline": bname,
+                                    "value": value_label, "baseline": bname,
                                     "kind": "baseline_unsupported",
                                     "message": reason,
                                 })
@@ -152,16 +160,17 @@ def main():
                             anomalies.append({
                                 "model": group_name, "layer": layer["layer"],
                                 "layer_id": layer_id, "parameter": parameter,
-                                "value": value, "baseline": bname,
+                                "value": value_label, "baseline": bname,
                                 "kind": "baseline_error", "message": str(exc),
                             })
                             continue
 
-                        key = (parameter, str(value), group_name, bname)
+                        key = (parameter, value_label, group_name, bname)
                         if key not in sensitivity_totals:
                             sensitivity_totals[key] = {
                                 "parameter": parameter,
-                                "value": str(value),
+                                "value": value_label,
+                                "sweep_tuple": value_tuple,
                                 "model": group_name,
                                 "baseline": bname,
                                 "miredo_edp": 0.0,
@@ -173,7 +182,8 @@ def main():
 
                         per_layer.append({
                             "parameter": parameter,
-                            "value": str(value),
+                            "value": value_label,
+                            "sweep_tuple": value_tuple,
                             "model": group_name,
                             "layer": layer["layer"],
                             "layer_id": layer_id,
@@ -181,6 +191,7 @@ def main():
                             "layer_source": layer.get("layer_source"),
                             "representative_label": layer.get("label"),
                             "representative_source": layer.get("source"),
+                            "representative_signature": layer.get("signature"),
                             "baseline": bname,
                             "miredo_edp": miredo_edp,
                             "baseline_edp": baseline_edp,
@@ -207,8 +218,8 @@ def main():
 
     json_path = save_experiment_json(
         output_dir=output_dir,
-        file_name="EXP-4.json",
-        experiment_id="EXP-4",
+        file_name="EXP_sensitivity_shapes.json",
+        experiment_id="EXP_sensitivity_shapes",
         script_path=__file__,
         config={
             "models": args.models,

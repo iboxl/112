@@ -428,7 +428,7 @@ def supports_loopdim(loopdim: Dict[str, int]) -> _Optional[str]:
     return None
 
 
-def run_for_layer(acc, ops, loopdim, model_name, architecture, objective):
+def run_for_layer(acc, ops, loopdim, model_name, architecture, objective, use_cache: bool = True):
     import copy as _copy
     from Simulator.Simulax import tranSimulator
     from utils.Workload import LoopNest
@@ -484,7 +484,7 @@ def run_for_layer(acc, ops, loopdim, model_name, architecture, objective):
             "model": model_name,
             "architecture": architecture,
             "spec_fingerprint": _spec_fingerprint(spec) if spec is not None else "legacy",
-            "mapper_runtime_s": out.runtime_s,
+            "mapper_wall_sec": out.runtime_s,
             "legalization_demoted_count": legalization_meta["demoted_count"],
             "legalization_demoted": legalization_meta["demoted"],
             "capacity_demoted_count": legalization_meta.get("capacity_demoted_count", 0),
@@ -551,7 +551,7 @@ def supports_loopdim_constrained(loopdim: Dict[str, int]) -> _Optional[str]:
     return supports_loopdim(loopdim)
 
 
-def run_for_layer_constrained(acc, ops, loopdim, model_name, architecture, objective):
+def run_for_layer_constrained(acc, ops, loopdim, model_name, architecture, objective, use_cache: bool = True):
     import copy as _copy
     from Simulator.Simulax import tranSimulator
     from utils.Workload import LoopNest
@@ -607,7 +607,7 @@ def run_for_layer_constrained(acc, ops, loopdim, model_name, architecture, objec
             "model": model_name,
             "architecture": architecture,
             "spec_fingerprint": _spec_fingerprint(spec) if spec is not None else "legacy",
-            "mapper_runtime_s": out.runtime_s,
+            "mapper_wall_sec": out.runtime_s,
             "legalization_demoted_count": legalization_meta["demoted_count"],
             "legalization_demoted": legalization_meta["demoted"],
             "capacity_demoted_count": legalization_meta.get("capacity_demoted_count", 0),

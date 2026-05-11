@@ -4,6 +4,7 @@
 # 用途：对gap>0%的层提供最优性的穷举证明。
 # 用法：python Evaluation/VerifyEnumLoop.py
 
+import atexit
 import os, sys, math, time, shutil, copy, functools
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
@@ -67,29 +68,89 @@ def enumerate_factor_orderings(factors, Num_dim):
     return results
 
 
-def _worker(args):
-    """单个子MIP求解worker（进程池调用）。"""
-    idx, ordering, spec, ops_dict, scheme, out_dir, timelimit = args
+_WORKER_CACHE = {}
 
-    CONST.FLAG_OPT = "Latency"
+
+def _worker_init(spec, ops_dict, scheme, timelimit, metric, shared_ub_name=None):
+    """ProcessPoolExecutor initializer — build immutable per-worker state ONCE.
+
+    Caches acc / ops / tu / su / scheme settings so each task reuses them
+    instead of rebuilding (CIM_Acc.from_spec is ~0.5-1s; over 36k tasks this
+    is the dominant overhead). _worker reads from _WORKER_CACHE.
+
+    Also opens cross-worker shared upper bound (SharedUB) so each ordering's
+    sub-MIP can prune subtrees with LP bound > current global best objective.
+    """
+    CONST.FLAG_OPT = metric
     CONST.TIMELIMIT = timelimit
     CONST.MIPFOCUS = 1
     FLAG.GUROBI_OUTPUT = False
     FLAG.SIMU = False
-    import logging; logging.disable(logging.CRITICAL)  # 静默子进程所有log
-
+    import logging; logging.disable(logging.CRITICAL)
     ops = WorkLoad(loopDim=ops_dict)
     acc = CIM_Acc.from_spec(spec)
-    su = scheme
-    spatial = [math.prod(col) for col in zip(*su)]
+    spatial = [math.prod(col) for col in zip(*scheme)]
     tu = [math.ceil(x / y) for x, y in zip(ops.dim2bound, spatial)]
+
+    shared_ub = None
+    shm_handle = None
+    if shared_ub_name is not None:
+        from utils.Tools import SharedUB
+        from multiprocessing.shared_memory import SharedMemory
+        shm_handle = SharedMemory(name=shared_ub_name)
+        shared_ub = SharedUB(shm_handle)
+        import atexit
+        atexit.register(lambda h=shm_handle: (h.close() if h is not None else None))
+
+    _WORKER_CACHE.update(dict(ops=ops, acc=acc, tu=tu, su=scheme,
+                              metric=metric, timelimit=timelimit,
+                              shared_ub=shared_ub, shm_handle=shm_handle))
+
+
+def _worker(args):
+    """单个子MIP求解worker（进程池调用）。"""
+    if len(args) == 8:
+        idx, ordering, spec, ops_dict, scheme, out_dir, timelimit, metric = args
+    else:
+        idx, ordering, spec, ops_dict, scheme, out_dir, timelimit = args
+        metric = "Latency"
+
+    shared_ub = None
+    # Fast path: reuse cached acc/ops/tu/su built once by initializer
+    if _WORKER_CACHE:
+        ops = _WORKER_CACHE["ops"]
+        acc = _WORKER_CACHE["acc"]
+        tu = _WORKER_CACHE["tu"]
+        su = _WORKER_CACHE["su"]
+        shared_ub = _WORKER_CACHE.get("shared_ub")
+        CONST.FLAG_OPT = _WORKER_CACHE["metric"]
+        CONST.TIMELIMIT = _WORKER_CACHE["timelimit"]
+        CONST.MIPFOCUS = 1
+        FLAG.GUROBI_OUTPUT = False
+        FLAG.SIMU = False
+    else:
+        # Slow path (legacy / no-initializer call)
+        CONST.FLAG_OPT = metric
+        CONST.TIMELIMIT = timelimit
+        CONST.MIPFOCUS = 1
+        FLAG.GUROBI_OUTPUT = False
+        FLAG.SIMU = False
+        import logging; logging.disable(logging.CRITICAL)
+        ops = WorkLoad(loopDim=ops_dict)
+        acc = CIM_Acc.from_spec(spec)
+        su = scheme
+        spatial = [math.prod(col) for col in zip(*su)]
+        tu = [math.ceil(x / y) for x, y in zip(ops.dim2bound, spatial)]
 
     sub_dir = os.path.join(out_dir, str(idx))
     prepare_save_dir(sub_dir)
 
-    solver = Solver(acc=acc, ops=ops, tu=tu, su=su, metric_ub=CONST.MAX_POS,
+    # Get current global upper bound from shared memory (pruning cutoff)
+    metric_ub = shared_ub.value if shared_ub is not None else CONST.MAX_POS
+
+    solver = Solver(acc=acc, ops=ops, tu=tu, su=su, metric_ub=metric_ub,
                     outputdir=sub_dir, threads=1, soft_mem_limit_gb=1.0,
-                    fixed_factor_ordering=ordering)
+                    fixed_factor_ordering=ordering, shared_ub=shared_ub)
     try:
         solver.run()
         if solver.model is not None and solver.model.SolCount > 0:
@@ -98,15 +159,50 @@ def _worker(args):
                 gap = solver.model.MIPGap
             except Exception:
                 gap = -1.0
-            return (idx, lat, gap, True)
-        return (idx, CONST.MAX_POS, -1, False)
+            try:
+                status = int(solver.model.Status)
+            except Exception:
+                status = -1
+            try:
+                obj_val = float(solver.model.ObjVal)
+            except Exception:
+                obj_val = float('nan')
+            try:
+                obj_bound = float(solver.model.ObjBound)
+            except Exception:
+                obj_bound = float('nan')
+            # Propagate this ordering's metric to global SharedUB so subsequent
+            # orderings can prune subtrees with LP bound > current best
+            if shared_ub is not None:
+                metric_index = {"Latency": 0, "Energy": 1, "EDP": 2}.get(CONST.FLAG_OPT)
+                if metric_index is not None:
+                    shared_ub.update_min(solver.result[metric_index])
+            return (idx, lat, gap, True, status, obj_val, obj_bound)
+        try:
+            status = int(solver.model.Status) if solver.model is not None else -1
+        except Exception:
+            status = -1
+        return (idx, CONST.MAX_POS, -1, False, status, float('nan'), float('nan'))
     finally:
         solver.close()
         if os.path.exists(sub_dir):
             shutil.rmtree(sub_dir, ignore_errors=True)
 
 
-def run_enumeration(spec, ops_dict, scheme, timelimit=15, max_workers=None):
+def _safe_unlink(shm_name):
+    """Defensively unlink a SharedMemory segment; swallows FileNotFoundError."""
+    try:
+        from multiprocessing.shared_memory import SharedMemory as _SHM
+        _h = _SHM(name=shm_name, create=False, size=8)
+        _h.close()
+        _h.unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
+
+def run_enumeration(spec, ops_dict, scheme, timelimit=15, max_workers=None, metric="Latency"):
     """并行枚举所有因子排列，返回全局最优latency和gap统计。
 
     spec: HardwareSpec —— 子进程通过 CIM_Acc.from_spec 重建 acc，避免传递非 picklable 的 ZigZag Core。"""
@@ -130,52 +226,98 @@ def run_enumeration(spec, ops_dict, scheme, timelimit=15, max_workers=None):
     out_dir = os.path.join(os.path.dirname(__file__), '..', 'output', "#EnumVerify_temp")
     prepare_save_dir(out_dir)
 
-    args_list = [(i, o, spec, ops_dict, scheme, out_dir, timelimit)
+    args_list = [(i, o, spec, ops_dict, scheme, out_dir, timelimit, metric)
                  for i, o in enumerate(orderings)]
 
     best_lat, best_idx = CONST.MAX_POS, -1
     feasible, proven_opt = 0, 0
+    per_ordering = []  # list of dicts: {idx, status, gap, obj_val, obj_bound, lat, ok}
 
     log(f"启动 {max_workers} workers, 每子问题 {timelimit}s ...")
     t0 = time.time()
 
-    ctx = mp.get_context("spawn")
-    with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
-        futures = {executor.submit(_worker, a): a[0] for a in args_list}
-        done_count = 0
-        for future in futures:
-            pass  # submitted
-        pending = set(futures.keys())
-        while pending:
-            done, pending = wait(pending, return_when=FIRST_COMPLETED, timeout=None)
-            for f in done:
-                done_count += 1
-                try:
-                    idx, lat, gap, ok = f.result()
-                except Exception as e:
-                    log(f"  子问题异常: {e}")
-                    continue
-                if ok:
-                    feasible += 1
-                    if gap >= 0 and gap < 0.01:
-                        proven_opt += 1
-                    if lat < best_lat:
-                        best_lat = lat
-                        best_idx = idx
-                if done_count % 200 == 0:
-                    elapsed = time.time() - t0
-                    log(f"  进度 {done_count}/{len(orderings)} ({elapsed:.0f}s), "
-                          f"可行={feasible}, gap=0%={proven_opt}, 最优latency={best_lat:.2f}")
+    # Cross-worker shared upper bound for cutoff pruning (mirrors production
+    # multi-scheme search). Initialize to MAX_POS so first ordering imposes no
+    # cutoff; once any ordering finds an objective, subsequent orderings prune
+    # subtrees with LP bound exceeding the running global best.
+    from multiprocessing.shared_memory import SharedMemory
+    import struct as _struct
+    _shm = SharedMemory(create=True, size=8)
+    _struct.pack_into('d', _shm.buf, 0, CONST.MAX_POS)
+    shm_name = _shm.name
+    log(f"SharedUB created: {shm_name}, init={CONST.MAX_POS}")
+    atexit.register(_safe_unlink, shm_name)
 
-    elapsed = time.time() - t0
-    if os.path.exists(out_dir):
-        shutil.rmtree(out_dir, ignore_errors=True)
+    try:
+        ctx = mp.get_context("spawn")
+        with ProcessPoolExecutor(
+            max_workers=max_workers, mp_context=ctx,
+            initializer=_worker_init,
+            initargs=(spec, ops_dict, scheme, timelimit, metric, shm_name),
+        ) as executor:
+            futures = {executor.submit(_worker, a): a[0] for a in args_list}
+            done_count = 0
+            for future in futures:
+                pass  # submitted
+            pending = set(futures.keys())
+            while pending:
+                done, pending = wait(pending, return_when=FIRST_COMPLETED, timeout=None)
+                for f in done:
+                    done_count += 1
+                    try:
+                        res = f.result()
+                    except Exception as e:
+                        log(f"  子问题异常: {e}")
+                        continue
+                    # backward-compat: old 4-tuple, new 7-tuple
+                    if len(res) == 7:
+                        idx, lat, gap, ok, status, obj_val, obj_bound = res
+                    else:
+                        idx, lat, gap, ok = res
+                        status, obj_val, obj_bound = -1, float('nan'), float('nan')
+                    per_ordering.append({
+                        'idx': idx, 'ok': bool(ok), 'status': status,
+                        'gap': float(gap) if gap is not None else None,
+                        'obj_val': obj_val, 'obj_bound': obj_bound,
+                        'mip_analytical_obj': float(lat) if lat is not None else None,
+                    })
+                    if ok:
+                        feasible += 1
+                        # OPTIMAL = 2 in Gurobi; treat that as proven optimal regardless of MIPGap floor
+                        is_opt = (status == 2) or (gap is not None and 0 <= gap < 1e-4)
+                        if is_opt:
+                            proven_opt += 1
+                        # Use solver objective value (not solver.result[0] which is always latency)
+                        cmp_val = obj_val if metric != "Latency" and obj_val == obj_val else lat
+                        if cmp_val < best_lat:
+                            best_lat = cmp_val
+                            best_idx = idx
+                    if done_count % 200 == 0:
+                        elapsed = time.time() - t0
+                        log(f"  进度 {done_count}/{len(orderings)} ({elapsed:.0f}s), "
+                              f"可行={feasible}, gap=0%={proven_opt}, 最优latency={best_lat:.2f}")
+        per_ordering.sort(key=lambda r: r['idx'])
+        for r in per_ordering:
+            log(f"  ord#{r['idx']:3d} ok={r['ok']} status={r['status']} gap={r['gap']!r} obj_val={r['obj_val']!r} obj_bound={r['obj_bound']!r} analytical_obj={r['mip_analytical_obj']!r}")
+    finally:
+        elapsed = time.time() - t0
+        if os.path.exists(out_dir):
+            shutil.rmtree(out_dir, ignore_errors=True)
+
+        # Clean up SharedMemory — runs even on KeyboardInterrupt or pool exception
+        try:
+            final_ub = _struct.unpack_from('d', _shm.buf, 0)[0]
+            log(f"Final SharedUB value: {final_ub}")
+            _shm.close()
+            _shm.unlink()
+        except Exception as e:
+            log(f"  SharedUB cleanup warning: {e}")
 
     log(f"\n{'='*60}")
     log(f"枚举完成: {len(orderings)} 排列, {elapsed:.1f}s")
     log(f"可行解: {feasible}/{len(orderings)}")
     log(f"子问题gap=0%: {proven_opt}/{feasible}")
-    log(f"全局最优 Latency = {best_lat:.2f} (排列#{best_idx})")
+    log(f"全局最优 MIP analytical objective = {best_lat:.2f} (排列#{best_idx})  [FLAG.SIMU=False, so no simulator run]")
     log(f"{'='*60}")
 
     # 保存结构化结果到 output/Eval_Result/
@@ -191,6 +333,7 @@ def run_enumeration(spec, ops_dict, scheme, timelimit=15, max_workers=None):
         'best_latency': best_lat if best_lat < CONST.MAX_POS else None,
         'best_ordering_idx': best_idx,
         'time_seconds': round(elapsed, 1),
+        'per_ordering': per_ordering,
     }
     result_file = save_result_json(result_dir, 'enumLoop', result)
     log(f"结果已保存: {result_file}")
@@ -212,28 +355,30 @@ def run_enumeration(spec, ops_dict, scheme, timelimit=15, max_workers=None):
                 "total_orderings": len(orderings),
                 "feasible_orderings": feasible,
                 "proven_optimal_orderings": proven_opt,
-                "global_best_latency": best_lat if best_lat < CONST.MAX_POS else None,
+                "global_best_objective": best_lat if best_lat < CONST.MAX_POS else None,
+                "global_best_latency_note": "FLAG.SIMU=False; reported value is the MIP analytical objective at the best ordering, not a simulator-evaluated latency",
                 "best_ordering_idx": best_idx,
                 "elapsed_seconds": round(elapsed, 3),
+                "per_ordering": per_ordering,
             },
             "optimality_verification": [{
                 "model": "manual",
                 "layer": f"Conv_{ops_dict.get('R',1)}x{ops_dict.get('S',1)}_C{ops_dict.get('C',1)}K{ops_dict.get('K',1)}",
                 "tier": "small",
-                "mip_latency": best_lat if best_lat < CONST.MAX_POS else None,
-                "exhaustive_latency": best_lat if best_lat < CONST.MAX_POS else None,
-                "is_optimal": (proven_opt > 0),
-                "optimality_gap_pct": 0.0 if proven_opt > 0 else None,
+                "mip_analytical_objective_global_best": best_lat if best_lat < CONST.MAX_POS else None,
+                "is_search_complete": (proven_opt == feasible == len(orderings)),
+                "proven_optimal_subMIPs": proven_opt,
+                "total_subMIPs": len(orderings),
                 "solve_time_sec": round(elapsed, 3),
-                "num_spatial_schemes": len(orderings),
-                "num_schemes_after_pruning": feasible
+                "num_factor_orderings": len(orderings),
+                "num_feasible_orderings": feasible
             }],
         },
         anomalies=[],
     )
     log(f"EXP-6结果已保存: {exp6_file}")
 
-    return best_lat, best_idx
+    return best_lat, best_idx, per_ordering
 
 
 if __name__ == "__main__":
@@ -248,6 +393,14 @@ if __name__ == "__main__":
             'ops': {'R':3,'S':3,'C':64,'K':64,'P':56,'Q':56,'G':1,'B':1,'H':56,'W':56,'Stride':1,'Padding':1},
             'scheme': [[1,1,1,2,1,1,4,1],[1,1,1,1,1,32,1,1],[1,1,1,1,1,1,16,1]],
         },
+        '3x3_C16K16': {
+            'ops': {'R':3,'S':3,'C':16,'K':16,'P':7,'Q':7,'G':1,'B':1,'H':7,'W':7,'Stride':1,'Padding':1},
+            'scheme': [[1,1,1,1,1,1,1,1],[1,1,1,1,1,16,1,1],[1,1,1,1,1,1,16,1]],
+        },
+        '3x3_C32K32': {
+            'ops': {'R':3,'S':3,'C':32,'K':32,'P':7,'Q':7,'G':1,'B':1,'H':7,'W':7,'Stride':1,'Padding':1},
+            'scheme': [[1,1,1,1,1,1,2,1],[1,1,1,1,1,32,1,1],[1,1,1,1,1,1,16,1]],
+        },
     }
 
     parser = argparse.ArgumentParser(description="因子排列枚举验证")
@@ -260,7 +413,7 @@ if __name__ == "__main__":
     Logger.setcfg(setcritical=False, setDebug=False, STD=True, file="", nofile=True)
 
     case = CASES[args.case]
-    best_lat, best_idx = run_enumeration(
+    best_lat, best_idx, _ = run_enumeration(
         spec=spec,
         ops_dict=case['ops'],
         scheme=case['scheme'],

@@ -82,7 +82,7 @@ def _snapshot_profile(sim):
         "mode_switch_stall": pd.mode_switch_stall,
         "mismatch_stall": pd.mismatch_stall,
         "writeback_stall": pd.writeback_stall,
-        "idle_cycles": pd.idle_cycles,
+        "idle_cycles": pd.idle_cycles,  # kept for backward compat; see unattributed_cycles in ProfileAnalysis
         "memCost": memCost,
     }
 
