@@ -7,13 +7,13 @@ from utils.GlobalUT import CONST
 from Evaluation.common.EvalCommon import repo_root
 
 
-SUPPORTED_BASELINE_METHODS = ("zigzag", "ws", "cimloop", "cosa", "cosa-constrained")
+SUPPORTED_BASELINE_METHODS = ("zigzag", "ws", "cimloop", "cosa", "cosa_legal")
 BASELINE_METHOD_LABELS = {
     "zigzag": "ZigZag_IMC",
     "ws": "WS",
     "cimloop": "CIMLoop",
     "cosa": "CoSA",
-    "cosa-constrained": "CoSA-Constr",
+    "cosa_legal": "CoSA-legal",
 }
 
 
@@ -245,7 +245,7 @@ def _get_adapter(method: str):
         from Evaluation.CoSA.cosa_adapter import (
             run_for_layer, supports_loopdim,
         )
-    elif method == "cosa-constrained":
+    elif method == "cosa_legal":
         from Evaluation.CoSA.cosa_adapter import (
             run_for_layer_constrained as run_for_layer,
             supports_loopdim_constrained as supports_loopdim,

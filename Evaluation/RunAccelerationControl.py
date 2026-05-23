@@ -1,5 +1,5 @@
 # Evaluation/RunAccelerationControl.py
-# EXP-7c: Empirical losslessness verification for LB pruning on L1-L4
+# dynlb_losslessness: Empirical losslessness verification for LB pruning on L1-L4
 import argparse
 import copy
 import json
@@ -29,7 +29,7 @@ def get_provenance():
     except Exception:
         commit = "unknown"
     return {
-        "repo": "/home/xiaolin/pro/overleaf/MIREDO/MIREDO",
+        "repo": os.path.dirname(os.path.dirname(os.path.abspath(__file__))),  # code repo, portable (was hardcoded stray)
         "commit": commit,
         "script": "Evaluation/RunAccelerationControl.py",
         "timestamp": datetime.datetime.now().astimezone().isoformat(),
@@ -40,7 +40,7 @@ def get_provenance():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="EXP-7c: Empirical losslessness verification for LB pruning"
+        description="dynlb_losslessness: Empirical losslessness verification for LB pruning"
     )
     parser.add_argument("--time-limit", type=int, default=60,
                         help="MIP time limit per scheme (seconds)")
@@ -48,21 +48,28 @@ def main():
                         help="Gurobi MIPFocus parameter")
     parser.add_argument(
         "--output-json",
-        default="/home/xiaolin/pro/overleaf/MIREDO/experiments/parsed_metrics/"
-                "EXP-7c_dynlb_control_20260429.json",
+        # FIX 2026-05-17: code-repo-relative (portable, lands in this checkout's
+        # MIREDO/output/) — was an absolute path into a stray non-_v1 dir.
+        default=os.path.join(os.path.dirname(__file__), "..", "output",
+                             "dynlb_losslessness.json"),
         help="Path for the combined results JSON"
     )
     parser.add_argument(
         "--layer-ids", nargs="+", default=["L3", "L2", "L4", "L1"],
         help="Layer IDs to run (order determines execution sequence)"
     )
+    parser.add_argument(
+        "--architecture", default="CIM_ACC_DEFAULT_SETUP",
+        help="Architecture registry key (rerun default: CIM_ACC_DEFAULT_SETUP, "
+             "matching Phase A-E; legacy was CIM_ACC_TEMPLATE)"
+    )
     args = parser.parse_args()
 
-    # Create base output directory (timestamped so it never clashes with EXP-7)
-    output_dir = make_output_dir("exp7c_control", None)
+    # Create base output directory (timestamped so it never clashes with acceleration_profile)
+    output_dir = make_output_dir("dynlb_losslessness", None)
     print(f"Output directory: {output_dir}", flush=True)
 
-    acc = make_accelerator("CIM_ACC_TEMPLATE")
+    acc = make_accelerator(args.architecture)
 
     results = []
     prov = get_provenance()
@@ -139,13 +146,14 @@ def main():
 
             # Save incrementally so a crash does not lose earlier results
             out = {
-                "experiment_id": "EXP-7c",
+                "experiment_id": "dynlb_losslessness",
                 "provenance": prov,
                 "config": {
                     "time_limit": args.time_limit,
                     "mip_focus": args.mip_focus,
                     "objective": "Latency",
-                    "architecture": "CIM_ACC_TEMPLATE",
+                    "architecture": args.architecture,
+                    "architecture_key": args.architecture,
                 },
                 "results": results,
             }
@@ -155,7 +163,7 @@ def main():
             print(f"  -> JSON updated ({len(results)} records): {args.output_json}", flush=True)
 
     # ── Summary: losslessness verification ────────────────────────────────
-    print("\n\n=== EXP-7c Losslessness Summary ===", flush=True)
+    print("\n\n=== dynlb_losslessness Losslessness Summary ===", flush=True)
     by_layer = {}
     for row in results:
         by_layer.setdefault(row["layer_id"], {})[row["mode"]] = row

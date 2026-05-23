@@ -165,7 +165,21 @@ def get_double_configs(tm_list, acc):
 # ======================== 核心搜索 ========================
 
 def brute_force_temporal(acc, ops, scheme, log_fn=log):
-    """对给定spatial scheme，穷举所有时间映射（含双缓冲）并用simulator评估。"""
+    """对给定spatial scheme，穷举所有时间映射（含双缓冲）并用simulator评估。
+
+    返回:
+        best_lat:        穷举到的最小 simulator latency
+        best_lat_energy: 取得 best_lat 时对应的 simulator energy
+        best_lat_loops:  best_lat 对应的 LoopNest
+        best_edp:        穷举到的最小 simulator EDP (= lat * energy)
+        best_edp_lat:    取得 best_edp 时对应的 simulator latency
+        best_edp_energy: 取得 best_edp 时对应的 simulator energy
+        best_edp_loops:  best_edp 对应的 LoopNest
+        stats:           枚举统计
+
+    单 simulator pass 同时维护 latency-best 和 EDP-best — simulator 反正
+    返回 (lat, energy)，零额外开销 (per writing-agent 2026-05-16)。
+    """
 
     spatial = [math.prod(col) for col in zip(*scheme)]
     tu = [math.ceil(x / y) if y > 0 else x for x, y in zip(ops.dim2bound, spatial)]
@@ -176,7 +190,10 @@ def brute_force_temporal(acc, ops, scheme, log_fn=log):
 
     if not active_dims:
         log_fn("  无时间循环维度")
-        return float('inf'), float('inf'), None, {'candidates':0, 'feasible':0, 'time':0}
+        empty = {'candidates': 0, 'feasible': 0, 'time': 0}
+        return (float('inf'), float('inf'), None,
+                float('inf'), float('inf'), float('inf'), None,
+                empty)
 
     facts_per_dim = {}
     for d in active_dims:
@@ -196,7 +213,9 @@ def brute_force_temporal(acc, ops, scheme, log_fn=log):
     log_fn(f"  过滤后存储级: I={valid_mems[0]}, W={valid_mems[1]}, O={valid_mems[2]}")
 
     no_dbl = [[0] * 3 for _ in range(acc.Num_mem + 1)]
-    best_lat, best_energy, best_loops = float('inf'), float('inf'), None
+    # Latency 优先: 单次扫描同时维护两个 incumbent
+    best_lat, best_lat_energy, best_lat_loops = float('inf'), float('inf'), None
+    best_edp, best_edp_lat, best_edp_energy, best_edp_loops = float('inf'), float('inf'), float('inf'), None
     candidates, feasible, mem_pruned, dbl_pruned, simu_fail = 0, 0, 0, 0, 0
     t0 = time.time()
 
@@ -226,7 +245,7 @@ def brute_force_temporal(acc, ops, scheme, log_fn=log):
                             elapsed = time.time() - t0
                             log_fn(f"    [{candidates:,}] pruned={mem_pruned:,} "
                                    f"dbl_pruned={dbl_pruned:,} feasible={feasible} "
-                                   f"best={best_lat:.0f} {elapsed:.1f}s")
+                                   f"best_lat={best_lat:.0f} best_edp={best_edp:.3e} {elapsed:.1f}s")
 
                         tm_list = [
                             Mapping(dim=perm[j][0], dimSize=perm[j][1],
@@ -260,8 +279,15 @@ def brute_force_temporal(acc, ops, scheme, log_fn=log):
 
                                 if lat < best_lat:
                                     best_lat = lat
-                                    best_energy = energy
-                                    best_loops = copy.deepcopy(loops)
+                                    best_lat_energy = energy
+                                    best_lat_loops = copy.deepcopy(loops)
+
+                                edp = lat * energy
+                                if edp < best_edp:
+                                    best_edp = edp
+                                    best_edp_lat = lat
+                                    best_edp_energy = energy
+                                    best_edp_loops = copy.deepcopy(loops)
 
                             except (ValueError, KeyError, IndexError,
                                     ZeroDivisionError, TypeError, AttributeError):
@@ -271,7 +297,9 @@ def brute_force_temporal(acc, ops, scheme, log_fn=log):
     stats = {'candidates': candidates, 'feasible': feasible,
              'mem_pruned': mem_pruned, 'dbl_pruned': dbl_pruned,
              'simu_fail': simu_fail, 'time': elapsed}
-    return best_lat, best_energy, best_loops, stats
+    return (best_lat, best_lat_energy, best_lat_loops,
+            best_edp, best_edp_lat, best_edp_energy, best_edp_loops,
+            stats)
 
 
 # ======================== 预定义测试用例 ========================
@@ -302,21 +330,71 @@ CASES = {
 }
 
 
-def run_verify(acc, ops, scheme, mip_timelimit=120, log_fn=log, arch_spec=None):
+def _run_mip_for_objective(arch_spec, ops, scheme, tu, mip_timelimit, objective, log_fn):
+    """Run one MIP under the given objective, return (mip_simu_lat, mip_simu_energy,
+    mip_obj_val, gap). Caller is responsible for restoring CONST.FLAG_OPT.
     """
-    arch_spec: 可选的 HardwareSpec 实例；若为 None 则回退 Architecture.templates.default.default_spec()。
-    用于支持 HW-Transformer 等非默认架构下的 bruteforce 对比。
+    from utils.SolverTSS import Solver
+    from utils.UtilsFunction.ToolFunction import prepare_save_dir
+    import logging
+
+    CONST.FLAG_OPT = objective
+    CONST.TIMELIMIT = mip_timelimit
+    CONST.MIPFOCUS = 1
+    FLAG.GUROBI_OUTPUT = False
+    FLAG.SIMU = False
+
+    mip_dir = os.path.join(os.path.dirname(__file__), '..', 'output',
+                           f"#BF_mip_compare_{objective.lower()}")
+    prepare_save_dir(mip_dir)
+
+    solver = Solver(acc=CIM_Acc.from_spec(arch_spec), ops=ops, tu=tu, su=scheme,
+                    metric_ub=CONST.MAX_POS, outputdir=mip_dir)
+    solver.run()
+
+    out = {'mip_simu_lat': None, 'mip_simu_energy': None,
+           'mip_obj_val': None, 'mip_gap': None}
+    if solver.model is not None and solver.model.SolCount > 0:
+        try:
+            gap = solver.model.MIPGap
+        except Exception:
+            gap = -1.0
+        logging.disable(logging.CRITICAL)
+        simu = tranSimulator(acc=CIM_Acc.from_spec(arch_spec), ops=ops, dataflow=solver.dataflow)
+        mip_simu_lat, mip_simu_energy = simu.run()
+        # solver.result is [latency, energy, edp]; pick by metric_index
+        metric_index = {"Latency": 0, "Energy": 1, "EDP": 2}.get(objective, 0)
+        out['mip_simu_lat'] = mip_simu_lat
+        out['mip_simu_energy'] = mip_simu_energy
+        out['mip_obj_val'] = float(solver.result[metric_index])
+        out['mip_gap'] = float(gap)
+    solver.close()
+    return out
+
+
+def run_verify(acc, ops, scheme, mip_timelimit=120, log_fn=log, arch_spec=None,
+               objectives=("Latency",)):
+    """完整的穷举验证流程：穷举搜索 + MIP对比。
+
+    arch_spec: 可选的 HardwareSpec 实例；为 None 则回退 default_spec()。
+    objectives: iterable of {"Latency", "EDP"}. 单次 brute-force pass 同时维护
+        latency 和 EDP incumbent；MIP 对比段对每个 objective 各跑一次（每次
+        独立 60-120s 求解，与 paper §5.3.3 + §5.2.2 attention cert 对齐）。
     """
     if arch_spec is None:
         arch_spec = default_spec()
-    """完整的穷举验证流程：穷举搜索 + MIP对比。
-    可被外部脚本直接调用以验证任意(acc, ops, scheme)组合。"""
+    objectives = tuple(objectives)
+    for obj in objectives:
+        if obj not in ("Latency", "EDP"):
+            raise ValueError(f"objective must be 'Latency' or 'EDP'; got {obj!r}")
 
     log_fn(f"\n{'='*60}")
-    log_fn(f"穷举验证")
+    log_fn(f"穷举验证   objectives={list(objectives)}")
     log_fn(f"{'='*60}")
 
-    best_lat, best_energy, best_loops, stats = brute_force_temporal(acc, ops, scheme, log_fn)
+    (best_lat, best_lat_energy, best_lat_loops,
+     best_edp, best_edp_lat, best_edp_energy, best_edp_loops,
+     stats) = brute_force_temporal(acc, ops, scheme, log_fn)
 
     log_fn(f"\n搜索完成:")
     log_fn(f"  总候选映射: {stats['candidates']:,}")
@@ -325,50 +403,50 @@ def run_verify(acc, ops, scheme, mip_timelimit=120, log_fn=log, arch_spec=None):
     log_fn(f"  Simulator失败: {stats['simu_fail']:,}")
     log_fn(f"  可行解: {stats['feasible']:,}")
     log_fn(f"  耗时: {stats['time']:.1f}s")
-    log_fn(f"  穷举最优 Latency = {best_lat:.0f} cycles")
-    log_fn(f"  穷举最优 Energy  = {best_energy:.2f} nJ")
-    if best_loops:
-        log_fn(f"\n穷举最优映射:\n{best_loops}")
+    log_fn(f"  穷举最优 Latency = {best_lat:.0f} cycles  (energy at min-lat = {best_lat_energy:.2f} nJ)")
+    log_fn(f"  穷举最优 EDP     = {best_edp:.3e}  (lat={best_edp_lat:.0f} energy={best_edp_energy:.2f})")
+    if best_lat_loops:
+        log_fn(f"\n穷举最优 latency 映射:\n{best_lat_loops}")
+    if best_edp_loops and best_edp_loops is not best_lat_loops:
+        log_fn(f"\n穷举最优 EDP 映射:\n{best_edp_loops}")
 
-    # MIP对比
-    from utils.SolverTSS import Solver
-    from utils.UtilsFunction.ToolFunction import prepare_save_dir
-    import logging
-
-    CONST.FLAG_OPT = "Latency"
-    CONST.TIMELIMIT = mip_timelimit
-    CONST.MIPFOCUS = 1
-    FLAG.GUROBI_OUTPUT = False
-    FLAG.SIMU = False
-
+    # MIP 对比 (每个 objective 独立跑)
     spatial = [math.prod(col) for col in zip(*scheme)]
     tu = [math.ceil(x / y) for x, y in zip(ops.dim2bound, spatial)]
-    mip_dir = os.path.join(os.path.dirname(__file__), '..', 'output', "#BF_mip_compare")
-    prepare_save_dir(mip_dir)
 
-    solver = Solver(acc=CIM_Acc.from_spec(arch_spec), ops=ops, tu=tu, su=scheme,
-                    metric_ub=CONST.MAX_POS, outputdir=mip_dir)
-    solver.run()
+    mip_results = {}    # obj_name -> {mip_simu_lat, mip_simu_energy, mip_obj_val, mip_gap}
+    gap_to_bf = {}      # obj_name -> percent gap of MIP vs brute-force in that obj
 
-    mip_simu_lat = None
-    if solver.model is not None and solver.model.SolCount > 0:
-        try:
-            gap = solver.model.MIPGap
-        except Exception:
-            gap = -1
-        logging.disable(logging.CRITICAL)
-        simu = tranSimulator(acc=CIM_Acc.from_spec(arch_spec), ops=ops, dataflow=solver.dataflow)
-        mip_simu_lat, _ = simu.run()
+    for obj in objectives:
+        log_fn(f"\n--- MIP 对比 (objective={obj}) ---")
+        mip_out = _run_mip_for_objective(arch_spec, ops, scheme, tu, mip_timelimit, obj, log_fn)
+        mip_results[obj] = mip_out
 
-        log_fn(f"\nMIP对比:")
-        log_fn(f"  MIP+Simu Latency = {mip_simu_lat:.0f} (MIP obj={solver.result[0]:.0f}, gap={gap*100:.1f}%)")
-        log_fn(f"  穷举最优 Latency = {best_lat:.0f}")
-        if best_lat > 0 and best_lat < float('inf'):
-            diff = (mip_simu_lat - best_lat) / best_lat * 100
-            log_fn(f"  差距: {diff:+.2f}%")
-    else:
-        log_fn(f"\nMIP求解失败")
-    solver.close()
+        if mip_out['mip_simu_lat'] is None:
+            log_fn(f"  MIP 求解失败")
+            gap_to_bf[obj] = None
+            continue
+
+        mlat = mip_out['mip_simu_lat']
+        meng = mip_out['mip_simu_energy']
+        medp = mlat * meng
+        log_fn(f"  MIP+Simu Latency = {mlat:.0f}   Energy = {meng:.2f}   EDP = {medp:.3e}")
+        log_fn(f"  MIP analytical obj_val = {mip_out['mip_obj_val']:.3e}   MIPGap = {mip_out['mip_gap']*100:.2f}%")
+
+        if obj == "Latency":
+            bf_target = best_lat
+            mip_metric = mlat
+        else:  # EDP
+            bf_target = best_edp
+            mip_metric = medp
+
+        if bf_target > 0 and bf_target < float('inf'):
+            diff_pct = (mip_metric - bf_target) / bf_target * 100
+            gap_to_bf[obj] = round(diff_pct, 3)
+            log_fn(f"  vs 穷举最优 {obj} = {bf_target:.3e}   差距 = {diff_pct:+.3f}%")
+        else:
+            gap_to_bf[obj] = None
+
     log_fn("=" * 60)
 
     # 保存结构化结果到 output/Eval_Result/
@@ -378,67 +456,75 @@ def run_verify(acc, ops, scheme, mip_timelimit=120, log_fn=log, arch_spec=None):
         'script': 'VerifyBruteforce',
         'workload': str(ops),
         'scheme': scheme,
+        'objectives_compared': list(objectives),
         'bruteforce': {
             'optimal_latency': best_lat if best_lat < float('inf') else None,
-            'optimal_energy': best_energy if best_energy < float('inf') else None,
+            'optimal_latency_energy': best_lat_energy if best_lat_energy < float('inf') else None,
+            'optimal_edp': best_edp if best_edp < float('inf') else None,
+            'optimal_edp_latency': best_edp_lat if best_edp_lat < float('inf') else None,
+            'optimal_edp_energy': best_edp_energy if best_edp_energy < float('inf') else None,
             'feasible_count': stats['feasible'],
             'candidates': stats['candidates'],
             'time_seconds': round(stats['time'], 1),
         },
-        'mip': {
-            'simu_latency': mip_simu_lat,
-        },
-        'optimality_gap_pct': round((mip_simu_lat - best_lat) / best_lat * 100, 2)
-            if mip_simu_lat and best_lat and best_lat < float('inf') else None,
+        'mip_per_objective': {obj: mip_results[obj] for obj in objectives},
+        'optimality_gap_pct_per_objective': gap_to_bf,
     }
     result_file = save_result_json(result_dir, 'bruteforce', result)
     log_fn(f"\n结果已保存: {result_file}")
 
     exp6_file = save_experiment_json(
         output_dir=result_dir,
-        file_name=f"EXP-6_bruteforce_{time.strftime('%Y%m%d_%H%M%S')}.json",
-        experiment_id="EXP-6",
+        file_name=f"bruteforce_search_{time.strftime('%Y%m%d_%H%M%S')}.json",
+        experiment_id="bruteforce_search",
         script_path=__file__,
         config={
             "verification_method": "bruteforce",
             "workload": {dim: getattr(ops, dim) for dim in ops.dim2Dict if dim != '-'},
             "scheme": scheme,
             "mip_time_limit": mip_timelimit,
+            "objectives_compared": list(objectives),
         },
         results={
             "verification": {
                 "independent_optimal_latency": best_lat if best_lat < float('inf') else None,
-                "independent_optimal_energy": best_energy if best_energy < float('inf') else None,
+                "independent_optimal_latency_energy": best_lat_energy if best_lat_energy < float('inf') else None,
+                "independent_optimal_edp": best_edp if best_edp < float('inf') else None,
+                "independent_optimal_edp_latency": best_edp_lat if best_edp_lat < float('inf') else None,
+                "independent_optimal_edp_energy": best_edp_energy if best_edp_energy < float('inf') else None,
                 "feasible_count": stats['feasible'],
                 "candidate_count": stats['candidates'],
                 "search_time_seconds": round(stats['time'], 3),
-                "mip_simulator_latency": mip_simu_lat,
-                "optimality_gap_pct": round((mip_simu_lat - best_lat) / best_lat * 100, 2)
-                    if mip_simu_lat and best_lat and best_lat < float('inf') else None,
+                "mip_per_objective": mip_results,
+                "optimality_gap_pct_per_objective": gap_to_bf,
             },
             "optimality_verification": [{
                 "model": "manual",
                 "layer": f"Conv_{ops.R}x{ops.S}_C{ops.C}K{ops.K}",
                 "tier": "small",
-                "mip_latency": mip_simu_lat,
-                "exhaustive_latency": best_lat if best_lat < float('inf') else None,
-                "is_optimal": (
-                    mip_simu_lat is not None
-                    and best_lat < float('inf')
-                    and abs(mip_simu_lat - best_lat) / best_lat < 0.01
-                ),
-                "optimality_gap_pct": round((mip_simu_lat - best_lat) / best_lat * 100, 2)
-                    if mip_simu_lat and best_lat and best_lat < float('inf') else None,
+                "objective": obj,
+                "mip_metric": (mip_results[obj]['mip_simu_lat'] if obj == 'Latency'
+                               else (mip_results[obj]['mip_simu_lat'] * mip_results[obj]['mip_simu_energy']
+                                     if mip_results[obj]['mip_simu_lat'] is not None else None)),
+                "exhaustive_metric": (best_lat if obj == 'Latency'
+                                       else best_edp) if (best_lat < float('inf')) else None,
+                "optimality_gap_pct": gap_to_bf[obj],
+                "is_optimal": (gap_to_bf[obj] is not None and abs(gap_to_bf[obj]) < 1.0),
                 "solve_time_sec": round(stats['time'], 3),
                 "num_spatial_schemes": stats['candidates'],
-                "num_schemes_after_pruning": stats['feasible']
-            }],
+                "num_schemes_after_pruning": stats['feasible'],
+            } for obj in objectives],
         },
         anomalies=[],
     )
-    log_fn(f"EXP-6结果已保存: {exp6_file}")
+    log_fn(f"bruteforce_search结果已保存: {exp6_file}")
 
-    return best_lat, mip_simu_lat
+    return {
+        'bruteforce_best_lat': best_lat,
+        'bruteforce_best_edp': best_edp,
+        'mip_per_objective': mip_results,
+        'optimality_gap_pct_per_objective': gap_to_bf,
+    }
 
 
 # ======================== 主程序 ========================
@@ -452,7 +538,12 @@ if __name__ == "__main__":
     parser.add_argument('--timelimit', type=int, default=120, help="MIP求解时间限制(秒)")
     parser.add_argument('--arch', default='CIM_ACC_TEMPLATE',
                         help="架构注册名：CIM_ACC_TEMPLATE（默认 HW-Small）或 CIM_ACC_TEMPLATE_TRANSFORMER（HW-Transformer）")
+    parser.add_argument('--objective', default='latency', choices=('latency', 'edp', 'both'),
+                        help="MIP 对比 objective: latency (默认), edp, 或 both "
+                             "（both 模式下单次 enumeration 同时对两个 objective 做 MIP cert）")
     args = parser.parse_args()
+    objectives = {'latency': ('Latency',), 'edp': ('EDP',),
+                  'both': ('Latency', 'EDP')}[args.objective]
 
     # 通过架构注册表解析 spec；未注册则抛出明确错误
     from importlib import import_module
@@ -485,4 +576,5 @@ if __name__ == "__main__":
     log(f"\n负载: {ops}")
     log(f"PE阵列: {acc.Num_core} cores × {acc.dimX}(BL) × {acc.dimY}(WL)")
 
-    run_verify(acc, ops, case['scheme'], mip_timelimit=args.timelimit, arch_spec=_arch_spec)
+    run_verify(acc, ops, case['scheme'], mip_timelimit=args.timelimit,
+               arch_spec=_arch_spec, objectives=objectives)

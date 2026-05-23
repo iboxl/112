@@ -26,6 +26,7 @@ VARIANT_LABELS = {
 STRUCTURAL_VARIANTS = {
     "fixed-double-buffer": {"ABLATION_FIXED_DOUBLE_BUFFER": True},
     "simplified-pipeline": {"ABLATION_SIMPLIFIED_PIPELINE": True},
+    "psum-capacity-only": {"ABLATION_PSUM_CAPACITY_ONLY": True},
 }
 
 
@@ -57,14 +58,14 @@ def _degradation_vs_full(result_total, full_total):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="EXP-3 objective-function ablation")
+    parser = argparse.ArgumentParser(description="objective_ablation")
     parser.add_argument("--models", nargs="+", default=["resnet18", "mobilenetV2"])
     parser.add_argument("--objectives", nargs="+", default=["Latency", "Energy", "EDP"])
     parser.add_argument("--structural", nargs="*", default=None,
                         choices=list(STRUCTURAL_VARIANTS.keys()),
                         help="Structural ablation variants to run (e.g. fixed-double-buffer)")
-    parser.add_argument("--architecture", default="CIM_ACC_TEMPLATE")
-    parser.add_argument("--timeLimit", type=int, default=120)
+    parser.add_argument("--architecture", default="CIM_ACC_DEFAULT_SETUP")
+    parser.add_argument("--timeLimit", type=int, default=60)
     parser.add_argument("--mipFocus", type=int, default=1)
     parser.add_argument("--maxLayers", type=int, default=None)
     parser.add_argument("--layers", nargs="+", default=None,
@@ -72,8 +73,8 @@ def main():
     parser.add_argument("-o", "--outputdir", dest="output_dir", default=None)
     args = parser.parse_args()
 
-    output_dir = make_output_dir("exp3_ablation", args.output_dir)
-    setup_experiment_logger(output_dir, "exp3.log")
+    output_dir = make_output_dir("objective_ablation", args.output_dir)
+    setup_experiment_logger(output_dir, "objective_ablation.log")
 
     ablation_results = []
     anomalies = []
@@ -181,13 +182,14 @@ def main():
     acc = make_accelerator(args.architecture)
     json_path = save_experiment_json(
         output_dir=output_dir,
-        file_name="EXP-3.json",
-        experiment_id="EXP-3",
+        file_name="objective_ablation.json",
+        experiment_id="objective_ablation",
         script_path=__file__,
         config={
             "models": args.models,
             "objectives": args.objectives,
             "architecture": hardware_spec_from_acc(acc),
+            "architecture_key": args.architecture,
             "time_limit": args.timeLimit,
             "mip_focus": args.mipFocus,
             "structural_variants": args.structural or [],

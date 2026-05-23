@@ -1,5 +1,5 @@
 # Evaluation/RunBaselineWallTime.py
-# EXP-7d: Per-layer solver wall-time across all baselines on MIREDO case layers L1-L4
+# baseline_walltime: Per-layer solver wall-time across all baselines on MIREDO case layers L1-L4
 import argparse
 import copy
 import datetime
@@ -34,6 +34,12 @@ from Evaluation.common.CaseLayerShapes import CASE_LAYERS_DETAILS
 from utils.UtilsFunction.ToolFunction import prepare_save_dir
 from utils.Workload import WorkLoad
 
+# Architecture for this run. main() overrides from --architecture.
+# Rerun default CIM_ACC_DEFAULT_SETUP matches Phase A-E; legacy was CIM_ACC_TEMPLATE.
+# Single-process script, so a module global is safe for threading the arch into
+# the cold-cache cleanup helpers and the per-method timers.
+ARCH = "CIM_ACC_DEFAULT_SETUP"
+
 
 def get_provenance():
     try:
@@ -44,7 +50,7 @@ def get_provenance():
     except Exception:
         commit = "unknown"
     return {
-        "repo": "/home/xiaolin/pro/overleaf/MIREDO/MIREDO",
+        "repo": os.path.dirname(os.path.dirname(os.path.abspath(__file__))),  # code repo, portable (was hardcoded stray)
         "commit": commit,
         "script": "Evaluation/RunBaselineWallTime.py",
         "timestamp": datetime.datetime.now().astimezone().isoformat(),
@@ -56,9 +62,9 @@ def get_provenance():
 def _invalidate_cimloop_cache(layer_spec):
     """Remove the CIMLoop on-disk cache for CIM_ACC_TEMPLATE / Latency so timing is cold."""
     try:
-        spec = _resolve_default_spec("CIM_ACC_TEMPLATE")
+        spec = _resolve_default_spec(ARCH)
         model_name = layer_spec["source"].replace(" ", "_")
-        cache_root = _cimloop_cache_root("CIM_ACC_TEMPLATE", "Latency", model_name, spec)
+        cache_root = _cimloop_cache_root(ARCH, "Latency", model_name, spec)
         if cache_root.exists():
             shutil.rmtree(str(cache_root), ignore_errors=True)
             print(f"    [cache] removed CIMLoop cache: {cache_root}", flush=True)
@@ -71,13 +77,13 @@ def _invalidate_cimloop_cache(layer_spec):
 def _invalidate_cosa_cache(layer_spec):
     """Remove the CoSA on-disk caches (both regular and constrained) so timing is cold."""
     try:
-        spec = _resolve_default_spec("CIM_ACC_TEMPLATE")
+        spec = _resolve_default_spec(ARCH)
         model_name = layer_spec["source"].replace(" ", "_")
         for root_fn, label in [
             (_cosa_cache_root, "CoSA"),
-            (_cosa_constrained_cache_root, "CoSA-constrained"),
+            (_cosa_constrained_cache_root, "CoSA-legal"),
         ]:
-            cache_root = root_fn("CIM_ACC_TEMPLATE", "Latency", model_name, spec)
+            cache_root = root_fn(ARCH, "Latency", model_name, spec)
             if cache_root.exists():
                 shutil.rmtree(str(cache_root), ignore_errors=True)
                 print(f"    [cache] removed {label} cache: {cache_root}", flush=True)
@@ -108,7 +114,7 @@ def _is_na_result(result):
 
 def time_baseline(method, layer_spec, output_dir):
     """Time a single baseline method on a single layer (cold cache)."""
-    acc = make_accelerator("CIM_ACC_TEMPLATE")
+    acc = make_accelerator(ARCH)
     loopdim = copy.deepcopy(layer_spec["loopdim"])
     ops = WorkLoad(loopDim=loopdim)
     model_name = layer_spec["source"].replace(" ", "_")
@@ -119,7 +125,7 @@ def time_baseline(method, layer_spec, output_dir):
     # Invalidate on-disk caches so timing reflects a real cold run
     if method == "cimloop":
         _invalidate_cimloop_cache(layer_spec)
-    elif method in ("cosa", "cosa-constrained"):
+    elif method in ("cosa", "cosa_legal"):
         _invalidate_cosa_cache(layer_spec)
 
     t0 = time.time()
@@ -132,7 +138,7 @@ def time_baseline(method, layer_spec, output_dir):
             ops=ops,
             loopdim=loopdim,
             model_name=model_name,
-            architecture="CIM_ACC_TEMPLATE",
+            architecture=ARCH,
             objective="Latency",
             raise_on_unsupported=False,
             use_cache=False,
@@ -177,7 +183,7 @@ def _invalidate_miredo_mip_cache_key(layer_spec, time_limit, mip_focus):
         _ensure_cache_loaded()
         from Evaluation.common import EvalCommon as EC
 
-        acc = make_accelerator("CIM_ACC_TEMPLATE")
+        acc = make_accelerator(ARCH)
         solver_loopdim = normalize_loopdim_for_solver(copy.deepcopy(layer_spec["loopdim"]))
         key = _make_cache_key(
             acc=acc, solver_loopdim=solver_loopdim, objective="Latency",
@@ -207,7 +213,7 @@ def time_miredo(layer_spec, output_dir, time_limit, mip_focus):
     miredo = None
     try:
         miredo = run_miredo_layer(
-            acc=make_accelerator("CIM_ACC_TEMPLATE"),
+            acc=make_accelerator(ARCH),
             loopdim=copy.deepcopy(layer_spec["loopdim"]),
             outputdir=layer_dir,
             objective="Latency",
@@ -260,23 +266,33 @@ def time_miredo(layer_spec, output_dir, time_limit, mip_focus):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="EXP-7d: Per-layer solver wall-time across all baselines on L1-L4"
+        description="baseline_walltime: Per-layer solver wall-time across all baselines on L1-L4"
     )
     parser.add_argument("--layer-ids", nargs="+", default=["L1", "L2", "L3", "L4"])
     parser.add_argument(
         "--methods", nargs="+",
-        default=["ws", "zigzag", "cimloop", "cosa", "cosa-constrained", "miredo"],
+        default=["ws", "zigzag", "cimloop", "cosa", "cosa_legal", "miredo"],
     )
     parser.add_argument("--time-limit", type=int, default=60)
     parser.add_argument("--mip-focus", type=int, default=1)
     parser.add_argument(
+        "--architecture", default="CIM_ACC_DEFAULT_SETUP",
+        help="Architecture registry key (rerun default: CIM_ACC_DEFAULT_SETUP, "
+             "matching Phase A-E; legacy was CIM_ACC_TEMPLATE)"
+    )
+    parser.add_argument(
         "--output-json",
-        default="/home/xiaolin/pro/overleaf/MIREDO/experiments/parsed_metrics/"
-                "EXP-7d_baseline_walltime_20260429.json",
+        # FIX 2026-05-17: code-repo-relative (portable; MIREDO/output/).
+        default=os.path.join(os.path.dirname(__file__), "..", "output",
+                             "baseline_walltime.json"),
     )
     args = parser.parse_args()
 
-    output_dir = make_output_dir("exp7d_baseline_walltime", None)
+    global ARCH
+    ARCH = args.architecture
+    print(f"Architecture: {ARCH}", flush=True)
+
+    output_dir = make_output_dir("baseline_walltime", None)
     print(f"Output directory: {output_dir}", flush=True)
 
     prov = get_provenance()
@@ -318,13 +334,14 @@ def main():
             # Incremental write — no previous EXP file is touched
             os.makedirs(os.path.dirname(args.output_json), exist_ok=True)
             out = {
-                "experiment_id": "EXP-7d",
+                "experiment_id": "baseline_walltime",
                 "provenance": prov,
                 "config": {
                     "time_limit": args.time_limit,
                     "mip_focus": args.mip_focus,
                     "objective": "Latency",
-                    "architecture": "CIM_ACC_TEMPLATE",
+                    "architecture": ARCH,
+                    "architecture_key": ARCH,
                     "cache_policy": "all_methods_cold_per_row; per-key MIP cache invalidation for MIREDO; zigzag now passes use_cache=False through adapter interface (no .pkl files deleted); preserves other entries in output/.mip_cache.pkl",
                     "wall_sec_includes": "end-to-end (mapper + MIREDO simulator wrap for ZigZag/CoSA/CIMLoop; MIREDO has no external wrap, so its wall_sec equals SolveMapping wall)",
                     "mapper_wall_sec_includes": "mapper-only wall time (ZigZag MainStage / WS rule application / CoSA MIP / CIMLoop timeloop-mapper / MIREDO SolveMapping); excludes the post-hoc tranSimulator wrap added by MIREDO's adapter pipeline for ZigZag/CoSA/CIMLoop",
@@ -336,7 +353,7 @@ def main():
             print(f"  -> JSON updated ({len(rows)} records): {args.output_json}", flush=True)
 
     # ── Summary tables ────────────────────────────────────────────────────
-    method_order = ["ws", "zigzag", "cimloop", "cosa", "cosa-constrained", "miredo"]
+    method_order = ["ws", "zigzag", "cimloop", "cosa", "cosa_legal", "miredo"]
     by_layer = {}
     for r in rows:
         by_layer.setdefault(r["layer_id"], {})[r["method"]] = r

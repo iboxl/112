@@ -340,8 +340,8 @@ def run_enumeration(spec, ops_dict, scheme, timelimit=15, max_workers=None, metr
 
     exp6_file = save_experiment_json(
         output_dir=result_dir,
-        file_name=f"EXP-6_enumLoop_{time.strftime('%Y%m%d_%H%M%S')}.json",
-        experiment_id="EXP-6",
+        file_name=f"enumloop_verify_{time.strftime('%Y%m%d_%H%M%S')}.json",
+        experiment_id="enumloop_verify",
         script_path=__file__,
         config={
             "verification_method": "enumLoop",
@@ -376,7 +376,7 @@ def run_enumeration(spec, ops_dict, scheme, timelimit=15, max_workers=None, metr
         },
         anomalies=[],
     )
-    log(f"EXP-6结果已保存: {exp6_file}")
+    log(f"enumloop_verify结果已保存: {exp6_file}")
 
     return best_lat, best_idx, per_ordering
 
@@ -407,16 +407,34 @@ if __name__ == "__main__":
     parser.add_argument('--case', default='1x1_C64K64', choices=list(CASES.keys()))
     parser.add_argument('--timelimit', type=int, default=15)
     parser.add_argument('--workers', type=int, default=None)
+    parser.add_argument('--objective', default='latency', choices=('latency', 'edp', 'both'),
+                        help="MIP objective: latency (default), edp, or both. "
+                             "'both' runs the enumeration twice (once per objective) "
+                             "with independent SharedUB cutoffs and reports both certs.")
     args = parser.parse_args()
+    objectives = {'latency': ('Latency',), 'edp': ('EDP',),
+                  'both': ('Latency', 'EDP')}[args.objective]
 
     spec = default_spec()
     Logger.setcfg(setcritical=False, setDebug=False, STD=True, file="", nofile=True)
 
     case = CASES[args.case]
-    best_lat, best_idx, _ = run_enumeration(
-        spec=spec,
-        ops_dict=case['ops'],
-        scheme=case['scheme'],
-        timelimit=args.timelimit,
-        max_workers=args.workers,
-    )
+    results_per_obj = {}
+    for obj in objectives:
+        log("\n" + "#" * 60)
+        log(f"# 枚举 objective = {obj}")
+        log("#" * 60)
+        best, best_idx, _ = run_enumeration(
+            spec=spec,
+            ops_dict=case['ops'],
+            scheme=case['scheme'],
+            timelimit=args.timelimit,
+            max_workers=args.workers,
+            metric=obj,
+        )
+        results_per_obj[obj] = {'best_objective_value': best, 'best_ordering_idx': best_idx}
+    log("\n" + "=" * 60)
+    log("Per-objective enumeration summary:")
+    for obj, r in results_per_obj.items():
+        log(f"  {obj:<8}: global-best obj_value={r['best_objective_value']:.3e} (ordering #{r['best_ordering_idx']})")
+    log("=" * 60)

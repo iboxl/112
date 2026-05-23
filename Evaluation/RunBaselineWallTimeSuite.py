@@ -1,9 +1,9 @@
-"""EXP-7g: Full-suite per-layer wall-time across baselines.
+"""walltime_suite: Full-suite per-layer wall-time across baselines.
 
 Diagnostic experiment for case-layer selection. NOT a paper artifact.
 
 Scope:
-  - Methods: ws, zigzag, cosa, cosa-constrained
+  - Methods: ws, zigzag, cosa, cosa_legal
     (cimloop and miredo intentionally excluded; cimloop already matches the
      paper, miredo is not a baseline.)
   - Networks: ResNet-18, VGG19BN, AlexNet, MobileNet-v2, EfficientNet-B0
@@ -13,7 +13,7 @@ Scope:
   - Strict sequential execution (one method × one layer at a time) to avoid
     CPU/L3/memory-bandwidth contention that would inflate wall measurements.
 
-Output: experiments/parsed_metrics/EXP-7g_full_suite_walltime_baselines_<date>.json
+Output: experiments/parsed_metrics/walltime_suite_full_suite_walltime_baselines_<date>.json
 Each row carries: method, wall_sec, mapper_wall_sec, latency, is_na, error,
 layer_id, model, layer_family, MAC count, loopdim. The driver writes the JSON
 incrementally so a crash mid-run still leaves usable partial data.
@@ -58,7 +58,7 @@ from utils.Workload import WorkLoad
 # grouped/depthwise conv that dominates these models).
 COSA_SKIP_NETWORKS = {"mobilenetV2", "EfficientNet-B0"}
 
-BASELINE_METHODS = ["ws", "zigzag", "cosa", "cosa-constrained"]
+BASELINE_METHODS = ["ws", "zigzag", "cosa", "cosa_legal"]
 
 
 def get_provenance():
@@ -70,7 +70,7 @@ def get_provenance():
     except Exception:
         commit = "unknown"
     return {
-        "repo": "/home/xiaolin/pro/overleaf/MIREDO/MIREDO",
+        "repo": os.path.dirname(os.path.dirname(os.path.abspath(__file__))),  # code repo, portable (was hardcoded stray)
         "commit": commit,
         "script": "Evaluation/RunBaselineWallTimeSuite.py",
         "timestamp": datetime.datetime.now().astimezone().isoformat(),
@@ -85,7 +85,7 @@ def _invalidate_cosa_cache(model_name):
         spec = _resolve_default_spec("CIM_ACC_TEMPLATE")
         for root_fn, label in [
             (_cosa_cache_root, "CoSA"),
-            (_cosa_constrained_cache_root, "CoSA-constrained"),
+            (_cosa_constrained_cache_root, "CoSA-legal"),
         ]:
             cache_root = root_fn("CIM_ACC_TEMPLATE", "Latency", model_name, spec)
             if cache_root.exists():
@@ -169,7 +169,7 @@ def time_baseline(method, model_name, layer_dict, output_dir):
 
 def _write_json(out_path, prov, results, models, methods, started_at, finished_at=None):
     out = {
-        "experiment_id": "EXP-7g",
+        "experiment_id": "walltime_suite",
         "purpose": (
             "Diagnostic full-suite per-layer wall-time across baselines for "
             "case-layer selection. NOT a paper artifact."
@@ -211,17 +211,18 @@ def _write_json(out_path, prov, results, models, methods, started_at, finished_a
 
 
 def main():
-    parser = argparse.ArgumentParser(description="EXP-7g full-suite baseline wall-time")
+    parser = argparse.ArgumentParser(description="walltime_suite full-suite baseline wall-time")
     parser.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
     parser.add_argument("--methods", nargs="+", default=BASELINE_METHODS)
     parser.add_argument(
         "--output-json",
-        default="/home/xiaolin/pro/overleaf/MIREDO/experiments/parsed_metrics/"
-                "EXP-7g_full_suite_walltime_baselines_20260503.json",
+        # FIX 2026-05-17: code-repo-relative (portable; MIREDO/output/).
+        default=os.path.join(os.path.dirname(__file__), "..", "output",
+                             "walltime_suite_baselines.json"),
     )
     args = parser.parse_args()
 
-    output_dir = make_output_dir("exp7g_full_suite_walltime", None)
+    output_dir = make_output_dir("walltime_suite", None)
     print(f"Output directory: {output_dir}", flush=True)
 
     prov = get_provenance()

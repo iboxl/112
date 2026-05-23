@@ -61,58 +61,67 @@ def append_scheme_summary(outputdir:str, message:str):
 
 
 def detect_parallel_config():
-    logical_cores = psutil.cpu_count() or 1
-    physical_cores = psutil.cpu_count(logical=False) or logical_cores
-    memory_info = psutil.virtual_memory()
-    available_mem_gb = memory_info.available / (1024 ** 3)
+    """Parallel-execution budget = the machine's physical core count.
 
-    try:
-        load_avg = os.getloadavg()[0]
-        busy_cores = min(physical_cores - 1, math.floor(load_avg))
-    except (AttributeError, OSError):
-        busy_cores = 0
+    No load-average adjustment, no env override, no fallback: deliberately
+    targets known production hardware (>=16 physical cores). `usable_cores`
+    is simply the physical core count, so the scout/sweep allocation is
+    deterministic per machine (reproducible — no loadavg jitter).
 
-    usable_cores = max(1, physical_cores - busy_cores)
+    `available_mem_gb` is kept only for the per-worker SOFT memory limit
+    (Gurobi spill threshold), NOT for capping worker count.
+    """
+    logical_cores = psutil.cpu_count()
+    physical_cores = psutil.cpu_count(logical=False)
+    available_mem_gb = psutil.virtual_memory().available / (1024 ** 3)
 
     return {
         "physical_cores": physical_cores,
         "logical_cores": logical_cores,
-        "usable_cores": usable_cores,
+        "usable_cores": physical_cores,
         "available_mem_gb": available_mem_gb,
     }
 
 
 def auto_parallel_config(usable_cores, available_mem_gb, num_schemes):
-    """Decide threads_per_worker and max_workers based on hardware and workload.
+    """Parallel config derived from physical core count.
 
-    Strategy:
-    - Many schemes (>= 2×cores): maximize workers (2 threads each) for faster
-      cross-scheme pruning via shared_ub.
-    - Few schemes (< cores): give each solver more threads to finish faster.
-    - Memory constraint: each Gurobi instance needs ~2 GB; cap workers accordingly.
+    Returns {"scout": (threads, workers), "sweep": (threads, workers),
+             "scout_size": int}.
+
+    FIX 2026-05-20 (root cause of the §5.2 EDP regression, single-variable
+    bit-exact proof): SCOUT = 8 threads/scheme is the proven-necessary solve
+    depth. The 0516 defect was scout_threads=4 + 4-way contention (NOT the
+    window); 8 threads bit-exactly reproduces the pre-0516 curated optima,
+    16 gives no further gain (Gurobi B&C plateau). workers = cores // 8.
+    SWEEP retained at 1 thread × cores workers — the cheap 16-wide cull for
+    the ~98% of schemes that are presolve-infeasible junk (without it every
+    layer reverts to the OLD multi-day cost regime). scout_size = 20: a
+    202-instance curated-CNN audit found true-winner max util_product rank
+    = 15, so the winner stays in the 8-thread scout arm with margin.
+    (Open: hard-layer true optima MIREDO currently misses may rank >20 —
+    validated empirically before the full rerun, not assumed.)
+
+    MIREDO_DISABLE_SCOUT_SWEEP (default OFF, pre-existing): truthy value
+    forces every scheme through the scout config in one uniform phase.
+    No effect unless set.
     """
-    if num_schemes <= 1:
-        return usable_cores, 1
+    cores = usable_cores                       # = physical core count
+    scout_threads = 8                          # proven solve depth (see above)
+    scout_workers = max(1, cores // scout_threads)   # cores//8, no oversub
+    sweep_threads = 1                                # cheap wide infeasible
+    sweep_workers = max(1, cores // sweep_threads)   # cull: 1t × cores workers
 
-    if num_schemes <= usable_cores:
-        # Few schemes: allocate cores evenly, ensure >= 2 threads for Gurobi.
-        threads_per_worker = max(2, usable_cores // num_schemes)
-        max_workers = max(1, usable_cores // threads_per_worker)
-    else:
-        # Many schemes: 99%+ are quickly pruned (dominance/LB/metric_ub),
-        # but each still costs ~0.3-0.5s for model build + presolve.
-        # Throughput of infeasible scheme processing dominates wall time,
-        # so maximize workers. 2 threads is sufficient for Gurobi presolve
-        # and basic B&B on the few feasible schemes.
-        threads_per_worker = max(1, min(2, usable_cores))
-        max_workers = max(1, usable_cores // threads_per_worker)
+    if os.environ.get("MIREDO_DISABLE_SCOUT_SWEEP", "").strip().lower() \
+            not in ("", "0", "false", "no"):
+        return {
+            "scout": (scout_threads, scout_workers),
+            "sweep": (scout_threads, scout_workers),
+            "scout_size": num_schemes,
+        }
 
-    # Memory cap: ~2 GB per solver instance as conservative estimate
-    mem_per_worker = 2.0
-    max_by_mem = max(1, int(available_mem_gb * 0.8 / mem_per_worker))
-    if max_by_mem < max_workers:
-        max_workers = max_by_mem
-        # Redistribute remaining cores, but keep at least the original thread count
-        threads_per_worker = max(threads_per_worker, usable_cores // max_workers)
-
-    return threads_per_worker, max_workers
+    return {
+        "scout": (scout_threads, scout_workers),
+        "sweep": (sweep_threads, sweep_workers),
+        "scout_size": min(num_schemes, 20),
+    }

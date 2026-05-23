@@ -1,4 +1,4 @@
-"""EXP-6 follow-up diagnostic: four-quadrant attribution of the 3x3 model gap.
+"""gap_attribution: four-quadrant attribution of the 3x3 model gap.
 
 For each case (A: 3x3_C16K16_P7, B: 3x3_C32K32_P7), we compute:
 
@@ -26,7 +26,7 @@ reconstructed (sm, tm) and keeping the one whose simulator latency equals the
 known bruteforce optimum.
 
 Runs one MIP-pin-and-solve per case. Writes a single JSON to
-output/Eval_Result/EXP-6_diagnose_<timestamp>.json.
+output/Eval_Result/gap_attribution_<timestamp>.json.
 """
 
 import os
@@ -489,7 +489,7 @@ def diagnose_case(case_id, mip_timelimit_mbf=60, mip_timelimit_mmip=1800):
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="EXP-6 four-quadrant diagnostic")
+    parser = argparse.ArgumentParser(description="gap_attribution four-quadrant diagnostic")
     parser.add_argument('--cases', default='A,B',
                         help="comma-separated case IDs (subset of A,B)")
     parser.add_argument('--tl-mbf', type=int, default=60,
@@ -500,7 +500,7 @@ if __name__ == "__main__":
                              "solver-time from model-gap")
     parser.add_argument('--output', default=None,
                         help="JSON output path; default = "
-                             "output/Eval_Result/EXP-6_diagnose_<ts>.json")
+                             "output/Eval_Result/gap_attribution_<ts>.json")
     args = parser.parse_args()
 
     Logger.setcfg(setcritical=False, setDebug=False, STD=True, file="", nofile=True)
@@ -518,10 +518,10 @@ if __name__ == "__main__":
     out_dir = os.path.join(os.path.dirname(__file__), '..', 'output', 'Eval_Result')
     os.makedirs(out_dir, exist_ok=True)
     ts = time.strftime('%Y%m%d_%H%M%S')
-    out_path = args.output or os.path.join(out_dir, f'EXP-6_diagnose_{ts}.json')
+    out_path = args.output or os.path.join(out_dir, f'gap_attribution_{ts}.json')
 
     payload = {
-        'experiment_id': 'EXP-6-diagnose',
+        'experiment_id': 'gap_attribution',
         'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
         'script': 'Evaluation/VerifyBruteforceMapping.py',
         'mip_timelimit_mbf_s': args.tl_mbf,

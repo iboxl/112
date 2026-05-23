@@ -356,20 +356,13 @@ def SolveMapping(acc:CIM_Acc, ops:WorkLoad, bestMetric:int, outputdir:str, singl
     avail_mem = parallel_config["available_mem_gb"]
     runtime_config = {"CONST": dict(vars(CONST)), "FLAG": dict(vars(FLAG))}
 
-    # Phase 1 (Scout): top schemes — likely feasible, give more threads for
-    # faster MIP solving.  Phase 2 (Sweep): remaining schemes — mostly
-    # infeasible, maximize worker throughput for fast presolve screening.
-    sweep_threads, sweep_workers = auto_parallel_config(usable, avail_mem, num_schemes)
-    scout_threads = min(usable, max(sweep_threads * 2, 4))
-    scout_workers = max(1, usable // scout_threads)
-
-    # Memory cap for scout (sweep already capped inside auto_parallel_config)
-    mem_per_worker = 2.0
-    max_by_mem = max(1, int(avail_mem * 0.8 / mem_per_worker))
-    scout_workers = min(scout_workers, max_by_mem)
-
-    # Boundary: scout processes enough batches to cover the feasible range.
-    scout_size = min(num_schemes, scout_workers * 3)
+    # Two-phase adaptive parallel config: scout (thread-tilted, high-utility
+    # schemes) then sweep (worker-tilted, remaining schemes). See
+    # utils.Tools.auto_parallel_config docstring for the design rationale.
+    parallel_cfg = auto_parallel_config(usable, avail_mem, num_schemes)
+    scout_threads, scout_workers = parallel_cfg["scout"]
+    sweep_threads, sweep_workers = parallel_cfg["sweep"]
+    scout_size = parallel_cfg["scout_size"]
 
     use_parallel = (not singleIter) and usable >= 2
     if not use_parallel:

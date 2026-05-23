@@ -1,6 +1,8 @@
 # this file is prepared for project 511
 # Created by iboxl
 
+import os
+
 class _const_num_config():
     def __init__(self):
         self.PLACEHOLD = 5
@@ -88,9 +90,11 @@ class _constraint_flag_config():
 
         self.ABLATION_SIMPLIFIED_PIPELINE = False       # 消融：移除流水线重叠建模（传输与计算永远串行）
 
+        self.ABLATION_PSUM_CAPACITY_ONLY = False    # 消融：移除partial-sum容量耦合（保留精度翻转语义）
+
         self.ABLATION_DISABLE_LB_PRUNING = False    # 消融：禁用静态+动态分析下界剪枝（验证无损性）
 
-        self.ABLATION_DISABLE_FLEXFACT = False      # 消融：禁用柔性分解（强制素因子分解，验证无损性）
+        self.ABLATION_DISABLE_FLEXFACT = os.environ.get("MIREDO_DISABLE_FLEXFACT", "").strip().lower() not in ("", "0", "false", "no")      # 消融：禁用柔性分解（env MIREDO_DISABLE_FLEXFACT=1 开启，强制素因子分解；默认 False，环境变量未设时与原行为一致）
 
         self.ACCEL_TOP_K = None                     # EXP-7f knob: after static-LB screening, keep only the top-K
                                                     # candidates (sorted by utilization score). None/0 = disabled.

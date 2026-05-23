@@ -189,7 +189,7 @@ class CIM_Acc():
         num_bit_ADD_in_addTree = self.dimX * (I + 1) - (I + math.ceil(math.log2(I)) + 1) * self.dimY
 
         CIMArray_energy = mult_1b * num_bit_MAC_in_Macro * self.t_MAC
-        Adder_tree_energy = mult_1b * num_bit_ADD_in_addTree * self.t_MAC
+        Adder_tree_energy = adder_1b * num_bit_ADD_in_addTree * self.t_MAC
         Merge_energy = (adder_1b + reg_1b) * precision_Psum * self.t_MAC * self.dimY
 
         cost_ActMacro_pJ = CIMArray_energy + Adder_tree_energy + Merge_energy

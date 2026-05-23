@@ -596,7 +596,7 @@ def run_for_layer_constrained(acc, ops, loopdim, model_name, architecture, objec
     latency, energy = simulator.run_analytical()
 
     return BaselineRunResult(
-        method="cosa-constrained",
+        method="cosa_legal",
         objective=objective,
         latency=latency,
         energy=energy,

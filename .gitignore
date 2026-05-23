@@ -27,3 +27,4 @@ Evaluation/CoSA/output_constrained/*
 
 output/*
 *.md
+!/RERUN_GUIDE.md

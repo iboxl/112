@@ -44,12 +44,12 @@ def _flexfact_compression(loopdim, ops):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="EXP-7 acceleration effect profiling")
+    parser = argparse.ArgumentParser(description="acceleration_profile")
     parser.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
-    parser.add_argument("--architecture", default="CIM_ACC_TEMPLATE")
+    parser.add_argument("--architecture", default="CIM_ACC_DEFAULT_SETUP")
     parser.add_argument("--objective", default="Latency", choices=["Latency", "Energy", "EDP"])
     parser.add_argument("--baselines", nargs="+", choices=SUPPORTED_BASELINE_METHODS, default=["ws", "zigzag"])
-    parser.add_argument("--timeLimit", type=int, default=120)
+    parser.add_argument("--timeLimit", type=int, default=60)
     parser.add_argument("--mipFocus", type=int, default=1)
     parser.add_argument("--maxLayers", type=int, default=None)
     parser.add_argument("--layers", nargs="+", default=None,
@@ -57,8 +57,8 @@ def main():
     parser.add_argument("-o", "--outputdir", dest="output_dir", default=None)
     args = parser.parse_args()
 
-    output_dir = make_output_dir("exp7_acceleration", args.output_dir)
-    setup_experiment_logger(output_dir, "exp7.log")
+    output_dir = make_output_dir("acceleration_profile", args.output_dir)
+    setup_experiment_logger(output_dir, "acceleration_profile.log")
 
     acceleration_effects = []
     anomalies = []
@@ -156,12 +156,13 @@ def main():
     acc = make_accelerator(args.architecture)
     json_path = save_experiment_json(
         output_dir=output_dir,
-        file_name="EXP-7.json",
-        experiment_id="EXP-7",
+        file_name="acceleration_profile.json",
+        experiment_id="acceleration_profile",
         script_path=__file__,
         config={
             "models": args.models,
             "architecture": hardware_spec_from_acc(acc),
+            "architecture_key": args.architecture,
             "time_limit": args.timeLimit,
             "objective": args.objective,
             "baselines_evaluated": args.baselines,

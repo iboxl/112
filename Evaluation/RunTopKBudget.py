@@ -1,5 +1,5 @@
 # Evaluation/RunTopKBudget.py
-# EXP-7f: Top-K x per-candidate budget trade-off grid on case layers L1-L4
+# topk_budget: Top-K x per-candidate budget trade-off grid on case layers L1-L4
 #
 # For each (layer, budget, K) cell: run MIREDO with objective="Latency",
 # time_limit=budget, ablation_flags={"ACCEL_TOP_K": K} (None if K="all").
@@ -41,7 +41,7 @@ def get_provenance(script_path):
     except Exception:
         commit = "unknown"
     return {
-        "repo": "/home/xiaolin/pro/overleaf/MIREDO/MIREDO",
+        "repo": os.path.dirname(os.path.dirname(os.path.abspath(__file__))),  # code repo, portable (was hardcoded stray)
         "commit": commit,
         "script": script_path,
         "timestamp": datetime.datetime.now().astimezone().isoformat(),
@@ -54,7 +54,7 @@ def _reset_mip_cache():
     """Move (not delete) the existing MIP cache so every cell is a cold solve."""
     cache_path = _default_cache_path()
     if cache_path.is_file():
-        backup = cache_path.with_suffix(".pkl.bak_exp7f")
+        backup = cache_path.with_suffix(".pkl.bak_topk_budget")
         shutil.move(str(cache_path), str(backup))
         print(f"[cache] moved existing MIP cache -> {backup}", flush=True)
     else:
@@ -72,7 +72,7 @@ def _relative_loss(val, baseline):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="EXP-7f: top-K x budget trade-off grid on case layers L1-L4"
+        description="topk_budget: top-K x budget trade-off grid on case layers L1-L4"
     )
     parser.add_argument(
         "--layer-ids", nargs="+", default=["L1", "L2", "L3", "L4"],
@@ -89,8 +89,9 @@ def main():
     parser.add_argument("--mip-focus", type=int, default=1)
     parser.add_argument(
         "--output-json",
-        default="/home/xiaolin/pro/overleaf/MIREDO/experiments/parsed_metrics/"
-                "EXP-7f_topk_budget_caselayer_20260501.json",
+        # FIX 2026-05-17: code-repo-relative (portable; MIREDO/output/).
+        default=os.path.join(os.path.dirname(__file__), "..", "output",
+                             "topk_budget_caselayer.json"),
         help="Output JSON path",
     )
     parser.add_argument(
@@ -102,6 +103,11 @@ def main():
         help="Load existing rows from --output-json and skip any already-completed "
              "(layer_id, budget_sec, top_k) cell. Implies --skip-cache-reset.",
     )
+    parser.add_argument(
+        "--architecture", default="CIM_ACC_DEFAULT_SETUP",
+        help="Architecture registry key (rerun default: CIM_ACC_DEFAULT_SETUP, "
+             "matching Phase A-E; legacy was CIM_ACC_TEMPLATE)"
+    )
     args = parser.parse_args()
 
     # ── Normalise top-k list ───────────────────────────────────────────────
@@ -112,7 +118,7 @@ def main():
         else:
             top_ks.append(int(v))
 
-    output_dir = make_output_dir("exp7f_topk_budget", None)
+    output_dir = make_output_dir("topk_budget", None)
     print(f"Output directory: {output_dir}", flush=True)
 
     # ── Resume: preload existing rows and build skip-set ─────────────────
@@ -160,7 +166,7 @@ def main():
             "preloaded_at": datetime.datetime.now().astimezone().isoformat(),
         }
 
-    acc_template = make_accelerator("CIM_ACC_TEMPLATE")
+    acc_template = make_accelerator(args.architecture)
     spec_by_id = {s["id"]: s for s in CASE_LAYERS_DETAILS}
 
     total_cells = len(args.layer_ids) * len(args.budgets) * len(top_ks)
@@ -252,14 +258,15 @@ def main():
 
                 # Incremental save
                 out = {
-                    "experiment_id": "EXP-7f",
+                    "experiment_id": "topk_budget",
                     "provenance": prov,
                     "config": {
                         "time_limits": args.budgets,
                         "top_ks": [str(k) for k in top_ks],
                         "mip_focus": args.mip_focus,
                         "objective": "Latency",
-                        "architecture": "CIM_ACC_TEMPLATE",
+                        "architecture": args.architecture,
+                        "architecture_key": args.architecture,
                         "cache_policy": prov["cache_policy"],
                     },
                     "results": results,
@@ -269,7 +276,7 @@ def main():
                 print(f"  -> JSON updated ({len(results)}/{total_cells} cells): {args.output_json}", flush=True)
 
     # ── Sanity checks ─────────────────────────────────────────────────────
-    print("\n\n=== EXP-7f Sanity Checks ===", flush=True)
+    print("\n\n=== topk_budget Sanity Checks ===", flush=True)
     anomalies = []
 
     # 1. Default-path invariance: (L1, budget=60, K="all") vs EXP-7d L1 reference
@@ -349,7 +356,7 @@ def main():
         print("  None found.", flush=True)
 
     # ── Summary table ──────────────────────────────────────────────────────
-    print("\n\n=== EXP-7f Summary Table ===", flush=True)
+    print("\n\n=== topk_budget Summary Table ===", flush=True)
     k_order = ["all"] + sorted([k for k in top_ks if k != "all"])
     budget_order = sorted(args.budgets, reverse=True)
 
@@ -393,7 +400,8 @@ def main():
             "top_ks": [str(k) for k in top_ks],
             "mip_focus": args.mip_focus,
             "objective": "Latency",
-            "architecture": "CIM_ACC_TEMPLATE",
+            "architecture": args.architecture,
+            "architecture_key": args.architecture,
             "cache_policy": prov["cache_policy"],
         },
         "results": results,

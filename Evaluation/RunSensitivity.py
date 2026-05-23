@@ -42,7 +42,7 @@ def _accumulate(total, miredo_edp, baseline_edp):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="EXP-4 hardware sensitivity sweep")
+    parser = argparse.ArgumentParser(description="hardware_sensitivity")
     parser.add_argument("--models", nargs="+", default=["resnet18"],
                         help="Models to sweep when --layerSource=model.")
     parser.add_argument("--layerSource", choices=("model", "representative"), default="model",
@@ -59,8 +59,8 @@ def main():
         help="Baselines to compare against.",
     )
     parser.add_argument("--parameters", nargs="+", default=list(DEFAULT_SWEEPS.keys()))
-    parser.add_argument("--architecture", default="CIM_ACC_TEMPLATE")
-    parser.add_argument("--timeLimit", type=int, default=120)
+    parser.add_argument("--architecture", default="CIM_ACC_DEFAULT_SETUP")
+    parser.add_argument("--timeLimit", type=int, default=60)
     parser.add_argument("--mipFocus", type=int, default=1)
     parser.add_argument("--maxLayers", type=int, default=None)
     parser.add_argument("-o", "--outputdir", dest="output_dir", default=None)
@@ -89,8 +89,8 @@ def main():
             max_layers=args.maxLayers,
         )
 
-    output_dir = make_output_dir("exp4_sensitivity", args.output_dir)
-    setup_experiment_logger(output_dir, "exp4.log")
+    output_dir = make_output_dir("hardware_sensitivity", args.output_dir)
+    setup_experiment_logger(output_dir, "hardware_sensitivity.log")
 
     sensitivity_totals = {}
     sensitivity_order = []
@@ -98,7 +98,17 @@ def main():
     anomalies = []
 
     base_acc = make_accelerator(args.architecture)
-    base_spec = default_spec()
+    # FIX 2026-05-17: build variants from the SELECTED architecture's spec, not
+    # the legacy Architecture.templates.default import (that silently ran the
+    # entire §5.5.1 sweep on legacy CIM_ACC_TEMPLATE — see §5.5.1-INVALIDATED).
+    from importlib import import_module
+    from Evaluation.common.EvalCommon import _ARCHITECTURE_SPEC_BUILDERS
+    _base_mod = _ARCHITECTURE_SPEC_BUILDERS.get(args.architecture)
+    if _base_mod is None:
+        raise SystemExit(f"unknown --architecture {args.architecture!r}; "
+                         f"known: {sorted(_ARCHITECTURE_SPEC_BUILDERS)}")
+    base_spec = import_module(_base_mod).default_spec()
+    print(f"[arch] sensitivity base_spec = {args.architecture} (module {_base_mod})", flush=True)
 
     for parameter in args.parameters:
         for value in DEFAULT_SWEEPS[parameter]:
@@ -218,13 +228,14 @@ def main():
 
     json_path = save_experiment_json(
         output_dir=output_dir,
-        file_name="EXP_sensitivity_shapes.json",
-        experiment_id="EXP_sensitivity_shapes",
+        file_name="hardware_sensitivity.json",
+        experiment_id="hardware_sensitivity",
         script_path=__file__,
         config={
             "models": args.models,
             "layer_selection": layer_selection,
             "architecture": hardware_spec_from_acc(base_acc),
+            "architecture_key": args.architecture,
             "time_limit": args.timeLimit,
             "objective": "EDP",
             "parameters": args.parameters,

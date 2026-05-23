@@ -95,6 +95,10 @@ class Solver():
         self.model.setParam('FeasibilityTol', 1e-6)
         self.model.setParam('IntFeasTol', 1e-6)
         self.model.setParam('OptimalityTol', 1e-6)
+
+        # Spend first 10s of the 60s budget in the no-relaxation heuristic to
+        # land a feasible incumbent fast; the remaining 50s goes to B&C tightening.
+        self.model.setParam('NoRelHeurTime', 10)
         
         self.result = {}
         self.dataflow = {}
@@ -971,12 +975,19 @@ class Solver():
                         model.addConstr(vol_total_o == tmp_volume,
                                         name=f"C_vol_total_({acc.mem2dict(m)},{op_name})")
 
-                        vol_psum_o = var_mul01(model, indic_holdPartialSum[m], vol_total_o,
-                                            name=f"vol_psum_({acc.mem2dict(m)},{op_name})",
-                                            A_ub=2 * UB_dataVolume[m, op],
-                                            var_ub=2 * UB_dataVolume[m, op])
-                        tmp_datavolume += vol_total_o * acc.precision_final
-                        tmp_datavolume += vol_psum_o * (acc.precision_psum - acc.precision_final)
+                        if FLAG.ABLATION_PSUM_CAPACITY_ONLY:
+                            # Ablation: skip the extra capacity term for psum precision.
+                            # Capacity sees only vol_total_o * precision_final regardless of
+                            # indic_holdPartialSum.  Precision-flip semantic is preserved via
+                            # lg_prec_O() (line 596) which is NOT gated by this flag.
+                            tmp_datavolume += vol_total_o * acc.precision_final
+                        else:
+                            vol_psum_o = var_mul01(model, indic_holdPartialSum[m], vol_total_o,
+                                                name=f"vol_psum_({acc.mem2dict(m)},{op_name})",
+                                                A_ub=2 * UB_dataVolume[m, op],
+                                                var_ub=2 * UB_dataVolume[m, op])
+                            tmp_datavolume += vol_total_o * acc.precision_final
+                            tmp_datavolume += vol_psum_o * (acc.precision_psum - acc.precision_final)
                 model.addConstr( tmp_datavolume <= acc.memSize[m], name=f"C_dataVolume_({acc.mem2dict(m)})" )
             else:
                 for op, op_name in enumerate(['I','W','O']):
@@ -1413,9 +1424,16 @@ class Solver():
             else:
                 # Output: write + read 精度均由holdPsum[DRAM]决定（与simulator一致）
                 _base_rw = 2 * MAX_SIZE[op] * acc.precision_final / acc.bw[acc.Dram2mem] / CONST.SCALE_LATENCY
-                _psum_extra_rw = 2 * MAX_SIZE[op] * (acc.precision_psum - acc.precision_final) / acc.bw[acc.Dram2mem] / CONST.SCALE_LATENCY
-                model.addConstr(res_latency >= _base_rw + _psum_extra_rw * indic_holdPartialSum[acc.Dram2mem],
-                                name=f"Cut_DRAM_BW_({op_name})")
+                if FLAG.ABLATION_PSUM_CAPACITY_ONLY:
+                    # Ablation: DRAM BW lower bound uses precision_final only;
+                    # drop the psum_extra term so the optimizer sees no DRAM penalty
+                    # for holding partial sums at higher precision.
+                    model.addConstr(res_latency >= _base_rw,
+                                    name=f"Cut_DRAM_BW_({op_name})")
+                else:
+                    _psum_extra_rw = 2 * MAX_SIZE[op] * (acc.precision_psum - acc.precision_final) / acc.bw[acc.Dram2mem] / CONST.SCALE_LATENCY
+                    model.addConstr(res_latency >= _base_rw + _psum_extra_rw * indic_holdPartialSum[acc.Dram2mem],
+                                    name=f"Cut_DRAM_BW_({op_name})")
 
         # Cut: per-memory constant-floor transfer sum (spatial-unrolling minimum)
         for op, op_name in enumerate(['I','W','O']):
@@ -1448,7 +1466,12 @@ class Solver():
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -#            
         Logger.info('* '*20 + "Start Running MIP Solver" + ' *'*20)
         model.ModelSense = GRB.MINIMIZE
-        model.Params.TimeLimit = 7  # Determine the feasibility within a 7s time limit.
+        model.Params.TimeLimit = 20  # Feasibility prescreen. Raised 7→20 on
+        # 2026-05-20: feasible-but-slow-feasible-region schemes need ~10.5s to
+        # find a first point; the old 7s gate wrongly culled them (the genuinely
+        # better scheme on some hard layers — §5.2 EDP suppression). Proven-
+        # infeasible schemes still return in presolve (<1s, status=3) so the
+        # higher cap only costs the small ambiguous set, bounded at 20s.
         model.Params.MIPFocus = 1 
         model.update()
         self.profile.model_build_time_sec = time.time() - run_start_time
@@ -1460,6 +1483,19 @@ class Solver():
         feasibility_start_time = time.time()
         model.optimize()
         self.profile.feasibility_time_sec = time.time() - feasibility_start_time
+        # Opt-in instrumentation (MIREDO_FEAS_LOG=path): one line per scheme —
+        # Gurobi status (3=INFEASIBLE,9=TIME_LIMIT,2=OPTIMAL), feasibility wall,
+        # SolCount, scheme dir. Lets the corrected rerun double as the
+        # feasibility-time / status-split study at zero extra cost. Native
+        # behavior unchanged unless the env var is set.
+        _feas_log = os.environ.get("MIREDO_FEAS_LOG", "").strip()
+        if _feas_log:
+            try:
+                with open(_feas_log, "a") as _fh:
+                    _fh.write(f"{int(model.Status)}\t{self.profile.feasibility_time_sec:.2f}\t"
+                              f"{int(model.SolCount)}\t{self.outputdir}\n")
+            except Exception:
+                pass
         if model.SolCount == 0:
             self.profile.status = int(model.Status)
             self.profile.sol_count = 0

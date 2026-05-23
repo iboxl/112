@@ -114,20 +114,17 @@ def set_core_count(spec: HardwareSpec, count: int) -> HardwareSpec:
 def set_gbuf_capacity_kb(spec: HardwareSpec, gbuf_kb: int) -> HardwareSpec:
     gbuf_kb = max(1, int(gbuf_kb))
     target_gbuf_bits = gbuf_kb * 8 * 1024
-    old_gbuf = spec.memory_by_name("Global_buffer")
-    factor = target_gbuf_bits / max(1, old_gbuf.size_bits)
-
-    new_spec = spec
-    for name in _on_chip_buffer_names(spec):
-        old = new_spec.memory_by_name(name)
-        new_size = max(8, int(round(old.size_bits * factor)))
-        new_spec = _replace_memory_level(new_spec, name, size_bits=new_size)
-        updated_level = _recompute_memory_cost_pJ(new_spec, name)
-        new_spec = _replace_memory_level(
-            new_spec, name,
-            r_cost_per_bit_pJ=updated_level.r_cost_per_bit_pJ,
-            w_cost_per_bit_pJ=updated_level.w_cost_per_bit_pJ,
-        )
+    # FIX 2026-05-17: vary ONLY Global_buffer. The old behaviour scaled IBuf and
+    # OBuf by the same factor too, which (a) confounded the §5.5.1 "GBuf
+    # capacity" cliff with I/O-buffer size and (b) made this axis redundant with
+    # operand_scratchpad. The paper's axis is GBuf capacity → change GBuf alone.
+    new_spec = _replace_memory_level(spec, "Global_buffer", size_bits=target_gbuf_bits)
+    _gb = _recompute_memory_cost_pJ(new_spec, "Global_buffer")
+    new_spec = _replace_memory_level(
+        new_spec, "Global_buffer",
+        r_cost_per_bit_pJ=_gb.r_cost_per_bit_pJ,
+        w_cost_per_bit_pJ=_gb.w_cost_per_bit_pJ,
+    )
     new_spec = replace(new_spec, leakage_per_cycle_nJ=_leakage_per_cycle_nJ(new_spec))
     return new_spec
 
@@ -150,6 +147,38 @@ def set_gbuf_bandwidth(spec: HardwareSpec, bw_bits_per_cycle: int) -> HardwareSp
     return new_spec
 
 
+def set_dram_bandwidth(spec: HardwareSpec, bw_bits_per_cycle: int) -> HardwareSpec:
+    """改 Dram r_bw / w_bw. DRAM 能耗走 7.91 pJ/bit legacy, 不走 CACTI; leakage 与 DRAM 无关, 不重算."""
+    bw = max(8, int(bw_bits_per_cycle))
+    new_spec = _replace_memory_level(
+        spec, "Dram",
+        r_bw_bits_per_cycle=bw,
+        w_bw_bits_per_cycle=bw,
+    )
+    return new_spec
+
+
+def set_operand_scratchpad_kb(spec: HardwareSpec, ibuf_kb: int) -> HardwareSpec:
+    """联合 sweep: IBuf=ibuf_kb, OBuf=2*ibuf_kb (匹配 8b 激活 / 16b psum 的位宽不对称).
+    两个 SRAM 层能耗都通过 CACTI 重算; leakage 在末尾统一重算一次."""
+    ibuf_kb = max(1, int(ibuf_kb))
+    obuf_kb = ibuf_kb * 2
+
+    new_spec = _replace_memory_level(spec, "Input_buffer", size_bits=ibuf_kb * 8 * 1024)
+    new_spec = _replace_memory_level(new_spec, "Output_buffer", size_bits=obuf_kb * 8 * 1024)
+
+    for name in ("Input_buffer", "Output_buffer"):
+        updated = _recompute_memory_cost_pJ(new_spec, name)
+        new_spec = _replace_memory_level(
+            new_spec, name,
+            r_cost_per_bit_pJ=updated.r_cost_per_bit_pJ,
+            w_cost_per_bit_pJ=updated.w_cost_per_bit_pJ,
+        )
+
+    new_spec = replace(new_spec, leakage_per_cycle_nJ=_leakage_per_cycle_nJ(new_spec))
+    return new_spec
+
+
 def _set_macro_axis_size(spec: HardwareSpec, axis_name: str, size: int) -> HardwareSpec:
     """更新 macro.spatial_axes 中 name=axis_name 的 size 字段;不动 allowed_loops 与 source_memory_per_operand。
     leakage 重算延后:由调用方在所有 axis/depth 调整完成后统一 _leakage_per_cycle_nJ 一次。
@@ -161,7 +190,14 @@ def _set_macro_axis_size(spec: HardwareSpec, axis_name: str, size: int) -> Hardw
             new_axes.append(replace(a, size=size))
         else:
             new_axes.append(a)
-    new_macro = replace(spec.macro, spatial_axes=new_axes)
+    # FIX 2026-05-17: CIM_Acc.from_spec reads spec.macro.dimX / .dimY (standalone
+    # fields), NOT spatial_axes[].size — so macro variants changing dimX/dimY
+    # (Wide 64×32, Tiny 16×8) were silently no-ops (Wide ≡ Default). Write the
+    # standalone field too so the variant actually takes effect.
+    macro_kw = {"spatial_axes": new_axes}
+    if axis_name in ("dimX", "dimY"):
+        macro_kw[axis_name] = size
+    new_macro = replace(spec.macro, **macro_kw)
     return replace(spec, macro=new_macro)
 
 
@@ -226,6 +262,10 @@ def build_hardware_variant(spec: HardwareSpec, parameter: str, value) -> Hardwar
             )
         _, dimX, dimY, depth = value
         return set_macro_spec(spec, int(dimX), int(dimY), int(depth))
+    if parameter == "dram_bw":
+        return set_dram_bandwidth(spec, int(value))
+    if parameter == "operand_scratchpad":
+        return set_operand_scratchpad_kb(spec, int(value))
     raise ValueError(f"Unsupported sensitivity parameter: {parameter}")
 
 # macro_spec 5 命名 config:Wide/Tall vs Default 隔离 compute / residency,ZZIMC 是 ZigZag-IMC 公开 reference,Tiny 是 lower bound
@@ -234,11 +274,18 @@ DEFAULT_SWEEPS = {
     "buffer_capacity": [64, 128, 256, 512],
     "gbuf_core_bw": [64, 128, 256, 512],
     "compartment_depth": [1, 2, 4, 8, 16],
+    # 2026-05-17: "Tiny" (16,8,1) DROPPED — dimX=16 is below CACTI's rows>=32
+    # floor so its energy is unmodelable. Pre-fix it silently ran as 32×16×1
+    # (dimX/dimY no-op bug), i.e. the old "Tiny" data was mislabeled and no
+    # valid 16×8×1 result ever existed. 4 valid macro configs remain.
     "macro_spec": [
-        ("Tiny", 16, 8, 1),
         ("ZZIMC", 32, 16, 4),
         ("Default", 32, 16, 8),
         ("Tall", 32, 16, 16),
         ("Wide", 64, 32, 8),
     ],
+    # 2026-05-13 rerun: two new sweep axes addressing reviewer attack surfaces.
+    # dram_bw default=128 at pos[1]; operand_scratchpad default=8 (8/16 KB) at pos[2].
+    "dram_bw": [64, 128, 256, 512],
+    "operand_scratchpad": [2, 4, 8, 16],
 }

@@ -31,7 +31,14 @@ from utils.Workload import WorkLoad
 from utils.GlobalUT import CONST, FLAG, Logger
 from utils.UtilsFunction.ToolFunction import prepare_save_dir
 from Evaluation.VerifyBruteforce import run_verify
-from Evaluation.common.EvalCommon import save_experiment_json
+from Evaluation.common.EvalCommon import save_experiment_json, _ARCHITECTURE_SPEC_BUILDERS
+
+# HW spec the chain solves on. Set in main() from --architecture (registry-
+# resolved, same path as VerifyBruteforce). Until 2026-05-17 run_one hardcoded
+# the LEGACY Architecture.templates.default — inconsistent with the rest of §5
+# (CIM_ACC_DEFAULT_SETUP). None => legacy fallback (kept only for direct
+# run_one callers / backward compat).
+_RESOLVED_SPEC = None
 
 Logger.setcfg(setcritical=False, setDebug=False, STD=False, file="", nofile=True)
 import logging
@@ -82,6 +89,37 @@ def make_scheme_for_se(C, K, num_cores=8, dimX=32, dimY=16):
     return sc
 
 
+def make_anchor_scheme_se(C, K, num_cores=8, dimX=32, dimY=16):
+    """Anchor spatial scheme for 1x1 SE-squeeze layers, mirroring the
+    1x1_C64K64 case used in VerifyBruteforce: K split across cores + dimY
+    (so K is fully spatial), C split on dimX (leaving partial temporal).
+
+    2026-05-16: introduced after probe found `make_scheme_for_se`'s
+    (cores-unused, dimX=C/2, dimY=K/2) pattern yields a 2.82% MIP-vs-BF
+    Lat gap on Conv_3 due to local-optimum-within-scheme; the anchor
+    pattern reaches a strictly better global BF optimum AND 0.0% MIP gap
+    on the same layer.
+    """
+    sc = [[1] * 8, [1] * 8, [1] * 8]  # cores, dimX, dimY  × 8 dims
+    # 6 = K, 5 = C
+
+    # K spatial: split across cores+dimY (capped at K total)
+    k_on_cores = max(1, min(K, num_cores))
+    sc[0][6] = k_on_cores
+    k_remain = max(1, K // k_on_cores)
+    k_on_y = max(1, min(k_remain, dimY))
+    sc[2][6] = k_on_y
+
+    # C on dimX: half on dimX (leave half temporal); fall back to full if C<4.
+    if C >= 4:
+        c_on_x = max(1, min(C // 2, dimX))
+    else:
+        c_on_x = max(1, min(C, dimX))
+    sc[1][5] = c_on_x
+
+    return sc
+
+
 def make_scheme_for_depthwise_3x3_p7(G, num_cores=8, dimX=32, dimY=16):
     """For depthwise 3x3 P=Q=7 G=large layer: cores split G, dimX gets R*S spread on G,
     dimY gets G further. Conservative legal scheme.
@@ -108,21 +146,24 @@ TARGETS = [
         "category": "sub_mip_open",
         "loopdim": {"R": 1, "S": 1, "C": 32, "K": 8, "P": 1, "Q": 1, "G": 1, "B": 1,
                     "H": 1, "W": 1, "Stride": 1, "Padding": 0},
-        "scheme_fn": lambda d: make_scheme_for_se(d["C"], d["K"]),
+        # 2026-05-16: switched from make_scheme_for_se → make_anchor_scheme_se
+        # (K on cores+dimY, C on dimX). Probe showed anchor pattern reaches
+        # strictly better BF optimum AND 0.0% MIP gap on Conv_3.
+        "scheme_fn": lambda d: make_anchor_scheme_se(d["C"], d["K"]),
     },
     {
         "name": "EfficientNet-B0/Conv_3_1_1_1_1_8_32_1",
         "category": "sub_mip_open",
         "loopdim": {"R": 1, "S": 1, "C": 8, "K": 32, "P": 1, "Q": 1, "G": 1, "B": 1,
                     "H": 1, "W": 1, "Stride": 1, "Padding": 0},
-        "scheme_fn": lambda d: make_scheme_for_se(d["C"], d["K"]),
+        "scheme_fn": lambda d: make_anchor_scheme_se(d["C"], d["K"]),
     },
     {
         "name": "EfficientNet-B0/Conv_8_1_1_1_1_4_96_1",
         "category": "sub_mip_open",
         "loopdim": {"R": 1, "S": 1, "C": 4, "K": 96, "P": 1, "Q": 1, "G": 1, "B": 1,
                     "H": 1, "W": 1, "Stride": 1, "Padding": 0},
-        "scheme_fn": lambda d: make_scheme_for_se(d["C"], d["K"]),
+        "scheme_fn": lambda d: make_anchor_scheme_se(d["C"], d["K"]),
     },
     # 3 smallest proven SE-squeeze layers (real, in proven set, validate MIP=brute-force)
     {
@@ -167,7 +208,7 @@ def silent_log_fn(msg):
 def run_one(target):
     name = target["name"]
     print(f"\n{'='*70}\n[+] {target['category']} | {name}\n{'='*70}", flush=True)
-    spec = default_spec()
+    spec = _RESOLVED_SPEC if _RESOLVED_SPEC is not None else default_spec()
     acc = CIM_Acc.from_spec(spec)
     ops = WorkLoad(loopDim=target["loopdim"])
     scheme = target["scheme_fn"](target["loopdim"])
@@ -180,7 +221,12 @@ def run_one(target):
     print(f"  temporal unrolling: {tu}", flush=True)
 
     # Per-layer log file
-    log_dir = "/home/xiaolin/pro/overleaf/MIREDO/experiments/logs/optimality_chain"
+    # FIX 2026-05-17: output must stay INSIDE the code repo, derived from the
+    # code repo's own location (_ROOT = the MIREDO/ package dir), so it is
+    # portable — a v1 checkout writes under v1's MIREDO/output, v2 under v2's,
+    # any clone under its own. NOT an absolute path, NOT the paper repo
+    # (os.path.dirname(_ROOT) was wrong — that escaped up into MIREDO_v1/).
+    log_dir = os.path.join(_ROOT, "output/optimality_chain")
     os.makedirs(log_dir, exist_ok=True)
     layer_log = os.path.join(log_dir, f"{name.replace('/','_')}.log")
     def lf(msg):
@@ -188,14 +234,26 @@ def run_one(target):
             f.write(f"{msg}\n")
 
     t0 = time.time()
+    bf_edp = None
+    mip_simu_edp = None
     try:
-        # run_verify writes its own EXP-6 file; we extract numbers from return value
-        bf_lat, mip_simu_lat = run_verify(
+        # run_verify writes its own EXP-6 file; we extract numbers from return value.
+        # 2026-05-16: extended to dual-objective cert (Latency + EDP) per §5.3.3 +
+        # §5.2.2 attention requirement. brute_force is single-pass; MIP runs twice.
+        verify_result = run_verify(
             acc, ops, scheme,
             mip_timelimit=120,
             log_fn=lf,
             arch_spec=spec,
+            objectives=("Latency", "EDP"),
         )
+        bf_lat = verify_result['bruteforce_best_lat']
+        mip_simu_lat = verify_result['mip_per_objective']['Latency']['mip_simu_lat']
+        bf_edp = verify_result['bruteforce_best_edp']
+        edp_mip = verify_result['mip_per_objective'].get('EDP', {})
+        edp_lat = edp_mip.get('mip_simu_lat')
+        edp_energy = edp_mip.get('mip_simu_energy')
+        mip_simu_edp = (edp_lat * edp_energy) if (edp_lat is not None and edp_energy is not None) else None
     except KeyError as e:
         # Trivial-spatial case where active_dims=[] returns a sparse stats dict.
         # Fallback: explicitly handle as "single mapping" — bf_lat == mip_lat trivially.
@@ -253,6 +311,14 @@ def run_one(target):
     if bf_lat is not None and mip_simu_lat is not None and bf_lat > 0 and bf_lat < float("inf"):
         gap_pct = (mip_simu_lat - bf_lat) / bf_lat * 100
 
+    gap_pct_edp = None
+    if (bf_edp is not None and mip_simu_edp is not None
+            and bf_edp > 0 and bf_edp < float("inf")):
+        gap_pct_edp = (mip_simu_edp - bf_edp) / bf_edp * 100
+
+    is_optimal_lat = (gap_pct is not None and abs(gap_pct) < 0.01)
+    is_optimal_edp = (gap_pct_edp is not None and abs(gap_pct_edp) < 0.01)
+
     res = {
         "name": name,
         "category": target["category"],
@@ -263,20 +329,44 @@ def run_one(target):
         "bruteforce_optimal_latency": bf_lat,
         "mip_simulator_latency": mip_simu_lat,
         "optimality_gap_pct": gap_pct,
-        "is_optimal": (gap_pct is not None and abs(gap_pct) < 0.01),
+        "is_optimal": is_optimal_lat,
+        "bruteforce_optimal_edp": bf_edp,
+        "mip_simulator_edp": mip_simu_edp,
+        "optimality_gap_pct_edp": gap_pct_edp,
+        "is_optimal_edp": is_optimal_edp,
         "wall_seconds": round(elapsed, 2),
     }
     print(f"  bf_optimal_lat={bf_lat}", flush=True)
     print(f"  mip_simu_lat={mip_simu_lat}", flush=True)
     print(f"  gap%={gap_pct}", flush=True)
+    print(f"  bf_optimal_edp={bf_edp}", flush=True)
+    print(f"  mip_simu_edp={mip_simu_edp}", flush=True)
+    print(f"  gap_edp%={gap_pct_edp}", flush=True)
     print(f"  wall={elapsed:.1f}s", flush=True)
     return res
 
 
 def main():
-    out_dir = "/home/xiaolin/pro/overleaf/MIREDO/experiments/parsed_metrics"
+    global _RESOLVED_SPEC
+    import argparse
+    from importlib import import_module
+    ap = argparse.ArgumentParser(description="§5.3.3 incumbent-optimality chain (dual-objective)")
+    ap.add_argument("--architecture", default="CIM_ACC_DEFAULT_SETUP",
+                    help="Registry key for the spec the chain solves on "
+                         "(was hardcoded LEGACY Architecture.templates.default).")
+    ap.add_argument("--output-dir",
+                    default=os.path.join(_ROOT, "output/parsed_metrics"),
+                    help="Directory for the optimality_chain JSON.")
+    args = ap.parse_args()
+    _mod = _ARCHITECTURE_SPEC_BUILDERS.get(args.architecture)
+    if _mod is None:
+        raise SystemExit(f"unknown --architecture {args.architecture!r}; "
+                         f"known: {sorted(_ARCHITECTURE_SPEC_BUILDERS)}")
+    _RESOLVED_SPEC = import_module(_mod).default_spec()
+    print(f"[arch] chain solving on {args.architecture} (module {_mod})", flush=True)
+    out_dir = args.output_dir
     os.makedirs(out_dir, exist_ok=True)
-    out_file = os.path.join(out_dir, f"EXP-6c_optimality_chain_caselayers_{time.strftime('%Y%m%d_%H%M%S')}.json")
+    out_file = os.path.join(out_dir, f"optimality_chain_{time.strftime('%Y%m%d_%H%M%S')}.json")
 
     all_results = []
     for target in TARGETS:
@@ -286,7 +376,7 @@ def main():
         save_experiment_json(
             output_dir=out_dir,
             file_name=os.path.basename(out_file),
-            experiment_id="EXP-6c",
+            experiment_id="optimality_chain",
             script_path=__file__,
             config={
                 "verification_method": "bruteforce_real_layers",

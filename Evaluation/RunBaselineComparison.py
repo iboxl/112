@@ -43,12 +43,12 @@ def _accumulate(total, latency, energy):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="EXP-2 baseline comparison")
+    parser = argparse.ArgumentParser(description="baseline_comparison")
     parser.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
     parser.add_argument("--objectives", nargs="+", default=["Latency", "Energy", "EDP"])
-    parser.add_argument("--baselines", nargs="+", choices=SUPPORTED_BASELINE_METHODS, default=["ws", "zigzag"])
-    parser.add_argument("--architecture", default="CIM_ACC_TEMPLATE")
-    parser.add_argument("--timeLimit", type=int, default=120)
+    parser.add_argument("--baselines", nargs="*", choices=SUPPORTED_BASELINE_METHODS, default=["ws", "zigzag"])
+    parser.add_argument("--architecture", default="CIM_ACC_DEFAULT_SETUP")
+    parser.add_argument("--timeLimit", type=int, default=60)
     parser.add_argument("--mipFocus", type=int, default=1)
     parser.add_argument("--maxLayers", type=int, default=None)
     parser.add_argument("--layers", nargs="+", default=None,
@@ -56,8 +56,8 @@ def main():
     parser.add_argument("-o", "--outputdir", dest="output_dir", default=None)
     args = parser.parse_args()
 
-    output_dir = make_output_dir("exp2_compare", args.output_dir)
-    setup_experiment_logger(output_dir, "exp2.log")
+    output_dir = make_output_dir("baseline_comparison", args.output_dir)
+    setup_experiment_logger(output_dir, "baseline_comparison.log")
 
     per_model = []
     per_layer = []
@@ -190,12 +190,13 @@ def main():
     acc = make_accelerator(args.architecture)
     json_path = save_experiment_json(
         output_dir=output_dir,
-        file_name="EXP-2.json",
-        experiment_id="EXP-2",
+        file_name="baseline_comparison.json",
+        experiment_id="baseline_comparison",
         script_path=__file__,
         config={
             "models": args.models,
             "architecture": hardware_spec_from_acc(acc),
+            "architecture_key": args.architecture,
             "time_limit": args.timeLimit,
             "objective": args.objectives,
             "baselines": args.baselines,

@@ -188,6 +188,8 @@ def _save_acc_cache():
 _ARCHITECTURE_SPEC_BUILDERS = {
     "CIM_ACC_TEMPLATE": "Architecture.templates.default",
     "CIM_ACC_TEMPLATE_TRANSFORMER": "Architecture.templates.transformer",
+    "CIM_ACC_DEFAULT_SETUP": "Architecture.templates.default_setup",
+    "CIM_ACC_DEFAULT_SETUP_TRANSFORMER": "Architecture.templates.default_setup_transformer",
 }
 
 
@@ -300,6 +302,7 @@ def temporary_runtime_config(objective="Latency", time_limit=120, mip_focus=1,
         "FLAG.PRESOLVE_SEARCH": FLAG.PRESOLVE_SEARCH,
         "FLAG.ABLATION_FIXED_DOUBLE_BUFFER": FLAG.ABLATION_FIXED_DOUBLE_BUFFER,
         "FLAG.ABLATION_SIMPLIFIED_PIPELINE": FLAG.ABLATION_SIMPLIFIED_PIPELINE,
+        "FLAG.ABLATION_PSUM_CAPACITY_ONLY": FLAG.ABLATION_PSUM_CAPACITY_ONLY,
         "FLAG.ABLATION_DISABLE_LB_PRUNING": FLAG.ABLATION_DISABLE_LB_PRUNING,
         "FLAG.ABLATION_DISABLE_FLEXFACT": FLAG.ABLATION_DISABLE_FLEXFACT,
         "FLAG.ACCEL_TOP_K": FLAG.ACCEL_TOP_K,
@@ -324,6 +327,7 @@ def temporary_runtime_config(objective="Latency", time_limit=120, mip_focus=1,
         FLAG.PRESOLVE_SEARCH = old_state["FLAG.PRESOLVE_SEARCH"]
         FLAG.ABLATION_FIXED_DOUBLE_BUFFER = old_state["FLAG.ABLATION_FIXED_DOUBLE_BUFFER"]
         FLAG.ABLATION_SIMPLIFIED_PIPELINE = old_state["FLAG.ABLATION_SIMPLIFIED_PIPELINE"]
+        FLAG.ABLATION_PSUM_CAPACITY_ONLY = old_state["FLAG.ABLATION_PSUM_CAPACITY_ONLY"]
         FLAG.ABLATION_DISABLE_LB_PRUNING = old_state["FLAG.ABLATION_DISABLE_LB_PRUNING"]
         FLAG.ABLATION_DISABLE_FLEXFACT = old_state["FLAG.ABLATION_DISABLE_FLEXFACT"]
         FLAG.ACCEL_TOP_K = old_state["FLAG.ACCEL_TOP_K"]
@@ -411,9 +415,18 @@ def run_miredo_layer(acc, loopdim, outputdir, objective="Latency", time_limit=12
     """
     solver_loopdim = normalize_loopdim_for_solver(loopdim)
 
+    # Timing / overhead experiments (dynamic-LB & FlexFact ablations, baseline
+    # wall-time) must NOT be served from the persistent MIP cache: a cache hit
+    # returns in ~2 ms with no real solve, destroying the wall-time and
+    # scheme-prune instrumentation those experiments measure (this silently
+    # contaminated EXP-7c/§5.6.1's lb_on arm). Set MIREDO_BYPASS_MIP_CACHE=1 for
+    # such runs to skip both the cache read and the cache write.
+    _cache_bypass = os.environ.get("MIREDO_BYPASS_MIP_CACHE", "").strip().lower() \
+        not in ("", "0", "false", "no")
+
     _ensure_cache_loaded()
     cache_key = _make_cache_key(acc, solver_loopdim, objective, time_limit, mip_focus, ablation_flags)
-    if cache_key in _mip_cache:
+    if not _cache_bypass and cache_key in _mip_cache:
         Logger.info(f"MIP cache hit: {solver_loopdim}")
         return copy.deepcopy(_mip_cache[cache_key])
 
@@ -459,6 +472,7 @@ def run_miredo_layer(acc, loopdim, outputdir, objective="Latency", time_limit=12
         "solver_loopdim": solver_loopdim,
         "dataflow": dataflow,
     }
-    _mip_cache[cache_key] = copy.deepcopy(layer_result)
-    _save_cache()
+    if not _cache_bypass:
+        _mip_cache[cache_key] = copy.deepcopy(layer_result)
+        _save_cache()
     return layer_result

@@ -28,10 +28,10 @@ def _pct_tile(sorted_vals, q):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="EXP-1b energy accuracy validation (MIP solver vs simulator)")
+    parser = argparse.ArgumentParser(description="energy_accuracy")
     parser.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
-    parser.add_argument("--architecture", default="CIM_ACC_TEMPLATE")
-    parser.add_argument("--timeLimit", type=int, default=120)
+    parser.add_argument("--architecture", default="CIM_ACC_DEFAULT_SETUP")
+    parser.add_argument("--timeLimit", type=int, default=60)
     parser.add_argument("--mipFocus", type=int, default=1)
     parser.add_argument("--maxLayers", type=int, default=None)
     parser.add_argument("--layers", nargs="+", default=None,
@@ -39,8 +39,8 @@ def main():
     parser.add_argument("-o", "--outputdir", dest="output_dir", default=None)
     args = parser.parse_args()
 
-    output_dir = make_output_dir("exp1b_energy_accuracy", args.output_dir)
-    setup_experiment_logger(output_dir, "exp1b.log")
+    output_dir = make_output_dir("energy_accuracy", args.output_dir)
+    setup_experiment_logger(output_dir, "energy_accuracy.log")
 
     per_layer = []
     anomalies = []
@@ -146,12 +146,13 @@ def main():
     acc = make_accelerator(args.architecture)
     json_path = save_experiment_json(
         output_dir=output_dir,
-        file_name="EXP-1b.json",
-        experiment_id="EXP-1b",
+        file_name="energy_accuracy.json",
+        experiment_id="energy_accuracy",
         script_path=__file__,
         config={
             "models": args.models,
             "architecture": hardware_spec_from_acc(acc),
+            "architecture_key": args.architecture,
             "objective": "Latency",
             "time_limit": args.timeLimit,
             "mip_focus": args.mipFocus,
