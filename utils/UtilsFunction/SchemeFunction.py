@@ -50,7 +50,7 @@ def scheme_objective_lb(acc:CIM_Acc, ops:WorkLoad, scheme, temporal_unrolling):
       E_dram = Σ_op coeff_rw × |D_op| × min(cost_r, cost_w)
 
     EDP LB (Proposition 3):
-      LB_edp = LB_lat × LB_eng × SCALINGFACTOR
+      LB_edp = LB_lat × LB_eng        (raw physical EDP; no solve-time conditioner)
     """
     temporal_iters = math.prod(temporal_unrolling)
 
@@ -75,7 +75,10 @@ def scheme_objective_lb(acc:CIM_Acc, ops:WorkLoad, scheme, temporal_unrolling):
     energy_lb = mac_energy + dram_energy
 
     # ── EDP LB ──
-    edp_lb = latency_lb * energy_lb * CONST.SCALINGFACTOR
+    # Raw physical EDP bound (latency*energy). Matches the raw EDP that the
+    # solver reports and that pruning compares against; the solve-time
+    # conditioner is applied only inside the MIP, never on this bound.
+    edp_lb = latency_lb * energy_lb
 
     return latency_lb, energy_lb, edp_lb
 

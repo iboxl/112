@@ -33,7 +33,7 @@ class WSBaselineResult:
 
     @property
     def edp(self):
-        return self.latency * self.energy * CONST.SCALINGFACTOR
+        return self.latency * self.energy
 
 
 def _largest_divisor_at_most(value, limit):

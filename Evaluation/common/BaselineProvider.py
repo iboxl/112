@@ -29,7 +29,7 @@ class BaselineRunResult:
 
     @property
     def edp(self):
-        return self.latency * self.energy * CONST.SCALINGFACTOR
+        return self.latency * self.energy
 
     @classmethod
     def na(cls, method: str, objective: str, reason: str) -> "BaselineRunResult":

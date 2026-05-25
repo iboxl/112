@@ -158,7 +158,7 @@ def __main__(**kwargs):
             )
             mip_cache_put(accelerator_eval, newdim, CONST.FLAG_OPT, CONST.TIMELIMIT, CONST.MIPFOCUS, {
                 "solver_latency": l_solver, "solver_energy": e_solver,
-                "solver_edp": l_solver * e_solver * CONST.SCALINGFACTOR,
+                "solver_edp": l_solver * e_solver,
                 "simulator_latency": l_simu, "simulator_energy": e_simu,
                 "simulator_profile": PD_M, "mapping_profile": None,
                 "solver_loopdim": newdim, "dataflow": None,

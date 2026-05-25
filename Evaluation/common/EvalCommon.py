@@ -69,7 +69,7 @@ def objective_metric_value(objective, latency, energy):
     if objective == "Energy":
         return energy
     if objective == "EDP":
-        return latency * energy * CONST.SCALINGFACTOR
+        return latency * energy
     raise ValueError(f"Unsupported objective: {objective}")
 
 
@@ -335,7 +335,7 @@ def temporary_runtime_config(objective="Latency", time_limit=120, mip_focus=1,
 
 import hashlib
 
-_CACHE_VERSION = 3  # bumped: 20260420 clean-slate rerun; old caches must miss
+_CACHE_VERSION = 4  # bumped 20260525: EDP stored raw (latency*energy, no SCALINGFACTOR)
 _mip_cache = None
 _cache_path = None
 

@@ -164,11 +164,23 @@ def _worker(args):
             except Exception:
                 status = -1
             try:
-                obj_val = float(solver.model.ObjVal)
+                # Raw physical metric (model.ObjVal is in scaled model units for
+                # Latency/EDP). Keeps selection/report consistent with the raw
+                # value propagated to SharedUB below.
+                _mi = {"Latency": 0, "Energy": 1, "EDP": 2}.get(CONST.FLAG_OPT, 0)
+                obj_val = float(solver.result[_mi])
             except Exception:
                 obj_val = float('nan')
             try:
-                obj_bound = float(solver.model.ObjBound)
+                # Convert the dual bound from scaled model units to the same raw
+                # physical metric so the per-ordering gap log stays coherent.
+                if CONST.FLAG_OPT == "EDP":
+                    _scaled_to_raw = CONST.SCALE_LATENCY / solver.edp_scaling_factor
+                elif CONST.FLAG_OPT == "Latency":
+                    _scaled_to_raw = CONST.SCALE_LATENCY
+                else:
+                    _scaled_to_raw = 1.0
+                obj_bound = float(solver.model.ObjBound) * _scaled_to_raw
             except Exception:
                 obj_bound = float('nan')
             # Propagate this ordering's metric to global SharedUB so subsequent
@@ -280,7 +292,7 @@ def run_enumeration(spec, ops_dict, scheme, timelimit=15, max_workers=None, metr
                         'idx': idx, 'ok': bool(ok), 'status': status,
                         'gap': float(gap) if gap is not None else None,
                         'obj_val': obj_val, 'obj_bound': obj_bound,
-                        'mip_analytical_obj': float(lat) if lat is not None else None,
+                        'mip_analytical_obj': float(obj_val) if (obj_val is not None and obj_val == obj_val) else None,
                     })
                     if ok:
                         feasible += 1

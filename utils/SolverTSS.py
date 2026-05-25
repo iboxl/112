@@ -15,6 +15,7 @@ from utils.GlobalUT import *
 from utils.UtilsFunction.SolverFunction import *
 from utils.factorization import flexible_factorization, prime_factors
 from utils.UtilsFunction.ToolFunction import getDivisors, getUniqueFactors
+from utils.UtilsFunction.SchemeFunction import scheme_objective_lb
 import copy
 
 @dataclass
@@ -49,6 +50,28 @@ class Solver():
         self.ops = copy.deepcopy(ops)
         self.tu = tu
         self.su = su
+        # EDP solve-time numerical conditioner, computed per spatial candidate
+        # (per Solver). Raw EDP (latency*energy) spans ~8 orders across layers,
+        # so a fixed factor leaves small layers' objective near the solver's 1e-6
+        # tolerance and falsely "optimal". Normalize from the candidate's raw
+        # roofline lower bound so res_EDP lands far above tolerance at any size.
+        # The reported EDP metric stays raw (this factor never leaves the solve);
+        # Latency/Energy modes need no conditioner.
+        self.edp_scaling_factor = 1.0  # inert default; only consumed (and overwritten) in EDP mode
+        if CONST.FLAG_OPT == "EDP":
+            try:
+                _lat_lb, _eng_lb, _ = scheme_objective_lb(acc, ops, su, tu)
+                _raw_edp_est = float(_lat_lb) * float(_eng_lb)
+            except Exception as _e:
+                _raw_edp_est = None
+                Logger.warning(f"EDP scaling: roofline LB computation failed ({_e})")
+            if _raw_edp_est is not None and math.isfinite(_raw_edp_est) and _raw_edp_est > 0:
+                self.edp_scaling_factor = CONST.SCALE_LATENCY / (10 ** math.floor(math.log10(_raw_edp_est)))
+            else:
+                # Neutral fallback: objective = raw_EDP / SCALE_LATENCY, always far
+                # above the solver tolerance — never the old 1e-6 mis-conditioning.
+                self.edp_scaling_factor = 1.0
+                Logger.warning("EDP scaling: unusable roofline LB; neutral fallback edp_scaling_factor=1.0")
         self.metric_ub = metric_ub
         self.shared_ub = shared_ub
         self.outputdir = outputdir
@@ -222,10 +245,9 @@ class Solver():
         energy_leakage = acc.leakage_per_cycle * solved_latency
         solved_energy = energy_rw + energy_comp + energy_leakage
 
-        if CONST.FLAG_OPT == "EDP":
-            solved_edp = solved_latency * solved_energy * CONST.SCALINGFACTOR
-        else:
-            solved_edp = solved_latency * solved_energy * CONST.SCALINGFACTOR
+        # Reported EDP is raw physical latency*energy; the solve-time conditioner
+        # never leaks into the reported metric.
+        solved_edp = solved_latency * solved_energy
 
         self.result = [solved_latency, solved_energy, solved_edp]
 
@@ -1450,7 +1472,7 @@ class Solver():
 
         model.addConstr(res_energy >= energy_expr_rw + energy_expr_comp + energy_expr_leakage, name="C_Res_Energy_Summation")
         if CONST.FLAG_OPT == "EDP":
-            model.addConstr(res_EDP >= res_latency * res_energy * CONST.SCALINGFACTOR, name="C_Res_EDP_Multiplication")
+            model.addConstr(res_EDP >= res_latency * res_energy * self.edp_scaling_factor, name="C_Res_EDP_Multiplication")
 
         # Tighten metric_ub from cross-worker shared state (if available).
         self._refresh_metric_ub()
@@ -1522,7 +1544,9 @@ class Solver():
                     self.profile.metric_upper_bound_applied = True
             case "EDP":
                 if self._has_finite_metric_ub():
-                    model.addConstr(res_EDP <= self.metric_ub / CONST.SCALE_LATENCY, name="C_metric_ub_EDP")
+                    # metric_ub is raw physical EDP; res_EDP objective units are
+                    # raw * edp_scaling_factor / SCALE_LATENCY.
+                    model.addConstr(res_EDP <= self.metric_ub * self.edp_scaling_factor / CONST.SCALE_LATENCY, name="C_metric_ub_EDP")
                     self.profile.metric_upper_bound_applied = True
             case _:
                 pass
@@ -1581,8 +1605,12 @@ class Solver():
         _cb = None
         if self.shared_ub is not None:
             match CONST.FLAG_OPT:
-                case "Latency" | "EDP":
+                case "Latency":
                     _ub_to_obj = 1.0 / CONST.SCALE_LATENCY
+                case "EDP":
+                    # shared_ub holds raw physical EDP; res_EDP objective units are
+                    # raw * edp_scaling_factor / SCALE_LATENCY.
+                    _ub_to_obj = self.edp_scaling_factor / CONST.SCALE_LATENCY
                 case _:
                     _ub_to_obj = 1.0
 
@@ -1623,7 +1651,14 @@ class Solver():
         except Exception:
             self.profile.mip_gap = None
         try:
-            self.profile.best_bound = float(model.ObjBound)
+            _ob = float(model.ObjBound)
+            # ObjBound is in scaled model units; for EDP convert to raw physical
+            # EDP so best_bound stays comparable across layers and carries no
+            # solve-time conditioner (mirrors result[2]). Latency/Energy keep
+            # their existing objective-unit convention.
+            if CONST.FLAG_OPT == "EDP":
+                _ob = _ob * CONST.SCALE_LATENCY / self.edp_scaling_factor
+            self.profile.best_bound = _ob
         except Exception:
             self.profile.best_bound = None
 
@@ -1706,10 +1741,10 @@ class Solver():
             Logger.critical("MIP Solved successfully !!!")
             solved_latency = res_latency.x * CONST.SCALE_LATENCY
             solved_energy = res_energy.x
-            if CONST.FLAG_OPT == "EDP":
-                solved_edp = res_EDP.x * CONST.SCALE_LATENCY
-            else:
-                solved_edp = solved_latency * solved_energy * CONST.SCALINGFACTOR
+            # Report raw physical EDP (latency*energy). res_EDP carries the
+            # solve-time conditioner edp_scaling_factor, which must not leak into
+            # the reported metric, mirroring how solved_latency strips SCALE_LATENCY.
+            solved_edp = solved_latency * solved_energy
             self.result = [solved_latency, solved_energy, solved_edp]
             set_dataflow()
             if FLAG.DEBUG:
