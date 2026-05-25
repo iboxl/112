@@ -40,7 +40,7 @@ def get_provenance():
     }
 
 
-def _flexfact_compression_profile(loopdim, ops, flexfact_disabled):
+def _flexfact_compression_profile(loopdim, ops, flexfact_disabled, M):
     """Return per-dimension factor counts for flex and prime factorizations.
 
     When flexfact_disabled=True both flex_factors and prime_factors should
@@ -54,7 +54,7 @@ def _flexfact_compression_profile(loopdim, ops, flexfact_disabled):
             ff_count = 1 if bound == 1 else 0
         else:
             pf = prime_factors(bound)
-            ff = flexible_factorization(bound)
+            ff = flexible_factorization(bound, M)
             pf_count = len(pf)
             ff_count = len(ff)
         compression[f"dimension_{dim_char}"] = {
@@ -151,7 +151,7 @@ def main():
             # Compute FlexFact compression profile using the real loopdim
             ops_for_profile = WorkLoad(loopDim=copy.deepcopy(spec["loopdim"]))
             flexfact_compression = _flexfact_compression_profile(
-                spec["loopdim"], ops_for_profile, flexfact_disabled
+                spec["loopdim"], ops_for_profile, flexfact_disabled, acc.placement_depth
             )
 
             row = {

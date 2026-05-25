@@ -6,7 +6,6 @@ import math
 from utils.UtilsFunction.ToolFunction import getDivisors
 from Architecture.ArchSpec import CIM_Acc
 from dataclasses import dataclass
-from utils.factorization import flexible_factorization, prime_factors
 from utils.GlobalUT import *
 
 class Operand():
@@ -68,11 +67,6 @@ class WorkLoad():
             [0,1,1,0,0,1,1,1],      # weight
             [0,0,0,1,1,0,1,1]       # Output
         ]
-
-        if getattr(FLAG, "ABLATION_DISABLE_FLEXFACT", False):
-            self.Factors = [(prime_factors(_) if _ >= 2 else [_]) for _ in self.dim2bound]
-        else:
-            self.Factors = [flexible_factorization(_) for _ in self.dim2bound]
 
         self.Divisors = [getDivisors(d) for d in self.dim2bound]
 

@@ -210,7 +210,8 @@ def run_enumeration(spec, ops_dict, scheme, timelimit=15, max_workers=None, metr
     su = scheme
     spatial = [math.prod(col) for col in zip(*su)]
     tu = [math.ceil(x / y) for x, y in zip(ops.dim2bound, spatial)]
-    factors = [flexible_factorization(t) for t in tu]
+    acc = CIM_Acc.from_spec(spec)
+    factors = [flexible_factorization(t, acc.placement_depth) for t in tu]
 
     log(f"temporal unrolling: {tu}")
     log(f"factors: {[f for fs in factors[1:ops.Num_dim] for f in fs if fs != [1]]}")

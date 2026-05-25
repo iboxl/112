@@ -147,7 +147,7 @@ def manual_factorization(DimSize: int) -> List[int]:
 
 
 # FlexibleFactorization is used by MIREDO in ASPDAC2026
-def flexible_factorization(N: int) -> list[int]:
+def flexible_factorization(N: int, M: int) -> list[int]:
     """
     Adaptive factorisation for data-flow optimisation.
 
@@ -155,13 +155,19 @@ def flexible_factorization(N: int) -> list[int]:
     ----------
     N : int
         Dimension size (positive integer; N<=1 returns [N]).
+    M : int
+        Memory-placement depth: the maximum number of levels across which a
+        dimension's temporal factors may be distributed. Set by the hardware
+        (deepest per-operand admissible chain), NOT a free constant. The HC
+        invariant preserves every 1..M-level placement, so M must match the
+        hierarchy or merges can drop a placement the solver could actually reach.
 
     Returns
     -------
     list[int]
         Ascending factor list whose product = N.
         • Tile-size set T(F) = D(N) preserved by hard constraint;
-        • Multi-level tiling configurations C_k(F) = C_k(P) preserved (HC-score zero-loss);
+        • Multi-level tiling configurations C_k(F) = C_k(P) preserved for k=1..M;
         • Factor count minimized subject to the above two invariants;
         • Deterministic and reproducible.
     """
@@ -184,17 +190,17 @@ def flexible_factorization(N: int) -> list[int]:
 
     factors = prime_factors(N)
 
-    # ── 2. 层次覆盖度 (HC) 评分：k = 1, 2, 3 级 ───────────────
+    # ── 2. 层次覆盖度 (HC) 评分：k = 1..M 级（M = 硬件放置深度）───────────────
     @lru_cache(maxsize=None)
     def hc_score(fs: tuple[int, ...]) -> float:
         fs = list(fs)
         n = len(fs)
-        buckets = [set(), set(), set()]   # k = 1,2,3
+        buckets = [set() for _ in range(M)]   # k = 1..M
 
         def dfs(idx: int, groups: list[list[int]]):
             if idx == n:
                 k = len(groups)
-                if 1 <= k <= 3:
+                if 1 <= k <= M:
                     tpl = tuple(sorted(math.prod(g) for g in groups))
                     buckets[k-1].add(tpl)
                 return
@@ -203,16 +209,15 @@ def flexible_factorization(N: int) -> list[int]:
                 g.append(fs[idx])
                 dfs(idx + 1, groups)
                 g.pop()
-            # 新建 group（≤3 级）
-            if len(groups) < 3:
+            # 新建 group（≤M 级）
+            if len(groups) < M:
                 groups.append([fs[idx]])
                 dfs(idx + 1, groups)
                 groups.pop()
 
         dfs(0, [])
-        return (1.0 * len(buckets[0])   # 单级循环
-              + 0.5 * len(buckets[1])   # 二级循环
-              + 0.25* len(buckets[2]))  # 三级循环
+        # 权重 2^-i 递减；正权递减下 HC 守恒 <=> 每个 |K_k| 守恒（合并只会塌缩表示）
+        return sum(len(buckets[i]) / (2 ** i) for i in range(M))
 
     hc_full = hc_score(tuple(factors))   # 理论满分
 
@@ -264,4 +269,4 @@ if __name__ == "__main__":
         print(f"-----manual_factorization:   {manual_factorization(N)}")
         
         # FlexibleFactorization is used by MIREDO in ASPDAC2026
-        print(f"-----best_factorization:     {flexible_factorization(N)}") 
+        print(f"-----best_factorization:     {flexible_factorization(N, M=4)}") 

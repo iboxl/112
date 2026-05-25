@@ -25,7 +25,7 @@ from utils.Workload import WorkLoad
 from utils.factorization import flexible_factorization, prime_factors
 
 
-def _flexfact_compression(loopdim, ops):
+def _flexfact_compression(loopdim, ops, M):
     compression = {}
     start_time = time.time()
     for dim_char in ops.dim2Dict[1:]:
@@ -35,7 +35,7 @@ def _flexfact_compression(loopdim, ops):
             flexible = [1]
         else:
             prime = prime_factors(bound)
-            flexible = flexible_factorization(bound)
+            flexible = flexible_factorization(bound, M)
         compression[f"dimension_{dim_char}"] = {
             "prime_factors": len(prime),
             "flex_factors": len(flexible),
@@ -106,7 +106,7 @@ def main():
                 )
                 mapping_profile = miredo["mapping_profile"]
                 solver_profile = mapping_profile.best_solver_profile if mapping_profile is not None else None
-                compression, flexfact_sec = _flexfact_compression(loopdim, ops)
+                compression, flexfact_sec = _flexfact_compression(loopdim, ops, make_accelerator(args.architecture).placement_depth)
 
                 acceleration_effects.append({
                     "model": model_name,

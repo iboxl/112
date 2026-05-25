@@ -61,6 +61,15 @@ class CIM_Acc():
         else:
             return '---'
 
+    @property
+    def placement_depth(self):
+        """Deepest per-operand memory-placement chain (max over operands of the
+        admissible levels), read by FlexFact as the no-placement-loss depth M.
+        Computed from the admissibility matrix on access, so it is always present
+        even for an accelerator restored from an older cache."""
+        return max(sum(self.mappingArray[op][m] for m in range(1, self.Num_mem))
+                   for op in range(3))
+
     @classmethod
     def from_spec(cls, spec) -> "CIM_Acc":
         """从 HardwareSpec 构造 CIM_Acc，字段布局与 __init__ 严格一致。

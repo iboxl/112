@@ -92,11 +92,11 @@ def _spatial_dims_per_memory(acc: CIM_Acc, ops: WorkLoad, scheme):
     return spatial_dims
 
 
-def _temporal_factors(ops: WorkLoad, temporal_unrolling, loop_order):
+def _temporal_factors(ops: WorkLoad, temporal_unrolling, loop_order, M):
     factors = []
     for dim_char in loop_order:
         dim = ops.dict2Dim(dim_char)
-        for factor in sorted(flexible_factorization(temporal_unrolling[dim]), reverse=True):
+        for factor in sorted(flexible_factorization(temporal_unrolling[dim], M), reverse=True):
             if factor > 1:
                 factors.append((dim, factor))
     return factors
@@ -189,7 +189,7 @@ def build_weight_stationary_dataflow(acc: CIM_Acc, ops: WorkLoad, scheme=None,
 
     spatial_unrolling = [math.prod(col) for col in zip(*scheme)]
     temporal_unrolling = [math.ceil(bound / unroll) for bound, unroll in zip(ops.dim2bound, spatial_unrolling)]
-    factors = _temporal_factors(ops, temporal_unrolling, loop_order)
+    factors = _temporal_factors(ops, temporal_unrolling, loop_order, acc.placement_depth)
     spatial_dims = _spatial_dims_per_memory(acc, ops, scheme)
 
     assignments = {op: [None] * len(factors) for op in range(3)}
