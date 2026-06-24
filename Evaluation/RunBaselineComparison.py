@@ -39,7 +39,11 @@ def _empty_total():
 def _accumulate(total, latency, energy):
     total["total_latency"] += latency
     total["total_energy"] += energy
-    total["total_edp"] += latency * energy
+    # Network EDP is NOT summed per layer; it is finalized after the layer loop
+    # as (total latency) x (total energy) -- the standard whole-model
+    # energy-delay product (sum energies, sum latencies, then multiply, per the
+    # DOSA/Timeloop convention). MIREDO's per-layer MIP still optimizes the
+    # per-layer EDP L_l*E_l; only the reported network aggregate changes here.
 
 
 def main():
@@ -181,6 +185,9 @@ def main():
                         "message": str(exc),
                     })
 
+        # Finalize whole-model EDP as product of totals (see _accumulate).
+        for _t in totals.values():
+            _t["total_edp"] = _t["total_latency"] * _t["total_energy"]
         per_model.append({
             "model": model_name,
             "results_by_method": totals,

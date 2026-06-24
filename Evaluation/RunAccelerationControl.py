@@ -1,5 +1,5 @@
 # Evaluation/RunAccelerationControl.py
-# dynlb_losslessness: Empirical losslessness verification for LB pruning on L1-L4
+# dynlb_losslessness: Empirical losslessness verification for LB pruning on L1-L5
 import argparse
 import copy
 import json
@@ -169,7 +169,7 @@ def main():
         by_layer.setdefault(row["layer_id"], {})[row["mode"]] = row
 
     all_equal = True
-    for lid in ["L1", "L2", "L3", "L4"]:
+    for lid in args.layer_ids:
         if lid not in by_layer:
             print(f"  {lid}: incomplete (missing)", flush=True)
             continue

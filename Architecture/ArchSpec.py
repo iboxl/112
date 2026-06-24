@@ -134,7 +134,7 @@ class CIM_Acc():
                     self.double_config[m][op] = 1
         self.double_config[self.Macro2mem][1] = self.double_Macro
         self.double_config[self.IReg2mem][0] = 0
-        self.double_config[self.OReg2mem][0] = 0
+        self.double_config[self.OReg2mem][2] = 0   # OReg holds O (op2), not I; a 1-element output register cannot double-buffer. Was [0] (no-op copy-paste typo from the IReg line).
 
         self.shareMemory = [False for _ in range(self.Num_mem)]
         for m in range(1, self.Num_mem):

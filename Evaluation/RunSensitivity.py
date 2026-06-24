@@ -46,7 +46,7 @@ def main():
     parser.add_argument("--models", nargs="+", default=["resnet18"],
                         help="Models to sweep when --layerSource=model.")
     parser.add_argument("--layerSource", choices=("model", "representative"), default="model",
-                        help="model runs full/selected model layers; representative runs the L1-L4 registry.")
+                        help="model runs full/selected model layers; representative runs the L1-L5 registry.")
     parser.add_argument(
         "--layers", nargs="+", default=None,
         help="Layer subset. For model source: exact layer names/aliases, 1-based positions, "

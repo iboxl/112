@@ -65,6 +65,28 @@ def event_cycle_intensity(profile) -> dict:
     }
 
 
+def macrowait_decomposition(acc, ops, dataflow) -> dict | None:
+    """Exact ADDITIVE macro-wait stall decomposition for one dataflow.
+
+    Re-simulates `dataflow` and charges every macro-idle cycle to the single
+    operand the macro waits on. Unlike stall_decomposition / event_cycle_intensity,
+    whose mode_switch / mismatch / writeback counters overlap in cycle space and
+    are NON-additive, the four terms here are mutually exclusive and sum exactly
+    to latency:
+
+        latency = compute + stall_input + stall_weight + stall_output
+
+    `acc` and `ops` are the accelerator and workload the dataflow was generated
+    against. Returns None when no dataflow is available (e.g. a framework
+    fallback). The simulator import is deferred so callers using only the
+    post-processing metrics do not pay it.
+    """
+    if dataflow is None:
+        return None
+    from Evaluation.common.MacroWaitSim import run_macrowait
+    return run_macrowait(acc, ops, dataflow)
+
+
 def utilization_metrics(profile) -> dict:
     """Spatial: count_mac × t_MAC / (peak_mac_per_cycle × total_latency).
     Temporal: macLatency / total_latency.
@@ -234,6 +256,12 @@ def available_profile_mask(profile, dataflow, framework_name: str) -> dict:
             ),
             "double_buffer_pairs": has_dataflow,
             "operand_residency_path": has_dataflow,
+        },
+        "F5_macrowait_additive": {
+            "compute": has_dataflow,
+            "stall_input": has_dataflow,
+            "stall_weight": has_dataflow,
+            "stall_output": has_dataflow,
         },
     }
 

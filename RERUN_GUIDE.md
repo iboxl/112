@@ -22,6 +22,85 @@ Gurobi MIP → simulator validation → per-layer/model comparison).
 
 ---
 
+## Change Record
+
+### CR-1 (2026-05-29): add VGG19BN 512×512@28 as case layer L2 (4 → 5 case layers)
+
+**Change.** Insert a fifth case layer and renumber. The new **L2 =
+`vgg19bn:Conv_9_3_3_28_28_512_512_1`** (standard 3×3, C512 K512 @28×28, G1); the
+former L2/L3/L4 shift to **L3/L4/L5**. New roster:
+
+| id | shape string | source | conv type |
+|---|---|---|---|
+| L1 | `resnet18:Conv_8_3_3_28_28_128_128_1` | ResNet-18 Conv_8 | standard 3×3, mid-channel |
+| **L2 (new)** | **`vgg19bn:Conv_9_3_3_28_28_512_512_1`** | **VGG19BN Conv_9** | **standard 3×3, large-channel (512²@28)** |
+| L3 (was L2) | `resnet18:Conv_17_1_1_7_7_256_512_1` | ResNet-18 Conv_17 | deep pointwise 1×1 |
+| L4 (was L3) | registry synthetic G=144 / real `mobilenetV2:Conv_19_3_3_14_14_1_1_192` | MobileNet-v2 depthwise | depthwise 3×3 |
+| L5 (was L4) | `EfficientNet-B0:Conv_30_1_1_14_14_80_480_1` | EfficientNet-B0 MBConv | 1×1 expansion |
+
+**Why (workload coverage, not mechanism).** Selecting case layers by *workload
+representativeness*, the suite's single largest unsampled workload class is the
+**weight-heavy large-channel standard conv** (512 ch at 28×28, MACs 1.85e9 — 16×
+L1's 116M). It is VGG19BN's signature layer, and VGG — the highest-headline-gain
+CNN (Table~II, vs WS 27.67×) — had **zero** case-layer representation. ResNet's
+512-ch layers are all downsampled to 7×7 (small spatial), so only VGG supplies
+this class. Inserted as L2 to sit next to L1 as the small→large standard-conv
+pair (lever shifts from utilization-bound on L1 to weight-reload-bound on L2).
+ADD, not replace: L1 (mid-channel) and L2 (large-channel) are both major FLOP
+classes in the suite; L3/L4/L5 each still cover a distinct workload.
+
+**Registry code change (PREREQUISITE — apply before any case-layer rerun).** In
+`Evaluation/common/CaseLayerShapes.py`, insert this as the **2nd** element of
+`CASE_LAYERS_DETAILS`, then bump the existing L2/L3/L4 entries' `"id"` to
+`"L3"`/`"L4"`/`"L5"` (final order = L1, new-VGG, old-L2, old-L3, old-L4). The
+selector path is unchanged — E/F still reach the registry via `--layers L1..L5` /
+`--layer-ids L1..L5`. New entry:
+```python
+{
+    "id": "L2",
+    "label": "Standard 3x3 large-channel conv",
+    "source": "VGG19BN Conv_9",
+    "mechanism_role": "Weight-heavy large-channel standard conv (512^2 @28). "
+                      "Weight volume >> macro capacity, so weight-reload overlap "
+                      "(beta^M) dominates; hardest MINLP / budget-bound layer.",
+    "loopdim": {"R": 3, "S": 3, "P": 28, "Q": 28,
+                "C": 512, "K": 512, "G": 1, "B": 1,
+                "H": 28, "W": 28, "Stride": 1, "Padding": 1},
+    "signature": {"weight_KB": 2304.0,   # 512·512·9 / 1024
+                  "input_KB": 392.0,     # 512·28·28 / 1024
+                  "output_KB": 392.0,    # 512·28·28 / 1024
+                  "mac_M": 1849.69,      # 512·512·9·784 / 1e6
+                  "dominant_operand": "weight-heavy, large-channel"},
+},
+```
+
+**Phases to rerun** (every phase keyed on case layers — commands in §4/§5 are
+already updated to the 5-layer roster below): **D** (§5.4.2 ablation — also add
+`vgg19bn` to `--models` and the VGG shape to `--layers`), **E** (§5.5.1
+sensitivity), **F** (§5.6 per-layer cost, incl. the RunTopKBudget budget/top-K
+grid), and the **§5.4.1 case-layer profile**. Phases A/B/C/G are full-model /
+non-case and are **unaffected**. These phases have all been **remeasured in
+`logs_rerun_0530`**; the five-layer D/E/F anchors are the values inlined in §6.
+
+**Consequence for the solving-cost story (§V-F).** With L2 now the hard VGG
+512²@28 layer, Phase F's `RunTopKBudget` grid over L1–L5 produces a **real
+budget/top-K saturation curve at case-layer granularity (on L2)** — the earlier
+"all case layers are flat" obstacle is gone. The separate whole-model VGG
+EDP-budget figure (`experiments/parsed_metrics/model_edp_budget_vgg19bn.json`,
+`figures/fig_solvingcost_edp.*`) thus becomes optional/complementary rather than
+required. Which one §V-F uses is a paper-narrative decision — do not delete the
+whole-model artifacts without that decision.
+
+**Paper artifacts (LANDED in `logs_rerun_0530` + current
+`sections/experiments.tex`):** the five-layer roster is in Table
+`tab:case_layer_summary` (now with a spatial-Fill row), the §V Case-Studies
+narrative, the §V-D ablation, §V-E sweep, and §V-F cost. The old Fig 7
+`fig:traffic_amplification` was **removed and replaced** by the exact macro-wait
+`fig:stall_breakdown` (per-operand stall split, fed by the new F5 field — see
+§5.4.1 and §6). Opening text reads "five case layers".
+
+---
+
 ## 0. This guide's commands are authoritative (read before anything else)
 
 This runbook is **self-contained**: the exact per-phase invocations in §5 are
@@ -140,8 +219,10 @@ degraded substitute.
             f"w_pJ {a.w_cost_per_bit_pJ:.4f}->{m.w_cost_per_bit_pJ:.4f}")
   PY
   ```
-  Expect: Dram bw 64→128; Input_buffer 2048→8192 B; Output_buffer 2048→16384 B;
-  Global_buffer unchanged.
+  Expect: Dram bw **unchanged at 64**; Input_buffer 2048→8192 B; Output_buffer
+  2048→16384 B; Global_buffer unchanged. (DRAM is 64 bit/cycle in BOTH
+  `CIM_ACC_TEMPLATE` and `CIM_ACC_DEFAULT_SETUP` — only the two SRAM buffers grow
+  and trigger the CACTI re-run; see §3.)
 
 ### 1.8 Cache isolation (run once, immediately before Phase A)
 Cross-run isolation is a **separate concern from `BYPASS=1`** (§2.1). The MIP
@@ -281,7 +362,7 @@ auto-skipping depthwise/grouped layers — an inherent baseline-coverage limit
 (recorded as `baseline_error`, identical every run, not a regression). Any other
 `anomalies[]` entry, traceback, or row `error` is a HALT condition for *you*, the
 operator: fix the root cause and rerun that phase; do **not** curate around a
-missing/partial column. (The §5.4.1 traffic profile has its own documented benign
+missing/partial column. (The §5.4.1 case-layer profile has its own documented benign
 anomalies — see §6.)
 
 ### 2.7 FlexFact is ON
@@ -302,7 +383,7 @@ via `/proc/<pid>/environ` on a running phase.
 |---|---|---|
 | Chip | Cores | 8 |
 | Chip | Global buffer | 256 KB, 128 bit/cycle |
-| Chip | DRAM | 1 GB, 128 bit/cycle |
+| Chip | DRAM | 1 GB, 64 bit/cycle (LPDDR4-class single channel) |
 | Core | Input buffer | 8 KB, 128 bit/cycle |
 | Core | Output buffer | 16 KB, 128 bit/cycle |
 | Macro | Wordline × Bitline × Depth | 32 × 16 × 8 |
@@ -319,23 +400,66 @@ templates; do not substitute the legacy `CIM_ACC_TEMPLATE`.
 
 ## 4. Case layers (used by several phases)
 
-Defined in `Evaluation/common/CaseLayerShapes.py`. The four archetypes:
+Defined in `Evaluation/common/CaseLayerShapes.py`. The five archetypes (L2 added
+per CR-1; former L2/L3/L4 renumbered to L3/L4/L5):
 `L1` = ResNet-18 `Conv_8` (standard 3×3, C128 K128 G1);
-`L2` = ResNet-18 `Conv_17` (deep 1×1, C256 K512 G1);
-`L3` = MobileNet-v2 depthwise (a **synthetic** G=144 shape — no real model layer
+`L2` = VGG19BN `Conv_9` (standard 3×3 large-channel, C512 K512 G1, @28×28 —
+weight-reload-bound, hardest MINLP);
+`L3` = ResNet-18 `Conv_17` (deep 1×1, C256 K512 G1);
+`L4` = MobileNet-v2 depthwise (a **synthetic** G=144 shape — no real model layer
 has G=144; the real nearest is `Conv_19` G=192);
-`L4` = EfficientNet-B0 MBConv 1×1 expansion (C=80, K=480, G1).
+`L5` = EfficientNet-B0 MBConv 1×1 expansion (C=80, K=480, G1).
 
-**Selector semantics (a known foot-gun):** bare `L1`..`L4` are *per-model ordinal
+**Selector semantics (a known foot-gun):** bare `L1`..`L5` are *per-model ordinal
 aliases* (the model's n-th layer), **not** the case registry. The case registry
 is reached only via `--layerSource representative` (RunSensitivity) /
 `--layer-ids` (the §5.6 kebab drivers) / `_annotate_representative_layers`. So a
-plain `--layers L1..L4` does NOT reproduce a case-layer phase; check each phase's
+plain `--layers L1..L5` does NOT reproduce a case-layer phase; check each phase's
 exact selector below.
 
 ---
 
 ## 5. Run order + per-phase commands (must follow — phases have dependencies)
+
+### 5.0 Quick-reference: object scope × cache (read first — the two top pitfalls)
+
+The two error classes that cost the most rework are **cache misuse** (§8 E1) and
+**case-layer vs full-model scope** (§8 E2). This table fixes both per phase; the
+per-phase commands in §5.1+ remain authoritative for exact flags.
+
+| Phase | Object | Scope | Cache / BYPASS | Cache-reuse note |
+|---|---|---|---|---|
+| A §5.2.1 CNN | 5 models, **all 174 conv layers** | full model | quality → **no BYPASS** | cold under the fresh v4 cache; **populates** the cache every later phase reuses |
+| A-iso §5.2.1 | resnet18/vgg19bn/alexnet **all layers** | full model | quality → no BYPASS | MIREDO hits A; only the CoSA columns solve new |
+| B §5.2.2 transformer | 3 block models **all layers** | full model | quality → no BYPASS | independent (`…_TRANSFORMER` hw_fp ≠ A, no sharing) |
+| C §5.5.2 tradeoff | resnet18 **full model** | full model | quality → **no BYPASS** | Latency/EDP **hit A**; only Energy is a new solve |
+| D §5.4.2 ablation | **5 case layers** (explicit shapes; +L2 vgg per CR-1) | case layer | quality → no BYPASS | latency-only rows **hit A**; the 2 structural variants set distinct `ablation_flags` → new solves |
+| E §5.5.1 sensitivity | **5 case layers** L1–L5 (registry) | case layer | timing/convergence → **BYPASS=1** | every sweep point forced cold |
+| F §5.6 per-layer cost | **5 case layers** L1–L5 (registry) | case layer | timing → **BYPASS=1** | forced cold, serial (wall-time) |
+| G §5.3.1/2 | derived from A's **full-model** result (174 layers) | full model (from A) | analysis, no solve | reads A's EDP output; no cache touch |
+| §5.4.1 profile | **case layers** L1–L5 archetypes | case layer | analysis, no solve* | reads D's frozen dataflow |
+| §5.3.3 cert | **hardcoded anchor shapes** (7 conv + 1×1 + attention tile) | anchor, not full model | cert → **BYPASS=1**, budget **120 s** | forced cold |
+
+\* §5.4.1 needs the L1 `Dataflow.pkl`; because D's L1 latency-only row **hits A's
+cache**, the pkl is **not** written on a hit — materialize it with one BYPASS
+solve first (§5.4.1 command; §8 E6).
+
+**Pitfall — the depthwise "L4" is NOT the same object across phases** (was L3
+before CR-1). In E/F the case registry
+(`Evaluation/common/CaseLayerShapes.py`) defines L4 as a
+**synthetic C=1 K=1 G=144** shape (no real model layer has G=144); in D/§5.4.1
+the depthwise case is the **real `mobilenetV2:Conv_19…G=192`**. L1/L2/L3/L5 are
+identical across the registry and the explicit shapes — only L4 diverges
+(G=144 vs G=192). Do not cross-check the two L4 numbers; do not merge them into
+one table row at curation.
+
+**Pitfall — selector semantics.** Bare `--layers L1..L5` on a *model* driver
+resolves to that model's 1st–5th parsed layers (ordinal aliases
+`L{n}`/`layer{n}`/`Conv_{idx}`), **NOT** the case registry. The registry is
+reached only via `--layerSource representative` (RunSensitivity), `--layer-ids`
+(the §5.6 kebab drivers), or `_annotate_representative_layers`. That is why D
+pins its case layers with full model-scoped shape strings
+(`mobilenetV2:Conv_19_3_3_14_14_1_1_192`), never with `L4`.
 
 There is **no master script**; run the phases in this order. **Phase A must
 finish first** because Phase G, the §5.4.1 profile, and §5.5.2 (Phase C, cache
@@ -347,10 +471,10 @@ A (§5.2.1)  RunBaselineComparison  CNN, 174 layers, EDP then Latency   ← run 
 A-iso       RunBaselineComparison  CoSA subset (3 nets, EDP)
 B (§5.2.2)  RunBaselineComparison  transformer (3 models)
 C (§5.5.2)  RunTradeoff            ResNet-only, Lat/Energy/EDP          (reuses A)
-D (§5.4.2)  RunAblation            4 case layers, 2 structural variants
-E (§5.5.1)  RunSensitivity         6-axis, L1–L4                        [BYPASS=1]
+D (§5.4.2)  RunAblation            5 case layers, 2 structural variants
+E (§5.5.1)  RunSensitivity         6-axis, L1–L5                        [BYPASS=1]
 F (§5.6)    RunAccelerationControl / RunFlexFactControl /
-            RunTopKBudget / RunBaselineWallTime  L1–L4                  [BYPASS=1]
+            RunTopKBudget / RunBaselineWallTime  L1–L5                  [BYPASS=1]
 G (§5.3.1/2) RunPhaseGAnalysis      analysis-only (REQUIRES A; pin root)
 §5.4.1      extract_profiling_caselayer.py  (analysis; REQUIRES A + L1 pkl)
 §5.3.3/§5.2.2 cert  VerifyOptimalityChain + VerifyBruteforce ×2         [BYPASS=1]
@@ -377,7 +501,7 @@ export MIREDO_RERUN_ROOT="$RUN"         # pins the analysis consumers to this ru
 > `RunTradeoff`, `RunAblation`, `RunSensitivity`) use camelCase `--timeLimit
 > --mipFocus` and `-o <section dir>`. The four §5.6 drivers
 > (`RunAccelerationControl`, `RunFlexFactControl`, `RunTopKBudget`,
-> `RunBaselineWallTime`) use kebab-case `--mip-focus`, `--layer-ids L1 L2 L3 L4`,
+> `RunBaselineWallTime`) use kebab-case `--mip-focus`, `--layer-ids L1 L2 L3 L4 L5`,
 > and **`--output-json <explicit path>` — NOT `-o`**. Run
 > `python Evaluation/<driver>.py --help` to confirm spelling before a long run.
 
@@ -434,37 +558,39 @@ RunTradeoff self-emits `objective_tradeoff.json` and no downstream script
 hardcodes the tradeoff subpath, so the `/network` name is arbitrary. MIREDO
 Latency/EDP cache-hit Phase A; Energy is the only genuinely new solve.
 
-**D §5.4.2 — ablation, 4 case layers.** Quality → no BYPASS. **Pass the 4
-explicit case-layer shapes via `--layers`** (exactly the four in the command
-below — these are authoritative; an earlier guide said "full models", which was
-WRONG and cost a 306-solve mis-launch, §8 E2). Variant
-names are **HYPHENATED** (argparse `choices`-restricted; underscores hard-fail):
+**D §5.4.2 — ablation, 5 case layers** (+L2 vgg per CR-1). Quality → no BYPASS.
+**Pass the 5 explicit case-layer shapes via `--layers`** (exactly the five in the
+command below — these are authoritative; an earlier guide said "full models",
+which was WRONG and cost a 306-solve mis-launch, §8 E2). Variant names are
+**HYPHENATED** (argparse `choices`-restricted; underscores hard-fail):
 ```sh
 python Evaluation/RunAblation.py \
-  --models resnet18 mobilenetV2 EfficientNet-B0 \
+  --models resnet18 vgg19bn mobilenetV2 EfficientNet-B0 \
   --objectives Latency --structural fixed-double-buffer simplified-pipeline \
   --layers resnet18:Conv_8_3_3_28_28_128_128_1 \
+           vgg19bn:Conv_9_3_3_28_28_512_512_1 \
            resnet18:Conv_17_1_1_7_7_256_512_1 \
            mobilenetV2:Conv_19_3_3_14_14_1_1_192 \
            EfficientNet-B0:Conv_30_1_1_14_14_80_480_1 \
   --architecture CIM_ACC_DEFAULT_SETUP --timeLimit 60 --mipFocus 1 \
   -o $RUN/s5_4_caselayer/ablation
 ```
-Produces 9 rows = 3 models × {`latency-only` (the reference, 0% degradation),
-`fixed-double-buffer`, `simplified-pipeline`}. The Latency pass cache-hits A; the
-two structural variants set distinct `ablation_flags` (different key) → genuine
-new solves. (`psum-capacity-only` is the paper-unused EXP-3c pilot — exclude.)
-This `/ablation` subrun is also the hardcoded source for the §5.4.1 profile's
-**L1** dataflow.
+Produces 12 rows = 4 models × {`latency-only` (the reference, 0% degradation),
+`fixed-double-buffer`, `simplified-pipeline`}; resnet18 carries two case layers
+(L1 + L3) so its raw model row de-aliases into both at curation. The Latency pass
+cache-hits A; the two structural variants set distinct `ablation_flags`
+(different key) → genuine new solves. (`psum-capacity-only` is the paper-unused
+EXP-3c pilot — exclude.) This `/ablation` subrun is also the hardcoded source for
+the §5.4.1 profile's **L1** dataflow.
 
 **E §5.5.1 — sensitivity, 6 axes.** **BYPASS=1.** Use `--layerSource
-representative --layers L1 L2 L3 L4` (the case registry — NOT `--models`; the
+representative --layers L1 L2 L3 L4 L5` (the case registry — NOT `--models`; the
 `config.models:[resnet18]` recorded in `hardware_sensitivity.json` is an unused
 default, a RED HERRING). Pass the explicit 6 `--parameters` (the driver's
 `DEFAULT_SWEEPS` has a 7th `compartment_depth` not in the paper figure):
 ```sh
 MIREDO_BYPASS_MIP_CACHE=1 python Evaluation/RunSensitivity.py \
-  --layerSource representative --layers L1 L2 L3 L4 --baselines ws zigzag \
+  --layerSource representative --layers L1 L2 L3 L4 L5 --baselines ws zigzag \
   --parameters core_count buffer_capacity gbuf_core_bw macro_spec \
                dram_bw operand_scratchpad \
   --architecture CIM_ACC_DEFAULT_SETUP --timeLimit 60 --mipFocus 1 \
@@ -477,23 +603,23 @@ MIREDO_BYPASS_MIP_CACHE=1 python Evaluation/RunSensitivity.py \
 # 5.6.1a dynamic load-balance control
 MIREDO_BYPASS_MIP_CACHE=1 python Evaluation/RunAccelerationControl.py \
   --architecture CIM_ACC_DEFAULT_SETUP --time-limit 60 --mip-focus 1 \
-  --layer-ids L1 L2 L3 L4 \
+  --layer-ids L1 L2 L3 L4 L5 \
   --output-json output/$RUN/s5_6_perlayer_cost/5_6_1_dynlb_control.json
 # 5.6.1b FlexFact ablation
 MIREDO_BYPASS_MIP_CACHE=1 python Evaluation/RunFlexFactControl.py \
   --architecture CIM_ACC_DEFAULT_SETUP --time-limit 60 --mip-focus 1 \
-  --layer-ids L1 L2 L3 L4 \
+  --layer-ids L1 L2 L3 L4 L5 \
   --output-json output/$RUN/s5_6_perlayer_cost/5_6_1_flexfact_ablation.json
 # 5.6.2 cost-quality (budgets ARE the per-cell limits; NO --time-limit)
 MIREDO_BYPASS_MIP_CACHE=1 python Evaluation/RunTopKBudget.py \
-  --architecture CIM_ACC_DEFAULT_SETUP --mip-focus 1 --layer-ids L1 L2 L3 L4 \
+  --architecture CIM_ACC_DEFAULT_SETUP --mip-focus 1 --layer-ids L1 L2 L3 L4 L5 \
   --budgets 60 30 15 5 --top-ks all 10 5 3 \
   --output-json output/$RUN/s5_6_perlayer_cost/5_6_2_cost_quality.json
 # 5.6.3 wall-time vs baselines — OMIT --methods (see §8 E3); code default is
 #   [ws zigzag cimloop cosa cosa_legal miredo]; relabel cosa_legal→cosa-constrained at curation
 MIREDO_BYPASS_MIP_CACHE=1 python Evaluation/RunBaselineWallTime.py \
   --architecture CIM_ACC_DEFAULT_SETUP --time-limit 60 --mip-focus 1 \
-  --layer-ids L1 L2 L3 L4 \
+  --layer-ids L1 L2 L3 L4 L5 \
   --output-json output/$RUN/s5_6_perlayer_cost/5_6_3_walltime.json
 ```
 
@@ -505,7 +631,9 @@ MIREDO_RERUN_ROOT=$RUN python Evaluation/RunPhaseGAnalysis.py
 ```
 Writes `_analysis/{5_3_1_fidelity,5_3_2_ranking}.json` + `diff_report.md`.
 
-**§5.4.1 — traffic profile.** Analysis over A/D frozen dataflows.
+**§5.4.1 — case-layer profile** (F1–F4 traffic/utilization + **F5 macro-wait**:
+the exact `compute + stall_input + stall_weight + stall_output = latency` split,
+invErr=0, feeding `fig:stall_breakdown`)**.** Analysis over A/D frozen dataflows.
 **PRECONDITION:** L1 (resnet18 `Conv_8`) needs its Latency `Dataflow.pkl` at
 `output/$RUN/s5_4_caselayer/ablation/Latency/resnet18/Conv_8_3_3_28_28_128_128_1/`. If
 L1 was a CACHE HIT in A-LAT and D, **no pkl is written** — check first; if absent,
@@ -519,8 +647,13 @@ MIREDO_BYPASS_MIP_CACHE=1 python Evaluation/RunBaselineComparison.py \
   -o $RUN/s5_4_caselayer/ablation
 MIREDO_RERUN_ROOT=$RUN python Evaluation/extract_profiling_caselayer.py
 ```
-Known-benign anomalies: L3 ws/zigzag baseline-mapper mismatch (~10–11%, identical
-every run, pre-existing) + `fresh_solve` notes.
+Output `s5_4_caselayer/caselayer_profile_<date>.json`; the canonical product is
+**`caselayer_profile_20260605.json`** (20 rows = 5 layers × 4 frameworks, F1–F5 +
+masks, **anomalies `[]`**). Benign kinds that may appear depending on cache state:
+`fresh_solve`, `zigzag_fallback`, `f1_crosscheck_mismatch`, plus the pre-existing
+L4 depthwise ws/zigzag baseline-mapper mismatch (~10–11%, identical every run).
+`extraction_error` is **NOT** benign — a real bug fixed by `fix_s541` (the
+superseded `_20260601.json` carried 4; the canonical product has none).
 
 **§5.3.3 / §5.2.2 cert — THREE distinct sub-steps (do NOT conflate).** All
 **BYPASS=1**. They are easy to miss — run all three; the attention tile in
@@ -594,18 +727,19 @@ populated timing/scheme-count fields. The **derived/auxiliary** outputs do
 **not** carry `config.architecture_key` and are each checked differently:
 - *Phase G* (`_analysis/5_3_1_fidelity.json` / `5_3_2_ranking.json`) — produced
   if its `provenance.source` points at this run's Phase A output (no new solves).
-- *§5.4.1 traffic profile* (`s5_4_caselayer/caselayer_profile_*.json`) —
-  self-identifies its arch via `config.hw_arch.architecture` and carries its own
-  `anomalies[]`. Inspect it: the documented benign kinds `fresh_solve`,
-  `zigzag_fallback`, and `f1_crosscheck_mismatch` are expected (§5.4.1); any
-  other kind (e.g. `extraction_error`) is a failure.
+- *§5.4.1 case-layer profile* (`s5_4_caselayer/caselayer_profile_*.json`, canonical
+  `_20260605.json`) — self-identifies its arch via `config.hw_arch.architecture`
+  and carries its own `anomalies[]` (the canonical product has `[]`). It now
+  includes **F5 macro-wait** alongside F1–F4. Benign kinds that may appear:
+  `fresh_solve`, `zigzag_fallback`, `f1_crosscheck_mismatch`; any other kind
+  (e.g. `extraction_error`, fixed by `fix_s541`) is a failure.
 - *§5.3.3 / §5.2.2 certs* — produced if the script ran to completion under the
   pinned `--arch` (the arch is in the command + the `on <arch>` log line).
 
 The rerun is **complete** when all of A–G **PLUS the four easily-missed
 auxiliary cert/profile steps** have produced output with the correct
 architecture and no missing cells:
-- **(i) §5.4.1 traffic profile** (extract_profiling — needs the L1-pkl precondition);
+- **(i) §5.4.1 case-layer profile** (extract_profiling, F1–F5 — needs the L1-pkl precondition);
 - **(ii) §5.3.3 chain + 7 conv anchors** (VerifyOptimalityChain, CNN);
 - **(iii) §5.3.3 1×1 C=K=64 anchor** (VerifyBruteforce `--case 1x1_C64K64`);
 - **(iv) §5.2.2 attention tile** (VerifyBruteforce `--case attention_tiny`, `…_TRANSFORMER`).
@@ -616,27 +750,32 @@ without an output.
 
 ### Expected results — sanity anchors (verify your reproduction against these)
 
-The reference run produced the numbers below. Results are deterministic given
-the frozen config, so a correct reproduction should land on the **same** values;
-a large divergence means a config/scope error — recheck §1–§5, do not curate
-around it.
+**CANONICAL RUN: `logs_rerun_0530`** (frozen 2026-06-01, audited 2026-06-02 —
+see `output/logs_rerun_0530/DATA_AUDIT_0602.md`). Config: CIM DRAM **64 bit/cycle**
+(LPDDR4-class) + leakage fix, CR-1 **five** case layers, and a
+**native-double-buffer baseline replay** (CiMLoop/ZigZag mappings are replayed
+through `CompatibleCIMLoop._apply_native_double_buffer` so every framework's
+double-buffer is scored like-for-like on the shared simulator). All anchors below
+are the **0530 measured values and match the paper tables**. The earlier
+`logs_rerun_20260525` baseline is **superseded** — do not gate against it.
+Results are deterministic given the frozen config.
 
-| Phase | Anchor |
+| Phase | Anchor (`logs_rerun_0530`; matches the paper tables) |
 |---|---|
-| A-EDP | MIREDO vs ZigZag total simEDP improvement: resnet18 +27.8%, vgg19bn +65.1%, alexnet +10.9%, mobilenetV2 +25.2%, EfficientNet-B0 +26.8%. MIREDO `runtime_error = 0`. |
-| A-LAT | MIREDO vs ZigZag total latency speedup: resnet18 1.62×, vgg19bn 2.03×, alexnet 1.85×, mobilenetV2 1.29×, EfficientNet-B0 1.29×. |
-| feas-probe (optional `MIREDO_FEAS_LOG`) | 34,333 schemes: 99.94% presolve-infeasible (Gurobi status 2), 20 prescreen cap-hits (status 9) across 6 vgg19bn layers, avg feasibility wall 5.64 s → the 20 s prescreen cap is empirically sufficient. |
-| B | MIREDO vs ZigZag EDP: bert_base 1.93×, gpt2_medium_block 7.51×, tinyllama_block 1.63×; vs CiMLoop 2.85–3.09×. |
-| C | 3 tradeoff points (resnet18 Latency/Energy/EDP) + `decision_comparison`; Latency cache-hits A-LAT. |
-| D | 9 rows; latency degradation: `latency-only` 0%, `fixed-double-buffer` & `simplified-pipeline` = resnet18 2.16% / mobilenetV2 18.17% / EfficientNet-B0 23.05%. |
-| E | 6 params × {48 sensitivity + 192 per-layer} rows, L1–L4, anomalies 0. |
-| F | 4 JSONs, exit 0, anomalies 0. |
-| G | §5.3.1 fidelity: latency mean/max 1.55% / 11.11%, energy 1.10% / 9.24%. §5.3.2 ranking 148/174 (85.1%), mean gap 0.10%. |
-| §5.3.3 | **Latency cert clean:** 6/7 conv anchors gap 0.000% (7th = depthwise G576, no enumerable temporal ordering — structural, not a failure); 1×1 C=K=64 anchor 1409 cyc, gap 0.000%; QK^T attention tile 182 cyc, gap 0.000%. **EDP cert NOT clean** (anchor gaps 0.69–15.7%) — expected (§7). |
+| A-EDP | MIREDO vs ZigZag-IMC normalized EDP: resnet18 **1.22×**, vgg19bn **1.12×**, alexnet **1.08×**, mobilenetV2 **1.16×**, EfficientNet-B0 **1.21×** (all > 1); vs CiMLoop **1.45–2.64×**. MIREDO `runtime_error = 0`. (paper `tab:main_perf`.) |
+| A-LAT | MIREDO(Latency) vs ZigZag(Latency) per-net latency speedup (`s5_2_1_cnn_latency`): resnet18 **1.61×**, vgg19bn **2.93×**, alexnet **2.32×**, mobilenetV2 **1.28×**, EfficientNet-B0 **1.33×**; vs CiMLoop 1.33–1.69×. (paper `fig:speedup`.) |
+| B | MIREDO vs ZigZag-IMC EDP: bert_base **1.68×**, gpt2_medium_block **6.19×**, tinyllama_block **1.10×**; vs CiMLoop **1.71–2.20×**. **All > 1** — tinyllama is now above parity under the 0530 native-double-buffer replay; the earlier sub-1× warning is void. (paper `tab:transformer_perf`.) |
+| C | 3 tradeoff points (resnet18 Latency/Energy/EDP); Latency cache-hits A-LAT. anomalies 0. |
+| D | 5 case layers L1–L5, latency degradation: L1 **5.85%**, L2 fixed-double-buffer **5.33%** / simplified-pipeline **6.49%**, L3 **14.57%**, L4 **32.92%**, L5 **54.30%**. Monotone with reload pressure (L1→L5); only L2 separates the two variants (dropping the reward 6.49% > forbidding the option 5.33%). anomalies 0; `latency-only` 0%. |
+| E | 6 params × L1–L5 sweep; anomalies 0. The sweep spans adverse regimes by design — e.g. `core_count=4` gives **−8.84%** vs ZigZag (MIREDO loses), and the large-channel L2 / depthwise L4 dip below parity in scratchpad-/core-starved cells. Sub-1× cells are real per-layer results, not artifacts (§7). |
+| F | 5 layers L1–L5; 4 JSONs exit 0; walltime **30 rows (6 methods × 5 layers)**, no non-benign error. One benign `RunTopKBudget` note: L2 K=10 beats K=all **at budget=5 s only** (15.2% solver-incumbent jitter on the hard VGG MINLP; converges by 15 s, K=all wins by 60 s). |
+| G | §5.3.1 fidelity (complete 174 layers): latency mean/worst **2.37% / 9.37%**, energy mean **1.23%** / median 0.32% / worst **12.08%**. §5.3.2 ranking **146/174 (83.9%)**, mean gap **0.24%**, worst 10.0%. |
+| §5.3.3 / optimality | **Latency cert clean:** 6 EfficientNet-B0 SE layers gap **0.000%** (enumerated optima 52–236 cyc); `optimality_chain` confirms **6/6** verifiable targets MIP-proven EDP-optimal (MIPGap=0), with mobilenet Conv_40 G=576 degenerate (storage-pruned, excluded — not a 7th failure). **EDP cert:** a 5×5 depthwise EffNet layer (480 ch @14×14) enumerates **1.28×10⁶** loop orders, none below the incumbent; its production solve halts at a **32%** McCormick relaxation gap under 60 s — slack, not suboptimality. **Closure:** **95 of 174** layers reach a proven zero EDP gap (`closure_report.py`). |
 
-A's `baseline_error` anomalies (130 cosa + 130 cosa_legal across EDP+Latency) are
-the CoSA depthwise/grouped (G>1) structural limit — identical every run, benign,
-not a regression (§2.6).
+A's `baseline_error` anomalies (**130** in the CNN-main EDP run = 65 `cosa` +
+65 `cosa_legal`) are the CoSA depthwise/grouped (G>1) structural limit —
+identical every run, benign, not a regression (§2.6). No MIREDO / ZigZag-IMC /
+CiMLoop errors.
 
 ---
 
@@ -646,10 +785,14 @@ not a regression (§2.6).
   cause was `scout_size` starvation, now fixed by the frozen
   `scout_size = min(num_schemes, 20)`. Any residual sub-1× cell is a **real
   per-layer result**, not an artifact. Do not lower fidelity or swap configs.
-- §5.3.3 is a *latency* incumbent-optimality certificate; the **EDP** certificate
-  is not clean on this hardware (anchor EDP gaps 0.69–15.7%) — expected, not a
-  failure. The latency cert is clean: 6/7 conv anchors gap = 0.000%, the 1×1
-  anchor 1409 cyc gap = 0.000%, the attention tile 182 cyc gap = 0.000%.
+- §5.3.3 separates two things the 0530 audit clarified (DATA_AUDIT §2): the MIP
+  **proves** its EDP optimum (`MIPGap=0`) on all **6/6** verifiable
+  `optimality_chain` targets, while a *production* EDP solve under the 60 s budget
+  can still report a McCormick **relaxation** gap — e.g. **32%** on the 5×5
+  depthwise EffNet layer (480 ch @14×14) whose **1.28×10⁶** enumerated orderings
+  confirm the incumbent is already optimal. That residual is relaxation slack, not
+  suboptimality. The latency cert is clean: 6 EffNet SE layers gap = 0.000%
+  (optima 52–236 cyc). Do not treat the open production gap as a failure.
 - Margins over the strongest baseline are **modest by design** on this fair
   hardware. Do not switch configs to enlarge them; do not config-shop.
 
@@ -666,11 +809,11 @@ already encodes the fix; this is the consolidated checklist.
   cache-hitting. **Fix:** BYPASS only when wall-clock/scheme-prune count is the
   reported outcome (§2.1 table). A-EDP, A-LAT, A-iso, B, C, D = no BYPASS.
 
-- **E2 — §5.4.2 launched full-model instead of 4 case layers.** The first D
+- **E2 — §5.4.2 launched full-model instead of the case layers.** The first D
   launch used all 3 models with no `--layers` (306 cold solves) on the strength
-  of guide prose that said "full models". §5.4.2 is exactly the 4 case-layer
-  shapes. **Fix:** pass the 4 explicit `--layers` exactly as in the Phase D
-  command above — that command is the authoritative source (§0).
+  of guide prose that said "full models". §5.4.2 is exactly the **5 case-layer
+  shapes** (CR-1; was 4 before). **Fix:** pass the 5 explicit `--layers` exactly
+  as in the Phase D command above — that command is the authoritative source (§0).
 
 - **E3 — `--methods … cosa-constrained` is an OUTPUT label, not a CLI input.**
   `RunBaselineWallTime --methods` has no `choices`; the dispatcher recognizes

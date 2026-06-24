@@ -81,6 +81,13 @@ def _load_cosa_module():
     if cosa_src not in sys.path:
         sys.path.insert(0, cosa_src)
     os.environ.setdefault("COSA_DIR", str(_COSA_REPO))
+    # cosa.cosa runs check_timeloop_version() at import time. With TIMELOOP_DIR
+    # unset it takes a KeyError branch that never assigns `output`, then
+    # dereferences it (upstream bug) → UnboundLocalError aborts the import and
+    # surfaces as a cosa baseline_error. Point it at the vendored Timeloop tree
+    # so the check degrades to its intended benign version warning.
+    _timeloop_dir = _COSA_ADAPTER_DIR.parent / "CIMLoop" / "timeloop-accelergy-infra" / "src" / "timeloop"
+    os.environ.setdefault("TIMELOOP_DIR", str(_timeloop_dir))
     _cosa_module = importlib.import_module("cosa.cosa")
     return _cosa_module
 

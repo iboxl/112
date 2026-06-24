@@ -1,5 +1,5 @@
 # Evaluation/RunFlexFactControl.py
-# flexfact_losslessness: Empirical losslessness verification for FlexFact (flexible factorization) on L1-L4
+# flexfact_losslessness: Empirical losslessness verification for FlexFact (flexible factorization) on L1-L5
 import argparse
 import copy
 import json
@@ -213,7 +213,7 @@ def main():
         f"{'wall_off':>9}  {'verdict':<12}  {'vars_growth%':>12}  {'cons_growth%':>12}",
         flush=True
     )
-    for lid in ["L1", "L2", "L3", "L4"]:
+    for lid in args.layer_ids:
         if lid not in by_layer:
             print(f"  {lid}: incomplete (missing)", flush=True)
             continue

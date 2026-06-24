@@ -45,7 +45,15 @@ class SolverProfile:
 class Solver():
     def __init__(self, acc:CIM_Acc, ops:WorkLoad, tu, su, metric_ub, outputdir=None,
                  threads=None, soft_mem_limit_gb=None, fixed_factor_ordering=None,
-                 shared_ub=None, env=None):
+                 shared_ub=None, env=None, fixed_value_sequence=None,
+                 fixed_partial_ordering=None, latency_ub_cyc=None, energy_ub=None):
+        # epsilon-constraint hooks (independent of the objective): bound the
+        # NON-objective metric so a single objective solve enumerates a slice of
+        # the latency/energy Pareto frontier. Used by the hyperbolic EDP
+        # certificate (cert_edp_eps). Default None -> no constraint, no behavior
+        # change for any existing caller.
+        self.latency_ub_cyc = latency_ub_cyc   # physical cycles; res_latency <= x/SCALE_LATENCY
+        self.energy_ub_eps = energy_ub          # raw energy; res_energy <= x
         self.acc = copy.deepcopy(acc)
         self.ops = copy.deepcopy(ops)
         self.tu = tu
@@ -78,6 +86,20 @@ class Solver():
         self.threads = threads
         self.soft_mem_limit_gb = soft_mem_limit_gb
         self.fixed_factor_ordering = fixed_factor_ordering  # dict{(d,f)->i} for enumeration mode
+        # Value-sequence mode (coarser than full ordering): list of length Num_Loops
+        # giving the factor VALUE pinned at each loop position. Pins indic_loop2Factor
+        # only (makes Z_crit exact, killing the dominant McCormick gap) while leaving
+        # the dimension->position assignment indic_factor2Loop FREE for the MIP. This
+        # collapses the same-value cross-dimension permutations that blow the full
+        # ordering count to ~1e12 down by 1e2-1e5x, trading explicit enumeration for
+        # MIP search at a granularity where each sub-MIP still closes.
+        self.fixed_value_sequence = fixed_value_sequence
+        # Partial-ordering mode (adaptive branch-and-bound node): dict {(d,f)->i}
+        # pinning a SUBSET of factors to positions. Pinned positions get exact
+        # loop2Factor (Z_crit exact there); unpinned factors/positions stay free.
+        # Generalizes both full ordering (all pinned) and free root (none pinned),
+        # letting an outer B&B branch only where a node's MIP fails to close.
+        self.fixed_partial_ordering = fixed_partial_ordering
         self.gurobi_output = FLAG.GUROBI_OUTPUT
         self._owns_env = True
 
@@ -326,6 +348,7 @@ class Solver():
         
         factors_val = [f for fs in factors[1:ops.Num_dim] for f in fs if fs != [1]]
         f_asc = sorted(factors_val)
+        f_desc = sorted(factors_val, reverse=True)
 
         MIN_INNER_PROD = {}
         for i in range(Num_Loops):
@@ -356,8 +379,23 @@ class Solver():
         _f_max = max(UNIQUE_FACTOR) if UNIQUE_FACTOR else 2
         _UB_P = [0] * (Num_Loops + 1)
         _UB_P[Num_Loops] = t_MAC
-        for _i in range(Num_Loops - 1, -1, -1):
-            _UB_P[_i] = _f_max * (MAX_STAGE_TRANSFER + 2 * LAT_UNIT + _UB_P[_i + 1])
+        if getattr(FLAG, 'TIGHT_CRITICAL_BIGM', False):
+            # Z_crit McCormick big-M = UB_Critical ⊂ UB_latencyLevel = min(UB_latencySimple, _UB_P).
+            # The default _UB_P uses f_max^(N-i) which is orders of magnitude loose for heterogeneous
+            # factor sets. Process[i] ≤ F(i)·(_BASE + Process[i+1]); the worst assignment puts the
+            # (N-i) LARGEST factors inner, folded smallest-inner/largest-outer (maximizes the
+            # prefix-product-weighted transfer terms). Product of the (N-i) largest ≤ f_max^(N-i),
+            # so this is a VALID but much tighter big-M → tighter McCormick lower facet
+            # (Z_crit ≥ Critical − UB·(1−indic)) → lifts the root dual bound without pinning.
+            _BASE = MAX_STAGE_TRANSFER + 2 * LAT_UNIT
+            for _i in range(Num_Loops - 1, -1, -1):
+                _P = t_MAC
+                for _f in sorted(f_desc[:Num_Loops - _i]):   # ascending ⇒ largest factor folded last (outer)
+                    _P = _f * (_BASE + _P)
+                _UB_P[_i] = _P
+        else:
+            for _i in range(Num_Loops - 1, -1, -1):
+                _UB_P[_i] = _f_max * (MAX_STAGE_TRANSFER + 2 * LAT_UNIT + _UB_P[_i + 1])
         UB_latencyLevel = {
             i: max(min(UB_latencySimple, _UB_P[i]), max(t_MAC, LAT_UNIT))
             for i in range(Num_Loops)
@@ -426,6 +464,20 @@ class Solver():
         res_latency = model.addVar(lb=0, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name="res_latency")
         res_energy = model.addVar(lb=0, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name="res_energy")
         res_EDP = model.addVar(lb=0, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name="res_EDP")
+
+        # Finite, provably-valid upper bound on res_latency. The EDP McCormick
+        # (res_EDP >= res_latency*res_energy under NonConvex=2) has an UNBOUNDED-below
+        # underestimator whenever either factor is unbounded above, so the root
+        # relaxation yields ObjBound = -inf and B&B cannot prune on the objective.
+        # From the L5/L6 constraints res_latency = MaxStartup - SumTransfer[op]
+        # + Process[0,op] + BootstrapWrite, with MaxStartup.ub = Process[0].ub =
+        # UB_latencyLevel[0] and BootstrapWrite <= UB_offchipBootstrap and
+        # SumTransfer >= 0, so res_latency <= 2*UB_latencyLevel[0] + UB_offchipBootstrap
+        # for EVERY feasible mapping. Setting it as the var ub never removes a
+        # mapping (the bound only tightens the bilinear relaxation) -> sound.
+        _bound_res = getattr(FLAG, 'BOUND_RES_VARS', True)
+        if _bound_res:
+            res_latency.ub = 2.0 * UB_latencyLevel[0] + UB_offchipBootstrap
 
         # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -# 
         
@@ -500,6 +552,23 @@ class Solver():
                         if isinstance(var, gp.Var):
                             var.lb = 1.0 if i == target_i else 0.0
                             var.ub = 1.0 if i == target_i else 0.0
+        elif self.fixed_value_sequence is not None:
+            # Value-sequence mode: pin only the factor VALUE at each position (via
+            # FIXED_FACTOR_VAL_AT, consumed by the indic_loop2Factor fixing below) and
+            # leave indic_factor2Loop (dimension->position) free for the MIP to choose.
+            FIXED_FACTOR_VAL_AT = {i: v for i, v in enumerate(self.fixed_value_sequence)}
+        elif self.fixed_partial_ordering is not None:
+            # Partial-ordering mode (B&B node): pin the subset of factors named in the
+            # dict to their positions (both factor2Loop here and loop2Factor below, so
+            # Z_crit is exact at those positions); everything else stays free.
+            FIXED_FACTOR_VAL_AT = {}
+            for (d, f), target_i in self.fixed_partial_ordering.items():
+                FIXED_FACTOR_VAL_AT[target_i] = factors[d][f]
+                for i in range(Num_Loops):
+                    var = indic_factor2Loop[d, f, i]
+                    if isinstance(var, gp.Var):
+                        var.lb = 1.0 if i == target_i else 0.0
+                        var.ub = 1.0 if i == target_i else 0.0
 
         # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -#
 
@@ -573,8 +642,11 @@ class Solver():
                                                                      for d in range(1, ops.Num_dim) for f in range(len(factors[d]))),
                                  name=f"C_relevantLoop_({i},{op_name})")
 
-        # Fix loop2Factor in enumeration mode (eliminates Z_crit McCormick gap — Theorem 3)
-        if self.fixed_factor_ordering is not None:
+        # Fix loop2Factor in enumeration mode (eliminates Z_crit McCormick gap — Theorem 3).
+        # Triggered by full-ordering mode OR value-sequence mode; both build
+        # FIXED_FACTOR_VAL_AT above. Value-sequence mode leaves indic_factor2Loop free.
+        if (self.fixed_factor_ordering is not None or self.fixed_value_sequence is not None
+                or self.fixed_partial_ordering is not None):
             for i in range(Num_Loops):
                 target_val = FIXED_FACTOR_VAL_AT.get(i)
                 if target_val is not None:
@@ -669,6 +741,14 @@ class Solver():
                 else:
                     indic_doubleMem[m,op] = model.addVar(vtype=GRB.BINARY, name=f"Indic_doubleMem_({acc.mem2dict(m)},{op_name})")
                     model.addConstr(indic_doubleMem[m,op] <= indic_usedMem[m,op], name=f"C_DoubleMem_Valid_{m}_{op_name}")
+                    if getattr(FLAG, "ABLATION_FORCE_DOUBLE_BUFFER", False):
+                        # Ablation: force double buffering wherever the hardware/config
+                        # permits it (acc.double_config[m][op]==1). Combined with the
+                        # <= constraint this pins beta = indic_usedMem, i.e. every
+                        # resident & capable (level,operand) is double-buffered.
+                        # Levels that cannot double-buffer (e.g. Reg, macro weight)
+                        # keep double_config==0 above and stay single-buffered.
+                        model.addConstr(indic_doubleMem[m,op] >= indic_usedMem[m,op], name=f"C_ForceDouble_{m}_{op_name}")
 
         for m in range(1, acc.Num_mem):
             for op, op_name in enumerate(['I','W','O']):
@@ -1383,6 +1463,17 @@ class Solver():
                         Z_crit[i, p] == 0,
                         name=f"C_Indicator_Z_false_({i},{p})")
 
+        # Direction-(1) experiment (FLAG.AGG_ZCRIT, default off): aggregate sound equality
+        # Σ_p Z_crit[i,p] = Critical[i]. Holds at every integer point (exactly one
+        # indic_loop2Factor[i,p]=1) but is NOT implied by the per-term McCormick, so the LP can
+        # let Σ_p Z_crit < Critical. Tests whether pinning the one-hot product total lifts the
+        # dual bound or the LP just re-parks the fixed mass onto the smallest-(F_p-1) position.
+        if getattr(FLAG, 'AGG_ZCRIT', False):
+            for i in range(Num_Loops):
+                model.addConstr(
+                    quicksum(Z_crit[i, p] for p in range(len(UNIQUE_FACTOR))) == latency_Critical[i],
+                    name=f"C_Agg_Zcrit_({i})")
+
         for i in range(Num_Loops):
             for op, op_name in enumerate(['I','W','O']):
                 coeff_rw = 2 if op == 2 else 1
@@ -1408,6 +1499,58 @@ class Solver():
                             + quicksum(coeff_rw * MIN_OUTER_PROD[i] * latency_Transfer[i, op]
                                        for i in range(Num_Loops)),
                             name=f"Cut_Transfer_Cascade_({op_name})")
+
+        # ─── Refetch-exact cascade cut (FLAG.LAT_REFETCH_CUT, default off) ───────────────────────────────────────────
+        # 把 Cut_Transfer_Cascade 里解耦的常数 MIN_OUTER_PROD[i]（i 个最小因子之积）换成精确外层重取
+        # product R[i]=Π_{j<i}F(j)。对 O 算子，Critical[i] ≥ Body[i] ≥ Process[i+1,O] 严格成立，故递归
+        # Process[i,O] ≥ 2·Transfer[i,O] + F(i)·Process[i+1,O] 精确展开得
+        #   Process[0,O] ≥ MIN_INNER_PROD[0]·t_MAC + Σ_i 2·R[i]·Transfer[i,O]   （可证下界，证书级）。
+        # R[i]=exp(lg_OP[i])，lg_OP[i]=Σ_{j<i}Σ_p ln(F_p)·indic_loop2Factor[j,p]（对二元变量线性、精确）。
+        # 凸性 exp(x) ≥ e^a(1+x−a) 给 OP[i] 的切线下界（纯线性、全局欠估，方向天然安全）；
+        # 再对 OP[i]·Transfer[i,op] 取 McCormick 下界面耦合各层。加割不改可行域/最优解/任何上报数值，
+        # 只收紧 LP 松弛 → 抬升对偶界。真实 mapping 取 OP[i]=R[i] 恒可行，故对偶界仍是合法下界。
+        if getattr(FLAG, 'LAT_REFETCH_CUT', False) and Num_Loops >= 2:
+            _ref_ops = getattr(FLAG, 'LAT_REFETCH_CUT_OPS', (2,))   # 默认仅 O：Body≥Process[i+1] ⇒ 系数可证有效
+            _K_tan = int(getattr(FLAG, 'LAT_REFETCH_TANGENTS', 16))
+            _lnf = [math.log(UNIQUE_FACTOR[p]) for p in range(len(UNIQUE_FACTOR))]
+            _f_desc = sorted(factors_val, reverse=True)
+            MAX_OUTER_PROD = [1] * (Num_Loops + 1)
+            for _i in range(1, Num_Loops + 1):
+                MAX_OUTER_PROD[_i] = MAX_OUTER_PROD[_i - 1] * _f_desc[_i - 1]
+            lg_OP = {i: quicksum(_lnf[p] * indic_loop2Factor[j, p]
+                                 for j in range(i) for p in range(len(UNIQUE_FACTOR)))
+                     for i in range(1, Num_Loops)}
+            OP_refetch = {}
+            for i in range(1, Num_Loops):
+                _opL, _opU = MIN_OUTER_PROD[i], MAX_OUTER_PROD[i]
+                OP_refetch[i] = model.addVar(lb=_opL, ub=_opU, vtype=GRB.CONTINUOUS,
+                                             name=f"OP_refetch_({i})")
+                _lg_lo, _lg_hi = math.log(_opL), math.log(_opU)
+                if _lg_hi <= _lg_lo + 1e-12:
+                    model.addConstr(OP_refetch[i] == _opL, name=f"C_OP_refetch_fix_({i})")
+                    continue
+                for k in range(_K_tan):
+                    _a = _lg_lo + (_lg_hi - _lg_lo) * k / (_K_tan - 1)
+                    _ea = math.exp(_a)
+                    model.addConstr(OP_refetch[i] >= _ea * (1.0 + lg_OP[i] - _a),
+                                    name=f"C_OP_refetch_tan_({i},{k})")
+            for op in _ref_ops:
+                op_name = ['I', 'W', 'O'][op]
+                coeff_rw = 2 if op == 2 else 1
+                _TrU = self.MAX_TRANS[op] + LAT_UNIT
+                _terms = [coeff_rw * latency_Transfer[0, op]]            # i=0: R[0]=1（空 product）
+                for i in range(1, Num_Loops):
+                    _opU = MAX_OUTER_PROD[i]
+                    Wref = model.addVar(lb=0, ub=_opU * _TrU, vtype=GRB.CONTINUOUS,
+                                        name=f"Wref_({i},{op_name})")
+                    model.addConstr(Wref >= MIN_OUTER_PROD[i] * latency_Transfer[i, op],
+                                    name=f"C_Wref_f1_({i},{op_name})")
+                    model.addConstr(Wref >= _opU * latency_Transfer[i, op]
+                                    + _TrU * OP_refetch[i] - _opU * _TrU,
+                                    name=f"C_Wref_f2_({i},{op_name})")
+                    _terms.append(coeff_rw * Wref)
+                model.addConstr(latency_Process[0, op] >= MIN_INNER_PROD[0] * t_MAC + quicksum(_terms),
+                                name=f"Cut_Refetch_Exact_({op_name})")
 
         # ─── L5-L6: MaxStartup & res_latency ───────────────────────────────────────────────────────────────────────
         # Bootstrap: 最外层loop不在DRAM时，需要一次性加载全部数据。
@@ -1470,9 +1613,53 @@ class Solver():
                     model.addConstr(_sum_trans >= _lb_c * indic_usedMem[m, op],
                                     name=f"Cut_TransFloor_const_({acc.mem2dict(m)},{op_name})")
 
+        # Finite, provably-valid upper bound on res_energy (companion to the
+        # res_latency bound above; both are needed for a finite EDP McCormick).
+        # res_energy = energy_expr_rw + energy_expr_comp + energy_expr_leakage at
+        # optimum; energy_expr_rw <= Sum of the per-memory energy var caps
+        # (energy_usedMem <= energy_perMem <= UB_energy_perMem, indic<=1),
+        # energy_expr_comp is constant, leakage <= leakage_per_cycle*SCALE*res_lat_ub.
+        # Holds for every feasible mapping -> never cuts a mapping -> sound.
+        if _bound_res:
+            # Loose-but-always-valid energy ub (holds for EVERY mapping, cutoff or not),
+            # so the cutoff-free feasibility prescreen stays feasible. The TIGHTER
+            # cutoff-derived bounds are applied later, right after C_metric_ub_EDP.
+            _ub_energy_rw = sum(UB_energy_perMem[m, op]
+                                for m in range(1, acc.Num_mem) for op in range(3)
+                                if acc.mappingArray[op][m] and (m, op) in UB_energy_perMem)
+            res_energy.ub = (_ub_energy_rw + energy_expr_comp
+                             + acc.leakage_per_cycle * CONST.SCALE_LATENCY * res_latency.ub)
         model.addConstr(res_energy >= energy_expr_rw + energy_expr_comp + energy_expr_leakage, name="C_Res_Energy_Summation")
         if CONST.FLAG_OPT == "EDP":
-            model.addConstr(res_EDP >= res_latency * res_energy * self.edp_scaling_factor, name="C_Res_EDP_Multiplication")
+            # Diagnostic (env-gated MIREDO_BILINEAR_PERFACTOR, default OFF -> production
+            # path unchanged): per-factor reconditioning of the bilinear EDP constraint.
+            # res_EDP >= esf*L*E is rewritten as res_EDP >= K*Lp*Ep with Lp=sL*L, Ep=sE*E
+            # chosen O(1), so the quadratic coefficient K=esf/(sL*sE) is O(1) instead of
+            # esf~1e-8. Mathematically IDENTICAL feasible region and res_EDP units; only
+            # the McCormick numerical conditioning changes. Tests whether the tiny-esf
+            # coefficient is what rubber-stamps gap=0 at arbitrary incumbents.
+            _pf = os.environ.get('MIREDO_BILINEAR_PERFACTOR', '').strip()
+            _pf_sc = getattr(self, '_pf_scales', None)
+            if _pf and _pf_sc:
+                sL, sE = _pf_sc
+                Lp = model.addVar(lb=0, ub=res_latency.ub * sL, vtype=GRB.CONTINUOUS, name="res_lat_pf")
+                Ep = model.addVar(lb=0, ub=res_energy.ub * sE, vtype=GRB.CONTINUOUS, name="res_eng_pf")
+                model.addConstr(Lp == sL * res_latency, name="C_pf_link_lat")
+                model.addConstr(Ep == sE * res_energy, name="C_pf_link_eng")
+                model.addConstr(res_EDP >= (self.edp_scaling_factor / (sL * sE)) * Lp * Ep,
+                                name="C_Res_EDP_Multiplication")
+            else:
+                model.addConstr(res_EDP >= res_latency * res_energy * self.edp_scaling_factor, name="C_Res_EDP_Multiplication")
+
+        # epsilon-constraint slice bounds (hyperbolic EDP certificate). Added
+        # before the feasibility prescreen so an empty slice returns status 3
+        # (= no mapping in this latency band), which the certificate reads as a
+        # cleared region. Independent of the active objective.
+        if self.latency_ub_cyc is not None:
+            model.addConstr(res_latency <= self.latency_ub_cyc / CONST.SCALE_LATENCY,
+                            name="C_eps_latency_ub")
+        if self.energy_ub_eps is not None:
+            model.addConstr(res_energy <= self.energy_ub_eps, name="C_eps_energy_ub")
 
         # Tighten metric_ub from cross-worker shared state (if available).
         self._refresh_metric_ub()
@@ -1496,7 +1683,17 @@ class Solver():
         # better scheme on some hard layers — §5.2 EDP suppression). Proven-
         # infeasible schemes still return in presolve (<1s, status=3) so the
         # higher cap only costs the small ambiguous set, bounded at 20s.
-        model.Params.MIPFocus = 1 
+        if self.latency_ub_cyc is not None or self.energy_ub_eps is not None:
+            # epsilon-constraint slice (hyperbolic EDP cert): a tight latency/
+            # energy band can need far more than 20s to land a first feasible
+            # point. A premature SolCount==0 early-return would yield no dual
+            # bound and stall the certificate, so give the prescreen the full
+            # budget here; a genuinely empty slice still returns status 3 fast.
+            model.Params.TimeLimit = max(20, CONST.TIMELIMIT)
+        _ps_tl = os.environ.get('MIREDO_PRESCREEN_TL', '').strip()
+        if _ps_tl:
+            model.Params.TimeLimit = float(_ps_tl)  # opt-in feasibility-prescreen budget override (cert diagnosis); unset => unchanged
+        model.Params.MIPFocus = 1
         model.update()
         self.profile.model_build_time_sec = time.time() - run_start_time
         self.profile.num_vars = model.NumVars
@@ -1548,6 +1745,23 @@ class Solver():
                     # raw * edp_scaling_factor / SCALE_LATENCY.
                     model.addConstr(res_EDP <= self.metric_ub * self.edp_scaling_factor / CONST.SCALE_LATENCY, name="C_metric_ub_EDP")
                     self.profile.metric_upper_bound_applied = True
+                    # Cutoff-derived bound tightening — sound ONLY together with the
+                    # cutoff just added, hence applied here (NOT during build, so the
+                    # cutoff-free feasibility prescreen is not wrongly restricted). Any
+                    # res_EDP<=metric_ub mapping has L*E<=metric_ub; the model enforces
+                    # E>=energy_expr_comp and L(model)>=MIN_INNER_PROD[0]*t_MAC, so
+                    # res_latency<=(metric_ub/SCALE)/E_floor, res_energy<=(metric_ub/SCALE)/L_floor
+                    # drop no counterexample (certificate stays sound) while removing the
+                    # huge-bound ill-conditioning of the bilinear res_EDP>=L*E.
+                    if getattr(FLAG, 'BOUND_RES_VARS', True):
+                        _mub_model = self.metric_ub / CONST.SCALE_LATENCY
+                        _Ef = energy_expr_comp if isinstance(energy_expr_comp, (int, float)) else None
+                        if _Ef and _Ef > 0:
+                            res_latency.ub = min(res_latency.ub, _mub_model / _Ef)
+                        _Lf = MIN_INNER_PROD[0] * t_MAC
+                        if _Lf > 0:
+                            res_energy.ub = min(res_energy.ub, _mub_model / _Lf)
+                        model.update()
             case _:
                 pass
 
@@ -1559,33 +1773,106 @@ class Solver():
 
         match CONST.FLAG_OPT:
             case "Latency":
-                model.setObjectiveN(res_latency, 0, priority=3, name='Latency')    
-                env0 = model.getMultiobjEnv(0)                                     
-                env0.setParam('TimeLimit', CONST.TIMELIMIT * 0.7)
-                env0.setParam('ImproveStartTime', CONST.TIMELIMIT * 0.7 * 0.3)
-                env0.setParam('MIPFocus', CONST.MIPFOCUS)
-                model.setObjectiveN(res_energy, 1, priority=2, reltol=0.0, abstol=0.0, name='Energy')
-                env1 = model.getMultiobjEnv(1)
-                env1.setParam('TimeLimit', CONST.TIMELIMIT * 0.3)
-                env1.setParam('MIPFocus', CONST.MIPFOCUS)
+                if getattr(FLAG, "CERT_SINGLE_OBJ", False):
+                    # Cert mode: single-objective latency. The energy tiebreak is
+                    # irrelevant to the latency lower bound, and multiobj makes
+                    # ObjBound/MIPGap UNRETRIEVABLE -- which is exactly the dual
+                    # bound the per-value-sequence EDP corner certificate consumes.
+                    # Single objective restores ObjBound and gives the full budget
+                    # to tightening the latency bound.
+                    model.setObjective(res_latency, GRB.MINIMIZE)
+                    model.setParam('TimeLimit', CONST.TIMELIMIT)
+                    model.setParam('ImproveStartTime', CONST.TIMELIMIT * 0.3)
+                    model.setParam('MIPFocus', CONST.MIPFOCUS)
+                else:
+                    model.setObjectiveN(res_latency, 0, priority=3, name='Latency')
+                    env0 = model.getMultiobjEnv(0)
+                    env0.setParam('TimeLimit', CONST.TIMELIMIT * 0.7)
+                    env0.setParam('ImproveStartTime', CONST.TIMELIMIT * 0.7 * 0.3)
+                    env0.setParam('MIPFocus', CONST.MIPFOCUS)
+                    model.setObjectiveN(res_energy, 1, priority=2, reltol=0.0, abstol=0.0, name='Energy')
+                    env1 = model.getMultiobjEnv(1)
+                    env1.setParam('TimeLimit', CONST.TIMELIMIT * 0.3)
+                    env1.setParam('MIPFocus', CONST.MIPFOCUS)
             case "Energy":
-                model.setObjectiveN(res_energy, 0, priority=3, name='Energy')    
-                env0 = model.getMultiobjEnv(0)                                     
-                env0.setParam('TimeLimit', CONST.TIMELIMIT * 0.7)
-                env0.setParam('ImproveStartTime', CONST.TIMELIMIT * 0.7 * 0.3)
-                env0.setParam('MIPFocus', CONST.MIPFOCUS)
-                model.setObjectiveN(res_latency, 1, priority=2, reltol=0.0, abstol=0.0, name='Latency')
-                env1 = model.getMultiobjEnv(1)
-                env1.setParam('TimeLimit', CONST.TIMELIMIT * 0.3)
-                env1.setParam('MIPFocus', CONST.MIPFOCUS)
+                if getattr(FLAG, "CERT_SINGLE_OBJ", False):
+                    # Cert mode: single-objective energy minimization. The latency
+                    # tiebreak is irrelevant to the energy optimum, so dropping it
+                    # gives the FULL TimeLimit to the energy bound (vs the 0.7/0.3
+                    # multiobj split) and yields a simpler model -> faster pruning.
+                    # Also makes ObjBound/MIPGap retrievable (unlike multiobj).
+                    model.setObjective(res_energy, GRB.MINIMIZE)
+                    model.setParam('TimeLimit', CONST.TIMELIMIT)
+                    model.setParam('ImproveStartTime', CONST.TIMELIMIT * 0.3)
+                    model.setParam('MIPFocus', CONST.MIPFOCUS)
+                    if getattr(FLAG, "CERT_FAST", False):
+                        # Certificate pruning is an INFEASIBILITY proof (eps-margin:
+                        # every branch is infeasible under the res_energy<=cutoff
+                        # constraint). Primal heuristics hunt for a feasible point that
+                        # does not exist -> pure waste; disable them and push cuts /
+                        # presolve to tighten the relaxation so the dual bound reaches
+                        # the cutoff (and proves infeasibility) sooner.
+                        model.setParam('Heuristics', 0.0)
+                        model.setParam('Cuts', 2)
+                        model.setParam('Presolve', 2)
+                else:
+                    model.setObjectiveN(res_energy, 0, priority=3, name='Energy')
+                    env0 = model.getMultiobjEnv(0)
+                    env0.setParam('TimeLimit', CONST.TIMELIMIT * 0.7)
+                    env0.setParam('ImproveStartTime', CONST.TIMELIMIT * 0.7 * 0.3)
+                    env0.setParam('MIPFocus', CONST.MIPFOCUS)
+                    model.setObjectiveN(res_latency, 1, priority=2, reltol=0.0, abstol=0.0, name='Latency')
+                    env1 = model.getMultiobjEnv(1)
+                    env1.setParam('TimeLimit', CONST.TIMELIMIT * 0.3)
+                    env1.setParam('MIPFocus', CONST.MIPFOCUS)
             case "EDP":
                 model.setObjective(res_EDP, GRB.MINIMIZE)
                 model.setParam('TimeLimit', CONST.TIMELIMIT)
                 model.setParam('ImproveStartTime', CONST.TIMELIMIT * 0.3)
                 model.setParam('MIPFocus', CONST.MIPFOCUS)
+                if getattr(FLAG, "CERT_FAST", False) and self.metric_ub is not None and self.metric_ub < CONST.MAX_POS * 0.5:
+                    # EDP discharge mode (res_EDP <= metric_ub cutoff): the certificate proves
+                    # INFEASIBILITY (no mapping beats the cutoff). Primal heuristics hunt for a
+                    # feasible point that does not exist -> pure waste; disable them and push
+                    # cuts/presolve to reach the cutoff (prove infeasible) sooner. MIPFocus=3
+                    # (prove bound) over the default. Mirrors the Energy CERT_FAST branch.
+                    model.setParam('Heuristics', 0.0)
+                    model.setParam('Cuts', 2)
+                    model.setParam('Presolve', 2)
+                    model.setParam('MIPFocus', 3)
             case _:
                 model.setObjective(0)
                 model.setParam("TimeLimit", CONST.TIMELIMIT * 0.1)
+
+        # ── Env-gated weighted-sum linear objective (cert: Lagrangian/tangent EDP LB) ──
+        # min(cL*L_raw + cE*E_raw), L_raw = SCALE_LATENCY*res_latency, E_raw = res_energy.
+        # Both LINEAR -> model.ObjBound is a SOUND lower bound on cL*L_raw+cE*E_raw at ANY
+        # termination (no bilinear res_EDP, no esf conditioner, no hard cap -> no prescreen
+        # cliff). Each (cL,cE) yields a valid cut cL*L+cE*E >= ObjBound; the intersection of
+        # several such tangent cuts to the LE=INC hyperbola lower-bounds min(L*E) far tighter
+        # than the decomp corner L_lb*E_lb (which is only the cL->0 / cL->inf degenerate end).
+        # Production default: env unset -> native single/multi-objective path unchanged.
+        _wobj = os.environ.get('MIREDO_WEIGHTED_OBJ', '').strip()
+        if _wobj and CONST.FLAG_OPT in ('Energy', 'Latency'):
+            _cL, _cE = (float(_x) for _x in _wobj.split(','))
+            model.setObjective(_cL * CONST.SCALE_LATENCY * res_latency + _cE * res_energy, GRB.MINIMIZE)
+            model.setParam('TimeLimit', CONST.TIMELIMIT)
+            model.setParam('ImproveStartTime', CONST.TIMELIMIT * 0.3)
+            model.setParam('MIPFocus', CONST.MIPFOCUS)
+            model.update()
+
+        # ── Env-gated inner-first branch priority (cert): branch the INNER loop-position
+        # assignments first so the nested-product latency (Process[i]=F(i)*(base+Process[i+1]))
+        # tightens early -- the same lever the inner-ordering B&B exploits, but kept inside ONE
+        # monolithic solve. Default-branch leaves the ordering fractional -> latency dual frozen
+        # at the compute roofline; inner-first branching lets EDP<=INC prove INFEASIBLE in one
+        # solve. Priority = loop position index i (inner = high i = branched first).
+        # Production default: env unset -> Gurobi default branching unchanged.
+        if os.environ.get('MIREDO_INNER_PRIORITY', '').strip():
+            for _key, _var in indic_factor2Loop.items():
+                if isinstance(_var, gp.Var):
+                    _var.BranchPriority = int(_key[2])
+            model.update()
         ####################################################################  Optimization    #######################################################################
 
         # FLAG.LOAD_SOLUTION = 1
@@ -1638,6 +1925,55 @@ class Solver():
                             self.profile.callback_dynamic_terminations += 1
                             model.terminate()
 
+        # ── EDP warm-start ────────────────────────────────────────────────
+        # The EDP objective min res_EDP s.t. res_EDP >= res_latency*res_energy
+        # is non-convex (bilinear); within the time budget the solver otherwise
+        # stalls at a garbage heuristic incumbent (diagnosed: on a fixed spatial
+        # scheme the EDP solve returned EDP ~1000x the achievable optimum that
+        # the linear Latency/Energy solves find on the SAME scheme). Seed it from
+        # cheap linear proxies: solve latency-min and energy-min, keep whichever
+        # feasible mapping has the lower raw EDP, and inject it as the MIP start.
+        # The EDP minimization then begins from a good incumbent and can only
+        # improve, so the returned EDP <= min(latency-opt, energy-opt) EDP for the
+        # scheme — eliminating the dominated "EDP-opt worse on both axes" result.
+        # Guarded by FLAG.EDP_WARMSTART (default on) for A/B and rollback.
+        if CONST.FLAG_OPT == "EDP" and getattr(FLAG, "EDP_WARMSTART", True):
+            _ws_each = 0.15         # 2 proxy solves @15% each, EDP gets ~70%
+            _best_start = None
+            _best_raw_edp = float("inf")
+            for _proxy in (res_latency, res_energy):
+                model.setObjective(_proxy, GRB.MINIMIZE)
+                model.setParam('TimeLimit', max(5.0, CONST.TIMELIMIT * _ws_each))
+                model.setParam('MIPFocus', 1)
+                model.update()
+                model.optimize()
+                if model.SolCount > 0:
+                    _raw_edp = float(res_latency.X) * float(res_energy.X)
+                    if _raw_edp < _best_raw_edp:
+                        _best_raw_edp = _raw_edp
+                        # Snapshot ONLY the discrete decision vars. Pinning the
+                        # continuous res_* vars too makes Gurobi reject the MIP
+                        # start as inconsistent, so the EDP solve was not actually
+                        # bounded by the seed; integer-only starts are accepted and
+                        # Gurobi derives the continuous vars from them.
+                        _best_start = {_v: _v.X for _v in model.getVars()
+                                       if _v.VType in (GRB.BINARY, GRB.INTEGER)}
+            if _best_start is not None:
+                for _v, _val in _best_start.items():
+                    try:
+                        _v.Start = _val
+                    except Exception:
+                        pass
+                Logger.critical(f"EDP warm-start: seeded MIP start from best linear proxy "
+                                f"(raw EDP={_best_raw_edp:.3e}, {len(_best_start)} int vars)")
+            else:
+                Logger.warning("EDP warm-start: no proxy incumbent found; proceeding cold")
+            model.setObjective(res_EDP, GRB.MINIMIZE)
+            model.setParam('TimeLimit', max(5.0, CONST.TIMELIMIT * (1 - 2 * _ws_each)))
+            model.setParam('ImproveStartTime', CONST.TIMELIMIT * (1 - 2 * _ws_each) * 0.3)
+            model.setParam('MIPFocus', CONST.MIPFOCUS)
+            model.update()
+
         start_time = time.time()
         model.optimize(_cb)
         end_time = time.time()
@@ -1661,6 +1997,22 @@ class Solver():
             self.profile.best_bound = _ob
         except Exception:
             self.profile.best_bound = None
+
+        # Opt-in per-scheme cert log (MIREDO_SCHEME_LOG=path): status, MIPGap, dual
+        # bound (raw EDP), incumbent (raw EDP), SolCount, dir — written AFTER the main
+        # solve so it carries the final bound. Env-gated; native behavior unchanged.
+        _scheme_log = os.environ.get("MIREDO_SCHEME_LOG", "").strip()
+        if _scheme_log:
+            try:
+                _inc_raw = None
+                if int(model.SolCount) > 0:
+                    _ov = float(model.ObjVal)
+                    _inc_raw = (_ov * CONST.SCALE_LATENCY / self.edp_scaling_factor) if CONST.FLAG_OPT == "EDP" else _ov
+                with open(_scheme_log, "a") as _fh:
+                    _fh.write(f"{int(model.Status)}\t{self.profile.mip_gap}\t"
+                              f"{self.profile.best_bound}\t{_inc_raw}\t{int(model.SolCount)}\t{self.outputdir}\n")
+            except Exception:
+                pass
 
         ####################################################################  Debug & Output  #######################################################################
 

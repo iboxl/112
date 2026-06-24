@@ -236,6 +236,8 @@ def run_one(target):
     t0 = time.time()
     bf_edp = None
     mip_simu_edp = None
+    mip_gap_lat = mip_gap_edp = None
+    mip_objval_lat = mip_objval_edp = None
     try:
         # run_verify writes its own EXP-6 file; we extract numbers from return value.
         # 2026-05-16: extended to dual-objective cert (Latency + EDP) per §5.3.3 +
@@ -251,9 +253,17 @@ def run_one(target):
         mip_simu_lat = verify_result['mip_per_objective']['Latency']['mip_simu_lat']
         bf_edp = verify_result['bruteforce_best_edp']
         edp_mip = verify_result['mip_per_objective'].get('EDP', {})
+        lat_mip = verify_result['mip_per_objective'].get('Latency', {})
         edp_lat = edp_mip.get('mip_simu_lat')
         edp_energy = edp_mip.get('mip_simu_energy')
         mip_simu_edp = (edp_lat * edp_energy) if (edp_lat is not None and edp_energy is not None) else None
+        # Surface the MIP's OWN optimality signal (previously dropped): the EDP
+        # MIQP closes to MIPGap, whereas latency keeps an open McCormick relaxation
+        # gap. mip_gap is a fraction (0.0 == solver proved the analytical optimum).
+        mip_gap_lat = lat_mip.get('mip_gap')
+        mip_gap_edp = edp_mip.get('mip_gap')
+        mip_objval_lat = lat_mip.get('mip_obj_val')
+        mip_objval_edp = edp_mip.get('mip_obj_val')
     except KeyError as e:
         # Trivial-spatial case where active_dims=[] returns a sparse stats dict.
         # Fallback: explicitly handle as "single mapping" — bf_lat == mip_lat trivially.
@@ -316,8 +326,18 @@ def run_one(target):
             and bf_edp > 0 and bf_edp < float("inf")):
         gap_pct_edp = (mip_simu_edp - bf_edp) / bf_edp * 100
 
+    # CAUTION: gap_pct / gap_pct_edp are the SIMULATOR regret (MIP's analytical
+    # pick vs the brute-force simulator argmin) -> model FIDELITY, not MIP
+    # optimality. is_optimal[_edp] therefore means "analytical pick matches the
+    # simulator argmin", NOT "the MIP reached its optimum". The MIP's own
+    # optimality is reported separately via mip_gap_pct_* / mip_proven_optimal_edp.
     is_optimal_lat = (gap_pct is not None and abs(gap_pct) < 0.01)
     is_optimal_edp = (gap_pct_edp is not None and abs(gap_pct_edp) < 0.01)
+    # A target with no feasible mapping (brute force returns inf, MIP infeasible)
+    # is degenerate: it neither confirms nor refutes optimality and must be
+    # excluded from the optimal/total counts.
+    degenerate = (bf_lat is None) or (bf_lat == float("inf"))
+    mip_proven_optimal_edp = (mip_gap_edp is not None and abs(mip_gap_edp) < 1e-4)
 
     res = {
         "name": name,
@@ -326,6 +346,7 @@ def run_one(target):
         "scheme": scheme,
         "spatial_unrolling": spatial,
         "temporal_unrolling": tu,
+        "degenerate": degenerate,
         "bruteforce_optimal_latency": bf_lat,
         "mip_simulator_latency": mip_simu_lat,
         "optimality_gap_pct": gap_pct,
@@ -334,6 +355,15 @@ def run_one(target):
         "mip_simulator_edp": mip_simu_edp,
         "optimality_gap_pct_edp": gap_pct_edp,
         "is_optimal_edp": is_optimal_edp,
+        # Explicit aliases: the *_gap above is fidelity (sim regret), the mip_gap
+        # below is the MIP's own proven-optimality gap.
+        "sim_fidelity_gap_pct": gap_pct,
+        "sim_fidelity_gap_pct_edp": gap_pct_edp,
+        "mip_gap_pct_lat": (mip_gap_lat * 100 if mip_gap_lat is not None else None),
+        "mip_gap_pct_edp": (mip_gap_edp * 100 if mip_gap_edp is not None else None),
+        "mip_obj_val_lat": mip_objval_lat,
+        "mip_obj_val_edp": mip_objval_edp,
+        "mip_proven_optimal_edp": mip_proven_optimal_edp,
         "wall_seconds": round(elapsed, 2),
     }
     print(f"  bf_optimal_lat={bf_lat}", flush=True)
@@ -388,7 +418,15 @@ def main():
                 "summary": {
                     "total_targets": len(TARGETS),
                     "completed": len(all_results),
+                    # n_optimal/is_optimal = analytical pick matches simulator
+                    # argmin (model FIDELITY). True MIP optimality is counted by
+                    # n_mip_proven_optimal_edp. Degenerate (infeasible) targets are
+                    # broken out so they no longer masquerade as "non-optimal".
                     "n_optimal": sum(1 for r in all_results if r.get("is_optimal")),
+                    "n_degenerate": sum(1 for r in all_results if r.get("degenerate")),
+                    "n_verifiable": sum(1 for r in all_results if not r.get("degenerate")),
+                    "n_mip_proven_optimal_edp": sum(1 for r in all_results if r.get("mip_proven_optimal_edp")),
+                    "n_edp_matches_sim": sum(1 for r in all_results if r.get("is_optimal_edp")),
                 },
             },
             anomalies=[],

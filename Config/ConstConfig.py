@@ -88,6 +88,8 @@ class _constraint_flag_config():
 
         self.ABLATION_FIXED_DOUBLE_BUFFER = False       # 消融：禁用双缓冲决策（强制全部单缓冲）
 
+        self.ABLATION_FORCE_DOUBLE_BUFFER = False       # 消融：强制双缓冲（在硬件/config允许处 beta=used，Reg等不支持处仍为单缓冲）
+
         self.ABLATION_SIMPLIFIED_PIPELINE = False       # 消融：移除流水线重叠建模（传输与计算永远串行）
 
         self.ABLATION_PSUM_CAPACITY_ONLY = False    # 消融：移除partial-sum容量耦合（保留精度翻转语义）

@@ -1,5 +1,5 @@
 # Evaluation/RunTopKBudget.py
-# topk_budget: Top-K x per-candidate budget trade-off grid on case layers L1-L4
+# topk_budget: Top-K x per-candidate budget trade-off grid on case layers L1-L5
 #
 # For each (layer, budget, K) cell: run MIREDO with objective="Latency",
 # time_limit=budget, ablation_flags={"ACCEL_TOP_K": K} (None if K="all").
@@ -72,10 +72,10 @@ def _relative_loss(val, baseline):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="topk_budget: top-K x budget trade-off grid on case layers L1-L4"
+        description="topk_budget: top-K x budget trade-off grid on case layers L1-L5"
     )
     parser.add_argument(
-        "--layer-ids", nargs="+", default=["L1", "L2", "L3", "L4"],
+        "--layer-ids", nargs="+", default=["L1", "L2", "L3", "L4", "L5"],
         help="Layer IDs to run",
     )
     parser.add_argument(

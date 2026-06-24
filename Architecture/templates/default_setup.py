@@ -7,7 +7,7 @@
 #   - Input_buffer:  8 KB per core
 #   - Output_buffer: 16 KB per core  (2x IBuf: 8b activation in / 16b psum out
 #                                     width asymmetry)
-#   - Dram BW:       128 bit/cycle   (LPDDR4-class single channel)
+#   - Dram BW:       64 bit/cycle    (LPDDR4-class single channel)
 #   Presented as one point on the §5.5.1 buffer / DRAM-BW sensitivity curve
 #   (not cherry-picked); framed honestly: dataflow-optimization value scales
 #   with memory pressure. This is the LAST hardware change — frozen regardless
@@ -33,7 +33,7 @@ def _build_default_setup_spec_dict() -> dict:
     spec = copy.deepcopy(_DEFAULT_SPEC_DICT)
 
     overrides = {
-        "Dram":          {"r_bw_bits_per_cycle": 128, "w_bw_bits_per_cycle": 128},
+        "Dram":          {"r_bw_bits_per_cycle": 64, "w_bw_bits_per_cycle": 64},
         "Input_buffer":  {"size_bits": 8 * 1024 * 8,   "r_bw_bits_per_cycle": 128, "w_bw_bits_per_cycle": 128},
         "Output_buffer": {"size_bits": 16 * 1024 * 8,  "r_bw_bits_per_cycle": 128, "w_bw_bits_per_cycle": 128},
     }
@@ -45,7 +45,7 @@ def _build_default_setup_spec_dict() -> dict:
     spec["metadata"]["notes"] = (
         "CIM_ACC_DEFAULT_SETUP (frozen 2026-05-18): 8-core digital SRAM CIM, 28nm, "
         "I=W=8b psum=16b, 32x16x8 macro, 256 KB GBuf, 8 KB IBuf / 16 KB OBuf per core, "
-        "1 GB DRAM @128 bit/cyc (LPDDR4-class single channel)."
+        "1 GB DRAM @64 bit/cyc (LPDDR4-class single channel)."
     )
     return spec
 

@@ -101,6 +101,19 @@ def solve_scheme_worker(count:int, origin_index:int, scheme, acc:CIM_Acc, ops:Wo
             "solver_profile": None,
         }
 
+    # PROD_CAPS (env-gated, default OFF): fold sound roofline caps into the production
+    # EDP solve. cap = current shared incumbent (raw EDP); caps = cap/floor exclude NO
+    # improving mapping (EDP<cap => L<cap/E_floor and E<cap/L_floor). Engages only once
+    # an incumbent exists, so cold schemes run exactly as native production. PROD_CAPMULT>=1
+    # keeps it sound. Reuses the audited C_eps_*_ub path + full-budget feasibility prescreen.
+    _prod_lat_cap = _prod_eng_cap = None
+    if os.environ.get('PROD_CAPS', '0') == '1' and CONST.FLAG_OPT == 'EDP' \
+            and shared_ub is not None and shared_ub.value < CONST.MAX_POS \
+            and lat_lb and eng_lb and lat_lb > 0 and eng_lb > 0:
+        _cap = float(shared_ub.value) * float(os.environ.get('PROD_CAPMULT', '1.0'))
+        _prod_lat_cap = _cap / eng_lb
+        _prod_eng_cap = _cap / lat_lb
+
     solver = Solver(
         acc=acc,
         ops=ops,
@@ -112,6 +125,8 @@ def solve_scheme_worker(count:int, origin_index:int, scheme, acc:CIM_Acc, ops:Wo
         soft_mem_limit_gb=soft_mem_limit_gb,
         shared_ub=shared_ub,
         env=_worker_env,
+        latency_ub_cyc=_prod_lat_cap,
+        energy_ub=_prod_eng_cap,
     )
 
     sim_l, sim_e, profile = CONST.MAX_POS, CONST.MAX_POS, None

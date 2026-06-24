@@ -34,6 +34,28 @@ CASE_LAYERS_DETAILS = [
     },
     {
         "id": "L2",
+        "label": "Standard 3x3 large-channel conv",
+        "source": "VGG19BN Conv_9",
+        "mechanism_role": "Weight-heavy large-channel standard conv (512^2 @28). "
+                          "Weight volume >> macro capacity, so weight-reload "
+                          "overlap (beta^M) dominates; hardest MINLP / "
+                          "budget-bound layer.",
+        "loopdim": {
+            "R": 3, "S": 3, "P": 28, "Q": 28,
+            "C": 512, "K": 512, "G": 1, "B": 1,
+            "H": 28, "W": 28, "Stride": 1, "Padding": 1,
+        },
+        # Tensor sizes assume 8-bit I/W/O; KB = bytes / 1024
+        "signature": {
+            "weight_KB": 2304.0,   # 512·512·9 / 1024
+            "input_KB": 392.0,     # 512·28·28 / 1024
+            "output_KB": 392.0,    # 512·28·28 / 1024
+            "mac_M": 1849.69,      # 512·512·9·784 / 1e6
+            "dominant_operand": "weight-heavy, large-channel",
+        },
+    },
+    {
+        "id": "L3",
         "label": "Pointwise 1x1 deep",
         "source": "ResNet-18 Conv_17",
         "mechanism_role": "Weight-heavy, minimal spatial reuse, prime spatial "
@@ -53,7 +75,7 @@ CASE_LAYERS_DETAILS = [
         },
     },
     {
-        "id": "L3",
+        "id": "L4",
         "label": "Depthwise 3x3",
         "source": "MobileNet-v2 depthwise C-K-G-144",
         "mechanism_role": "G=C breaks weight reuse across groups; per-group "
@@ -73,7 +95,7 @@ CASE_LAYERS_DETAILS = [
         },
     },
     {
-        "id": "L4",
+        "id": "L5",
         "label": "Imbalanced 1x1 expansion",
         "source": "EfficientNet-B0 MBConv expansion C-80 K-480",
         "mechanism_role": "Channel-asymmetric, small spatial. Identified in "

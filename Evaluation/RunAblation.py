@@ -41,7 +41,10 @@ def _empty_total():
 def _accumulate(total, latency, energy):
     total["total_latency"] += latency
     total["total_energy"] += energy
-    total["total_edp"] += latency * energy
+    # Whole-model EDP = (total latency) x (total energy), not the per-layer sum;
+    # recomputed from the running totals so it is the product of the finals
+    # after the last accumulate call. MIREDO still optimizes per-layer EDP.
+    total["total_edp"] = total["total_latency"] * total["total_energy"]
 
 
 def _degradation_vs_full(result_total, full_total):
@@ -78,23 +81,28 @@ def main():
 
     ablation_results = []
     anomalies = []
-    full_totals_by_model = {}
+    # Per-(model, layer) full-MIREDO baseline, keyed PER LAYER and never summed
+    # to a model row. A --layers selection may pick several non-contiguous case
+    # layers from one model (e.g. two ResNet case layers); accumulating them into
+    # one "model" total reports a synthetic network that does not exist and hides
+    # each case layer's individual degradation. Always emit one row per layer.
+    full_by_layer = {}
 
     for model_name in args.models:
         model_layers = select_model_layers(
             model_name, layer_selectors=args.layers, max_layers=args.maxLayers,
         )
 
-        totals_by_objective = {}
+        for layer in model_layers:
+            layer_key = (model_name, layer["layer"])
+            totals_by_objective = {}
 
-        for objective in args.objectives:
-            totals = _empty_total()
-
-            for layer in model_layers:
+            for objective in args.objectives:
                 loopdim = copy.deepcopy(layer["loopdim"])
                 layer_dir = output_dir / objective / model_name / layer["layer"]
                 prepare_save_dir(str(layer_dir))
 
+                totals = _empty_total()
                 try:
                     miredo = run_miredo_layer(
                         acc=make_accelerator(args.architecture),
@@ -119,20 +127,21 @@ def main():
                         "message": str(exc),
                     })
 
-            totals_by_objective[objective] = totals
+                totals_by_objective[objective] = totals
 
-        full_total = totals_by_objective["Latency"]
-        full_totals_by_model[model_name] = full_total
-        for objective in args.objectives:
-            totals = totals_by_objective[objective]
-            ablation_results.append({
-                "variant": VARIANT_LABELS[objective],
-                "model": model_name,
-                "total_latency": totals["total_latency"],
-                "total_energy": totals["total_energy"],
-                "total_edp": totals["total_edp"],
-                "degradation_vs_full": _degradation_vs_full(totals, full_total),
-            })
+            full_total = totals_by_objective["Latency"]
+            full_by_layer[layer_key] = full_total
+            for objective in args.objectives:
+                totals = totals_by_objective[objective]
+                ablation_results.append({
+                    "variant": VARIANT_LABELS[objective],
+                    "model": model_name,
+                    "layer": layer["layer"],
+                    "latency": totals["total_latency"],
+                    "energy": totals["total_energy"],
+                    "edp": totals["total_edp"],
+                    "degradation_vs_full": _degradation_vs_full(totals, full_total),
+                })
 
     # ── Structural ablation variants ──────────────────────────────────
     if args.structural:
@@ -143,11 +152,11 @@ def main():
                     model_name, layer_selectors=args.layers, max_layers=args.maxLayers,
                 )
 
-                totals = _empty_total()
                 for layer in model_layers:
                     loopdim = copy.deepcopy(layer["loopdim"])
                     layer_dir = output_dir / variant_name / model_name / layer["layer"]
                     prepare_save_dir(str(layer_dir))
+                    totals = _empty_total()
                     try:
                         miredo = run_miredo_layer(
                             acc=make_accelerator(args.architecture),
@@ -169,15 +178,16 @@ def main():
                             "message": str(exc),
                         })
 
-                full_total = full_totals_by_model.get(model_name, _empty_total())
-                ablation_results.append({
-                    "variant": variant_name,
-                    "model": model_name,
-                    "total_latency": totals["total_latency"],
-                    "total_energy": totals["total_energy"],
-                    "total_edp": totals["total_edp"],
-                    "degradation_vs_full": _degradation_vs_full(totals, full_total),
-                })
+                    full_total = full_by_layer.get((model_name, layer["layer"]), _empty_total())
+                    ablation_results.append({
+                        "variant": variant_name,
+                        "model": model_name,
+                        "layer": layer["layer"],
+                        "latency": totals["total_latency"],
+                        "energy": totals["total_energy"],
+                        "edp": totals["total_edp"],
+                        "degradation_vs_full": _degradation_vs_full(totals, full_total),
+                    })
 
     acc = make_accelerator(args.architecture)
     json_path = save_experiment_json(

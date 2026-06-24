@@ -1,5 +1,5 @@
 # Evaluation/RunBaselineWallTime.py
-# baseline_walltime: Per-layer solver wall-time across all baselines on MIREDO case layers L1-L4
+# baseline_walltime: Per-layer solver wall-time across all baselines on MIREDO case layers L1-L5
 import argparse
 import copy
 import datetime
@@ -266,9 +266,9 @@ def time_miredo(layer_spec, output_dir, time_limit, mip_focus):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="baseline_walltime: Per-layer solver wall-time across all baselines on L1-L4"
+        description="baseline_walltime: Per-layer solver wall-time across all baselines on L1-L5"
     )
-    parser.add_argument("--layer-ids", nargs="+", default=["L1", "L2", "L3", "L4"])
+    parser.add_argument("--layer-ids", nargs="+", default=["L1", "L2", "L3", "L4", "L5"])
     parser.add_argument(
         "--methods", nargs="+",
         default=["ws", "zigzag", "cimloop", "cosa", "cosa_legal", "miredo"],
@@ -363,7 +363,7 @@ def main():
         header = f"{'Layer':6s}  {'WS':>10s}  {'ZigZag':>10s}  {'CIMLoop':>10s}  {'CoSA':>10s}  {'CoSA-c':>10s}  {'MIREDO':>10s}"
         print(header, flush=True)
         print("-" * len(header), flush=True)
-        for lid in ["L1", "L2", "L3", "L4"]:
+        for lid in args.layer_ids:
             if lid not in by_layer:
                 continue
             layer_rows = by_layer[lid]

@@ -6,15 +6,19 @@
 #
 # 克制原则：
 # - M → K 命名翻译、X/Y/Z/N precision+batch 维度直接丢弃；
-# - CIMLoop mapper 不暴露 double-buffer 决策 → double_buffer_flag = 全 False，
-#   不发明 MIREDO-favorable 的默认值；macro-level double buffer 由 downstream
-#   `loops.usr_defined_double_flag[acc.Macro2mem][1] = acc.double_Macro` 施加
-#   （与 ZigZag 路径一致，属于硬件属性而非 mapping 决策）；
+# - CIMLoop mapper 不暴露 per-operand double-buffer 决策；但 Timeloop 的延迟模型
+#   跨层取 max（topology.cpp Topology::ComputeStats），等价于假设每层搬运都与计算
+#   overlap，即所有层默认双缓冲。因此忠实 replay 用其原生假设：在硬件可双缓冲的层
+#   （acc.double_config，已排除 1-元素 IReg/OReg 寄存器与 CIM 权重阵列）全开双缓冲，
+#   再按真实容量裁剪（project_replay_safe_double_flag）。见 _apply_native_double_buffer。
+#   旧实现一律 False（全单缓冲）违背 Timeloop 自身模型、使 CiMLoop replay 延迟偏苛。
+#   设 CIMLOOP_SINGLE_BUFFER_REPLAY=1 可复现旧单缓冲行为（ablation/对照用）。
 # - top_r_loop_size 是 ZigZag 特有的假设化浮窗，CIMLoop 没有对应语义，设为 None。
 
 from __future__ import annotations
 
 import copy
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -23,7 +27,10 @@ import yaml
 
 from utils.ClassMapping import ClassMapping
 from utils.Workload import LoopNest
-from Evaluation.Zigzag_imc.CompatibleZigzag import convert_baseMapping_to_MIREDO
+from Evaluation.Zigzag_imc.CompatibleZigzag import (
+    convert_baseMapping_to_MIREDO,
+    project_replay_safe_double_flag,
+)
 from Evaluation.CIMLoop.cimloop_adapter import CIMLoopLayerOutput
 
 
@@ -274,6 +281,36 @@ def baseMapping_from_cimloop_output(out: CIMLoopLayerOutput) -> ClassMapping:
     )
 
 
+def _apply_native_double_buffer(loops: LoopNest) -> None:
+    """Replay CiMLoop under Timeloop's native timing assumption.
+
+    Timeloop computes latency as a max() across all hierarchy levels
+    (topology.cpp ``Topology::ComputeStats``); it therefore assumes every
+    level's data movement overlaps computation in steady state, i.e. every level
+    is double-buffered. CiMLoop's mapper emits no per-operand buffering decision,
+    so the faithful replay is its native assumption: enable double-buffering on
+    every level the hardware can actually double-buffer (``acc.double_config``,
+    which already excludes the 1-element IReg/OReg registers and the CIM weight
+    array), then legalize to real per-level capacity
+    (``project_replay_safe_double_flag`` strips any double buffer whose two tiles
+    do not fit ``acc.memSize``).
+
+    The prior implementation left all flags False (full single-buffering), which
+    contradicts Timeloop's own model and made CiMLoop's replayed latency unfairly
+    pessimistic. Set ``CIMLOOP_SINGLE_BUFFER_REPLAY=1`` to restore that legacy
+    behavior for ablation / reproducibility.
+    """
+    if os.environ.get("CIMLOOP_SINGLE_BUFFER_REPLAY"):
+        return
+    acc = loops.acc
+    nrows = len(loops.usr_defined_double_flag)
+    flag = [[0, 0, 0] for _ in range(nrows)]
+    for m in range(1, min(nrows, acc.Num_mem)):
+        for op in range(3):
+            flag[m][op] = int(acc.double_config[m][op])
+    loops.usr_defined_double_flag = project_replay_safe_double_flag(loops, flag)
+
+
 def convert_CIMLoop_to_MIREDO(loops: LoopNest, out: CIMLoopLayerOutput,
                               spec=None, loopdim=None):
     """Convert a CIMLoop mapping to a MIREDO LoopNest.
@@ -296,6 +333,9 @@ def convert_CIMLoop_to_MIREDO(loops: LoopNest, out: CIMLoopLayerOutput,
             "capacity_demoted": capacity_demoted,
         }
         loops = convert_baseMapping_to_MIREDO(loops=loops, baseMapping=baseMapping)
+        _apply_native_double_buffer(loops)
         return loops, legalization_meta
 
-    return convert_baseMapping_to_MIREDO(loops=loops, baseMapping=baseMapping)
+    loops = convert_baseMapping_to_MIREDO(loops=loops, baseMapping=baseMapping)
+    _apply_native_double_buffer(loops)
+    return loops
